@@ -64,7 +64,6 @@ const LINGERER = fileURLToPath(new URL("./fixtures/real-pi/lingerer.ts", import.
 
 /** An orchestrator pane whose runs are RPC children, which load the faux provider, and `extensions`, as the pane does. */
 async function startOrchestrator(extensions: string[] = []): Promise<RealPi> {
-	vi.stubEnv("BLUCLAWD_RPC_RUNS", "1");
 	vi.stubEnv("BLUCLAWD_RPC_PROVIDER_EXTENSIONS", [FAUX, ...extensions].join(":"));
 	return startRealPi();
 }

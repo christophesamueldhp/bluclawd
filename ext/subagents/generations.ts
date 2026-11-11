@@ -54,7 +54,7 @@ export interface GenerationDeps {
 	onChange: () => void;
 	/** Where the Reports of runs arrive. */
 	reports: RunReports;
-	/** The tmux server runs start in, as it is when a run starts. */
+	/** The tmux server runs in tmux from before runs ran on pi's RPC are in. */
 	tmux: () => TmuxRunDeps["tmux"];
 	/** Sends a message to another session through the daemon. */
 	send: (pane: string, message: SessionMessage) => Promise<void>;
@@ -237,16 +237,13 @@ export function createGenerations(deps: GenerationDeps) {
 					deps.bus.unregister(runId, "has been closed");
 				}
 			}
-			// A run taken over, after a reload or a crash, was recorded when it launched.
-			if (!params.record.generation && !execCtx.launch.pane) recordLaunch(params.record);
-			const { parent } = execCtx.launch;
+			// A run in tmux, from before runs ran on pi's RPC, taken over: it was recorded when it launched.
+			const { parent, pane } = execCtx.launch;
 			// The orchestrator's messages reach the run's pi through the daemon, as a message from another session.
 			deps.bus.register(runId, {
 				scope: { parentSessionId: params.record.parentSessionId, sessionEpoch: params.record.sessionEpoch },
 				deliver: async (message) => {
 					if (message.from !== PARENT_MESSAGE_ADDRESS) throw new Error("type to it in its own session");
-					const pane = scheduler.getRun(runId)?.pane;
-					if (!pane) throw new Error("its pi has not started");
 					await sendToRun(deps.send, pane, {
 						type: "session_message",
 						kind: "message",
@@ -258,15 +255,13 @@ export function createGenerations(deps: GenerationDeps) {
 			});
 			// Taken over, perhaps from a pane that is gone: the run is told where to report from now on. Should it not
 			// hear, its Reports are read from disk once its pane ends.
-			if (execCtx.launch.pane) {
-				const adopt: SessionMessage = {
-					type: "session_message",
-					kind: "adopt",
-					from: parent,
-					sessionId: params.record.parentSessionId,
-				};
-				sendToRun(deps.send, execCtx.launch.pane, adopt).catch(() => {});
-			}
+			const adopt: SessionMessage = {
+				type: "session_message",
+				kind: "adopt",
+				from: parent,
+				sessionId: params.record.parentSessionId,
+			};
+			sendToRun(deps.send, pane, adopt).catch(() => {});
 			try {
 				return await executeTmuxRun(params, execCtx.launch, {
 					tmux: deps.tmux(),

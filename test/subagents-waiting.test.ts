@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fauxAssistantMessage, fauxToolCall, getCurrentTools, type TranscriptContext } from "@earendil-works/pi-ai";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { createParentSessionWithSubagents } from "./helpers/subagent-session.ts";
 import { createSubagentTui, launch, type SubagentTui } from "./helpers/subagent-tui.ts";
 import { waitFor } from "./helpers/wait-for.ts";
@@ -54,16 +54,15 @@ describe("The orchestrator's Waiting", () => {
 			expect(description).toContain(
 				"Never predict or invent a pending run's result; if the user asks, say it is still running",
 			);
-			expect(description).toContain(
-				"A run stays open after it reports, and nothing closes it for you: once its work is done, close it with `subagent_close`. At most 8 runs stay open; `subagent_message` resumes a closed one.",
-			);
+			expect(description).toContain("A run's process ends by itself once it reports: there is nothing to close.");
+			expect(description).toContain("only `subagent_resume` continues a finished or stopped run");
+			expect(description).not.toContain("subagent_close");
 		} finally {
 			session.dispose();
 		}
 	});
 
-	it("on pi's RPC, keeps delegation selective and points the model at batches, chains, Integration and Checks", async () => {
-		vi.stubEnv("BLUCLAWD_RPC_RUNS", "1");
+	it("keeps delegation selective and points the model at batches, chains, Integration and Checks", async () => {
 		const { session, faux } = await createParentSessionWithSubagents({
 			cwd: makeTempDir("selective-cwd"),
 			agentDir: makeTempDir("selective-agent"),
@@ -92,10 +91,9 @@ describe("The orchestrator's Waiting", () => {
 			expect(description).toContain("Do not paste the conversation or large file contents");
 			expect(description).toContain("Do not redo or touch delegated work");
 			expect(description).toContain("Progress from a run does not wake you");
-			// What holds only for tmux runs is not said of RPC runs.
+			// What held only for runs in tmux, in the shared checkout, is not said any more.
 			expect(description).not.toContain("last write wins");
 			expect(description).not.toContain("Tightly coupled sequential steps");
-			expect(description).not.toContain("subagent_close");
 		} finally {
 			session.dispose();
 		}
@@ -144,8 +142,7 @@ describe("The orchestrator's Waiting", () => {
 			},
 		]);
 		await prompt(t, "Inspect the repo in the background.");
-		// As its pi does when it settles: idle first, then its Report, which wakes the orchestrator.
-		t.activity("explorer-1", "idle");
+		// Its Report, once its work settled, wakes the orchestrator.
 		t.report("explorer-1", "Nothing to report.");
 		await waitFor(() => reminders.length === 3);
 		await t.session.waitForIdle();
@@ -198,28 +195,11 @@ describe("The orchestrator's Waiting", () => {
 				) ?? false,
 		);
 		const [text] = (woke as { content: { text: string }[] }).content;
-		expect(text.text).toMatch(/^\[2 subagent reports\]\n\n---\n\n\[Report from subagent "scout"/);
+		expect(text.text).toMatch(/^\[2 subagent reports\]\n\n---\n\n\[Report from subagent "(scout|mapper)"/);
+		expect(text.text).toContain("Scouted.");
 	});
 
-	it("wakes the orchestrator with a Report its run stored but could not send, once it reaches the daemon again", async () => {
-		const t = await createSubagentTui();
-		tui = t;
-		t.script([launch(["scout"], { background: true }), () => fauxAssistantMessage("Waiting for scout.")]);
-		await prompt(t, "Scout the repo.");
-
-		t.storeReport("scout", "Scouted.");
-		t.reconnect();
-		t.reconnect();
-		await waitFor(() =>
-			expect(
-				t.session.messages.filter(
-					(message) => message.role === "custom" && JSON.stringify(message.content).includes("Scouted."),
-				),
-			).toHaveLength(1),
-		);
-	});
-
-	it("leaves a closed run out of the reminder", async () => {
+	it("leaves a stopped run out of the reminder", async () => {
 		const t = await createSubagentTui();
 		tui = t;
 		const reminders: (string | undefined)[] = [];
@@ -227,18 +207,18 @@ describe("The orchestrator's Waiting", () => {
 			() => fauxAssistantMessage([launchCall("Inspect the repo.")]),
 			(context) => {
 				reminders.push(reminderIn(context));
-				return fauxAssistantMessage([fauxToolCall("subagent_close", { agent: "explorer-1" }, { id: "close" })]);
+				return fauxAssistantMessage([fauxToolCall("subagent_stop", { agent: "explorer-1" }, { id: "stop" })]);
 			},
 			(context) => {
 				reminders.push(reminderIn(context));
-				return fauxAssistantMessage("Closed explorer-1.");
+				return fauxAssistantMessage("Stopped explorer-1.");
 			},
 		]);
-		await prompt(t, "Inspect the repo in the background, then close it.");
+		await prompt(t, "Inspect the repo in the background, then stop it.");
 
-		const [beforeClose, afterClose] = reminders;
-		expect(beforeClose).toMatch(/explorer-1: background/);
-		expect(afterClose).toBeUndefined();
+		const [beforeStop, afterStop] = reminders;
+		expect(beforeStop).toMatch(/explorer-1: background/);
+		expect(afterStop).toBeUndefined();
 	});
 
 	it("leaves the runs of an earlier session epoch out of the reminder", async () => {

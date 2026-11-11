@@ -61,7 +61,6 @@ const alive = (pid: number) => {
  * reopening it could not start.
  */
 async function startOrchestrator(extensions: string[] = []): Promise<RealPi> {
-	vi.stubEnv("BLUCLAWD_RPC_RUNS", "1");
 	vi.stubEnv("BLUCLAWD_RPC_PROVIDER_EXTENSIONS", [FAUX, ...extensions].join(":"));
 	const real = await startRealPi();
 	real.tmux.newSession({ cwd: real.cwd, command: ["sleep", "3600"], args: [] });

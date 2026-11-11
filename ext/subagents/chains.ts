@@ -653,7 +653,7 @@ function formatChainAggregate(
 		? !existsSync(workspace.root)
 			? `The chain ${completed ? "completed" : "halted"}, and no step changed anything: there is nothing to integrate.`
 			: completed
-				? `Every step completed: the worktree holds the chain's work, ready for you to review and integrate; none of it is in your checkout.`
+				? `Every step completed: the worktree holds the chain's work, ready for you to review and integrate with subagent_integrate "${chain}"; none of it is in your checkout.`
 				: `The chain halted: its worktree keeps the partial work for you to inspect. It is not ready to integrate, and none of it is in your checkout.`
 		: completed
 			? "Every step completed."

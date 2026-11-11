@@ -11,8 +11,6 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fauxAssistantMessage } from "@earendil-works/pi-ai";
-import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it } from "vitest";
 import type { SubagentRunRecord } from "../ext/subagents/runs.ts";
 import {
@@ -23,7 +21,6 @@ import {
 	readPersistedRunRecord,
 	readRunUsageLedger,
 	reconcileInterruptedRuns,
-	recordCountedSessionUsage,
 	recordRunSessionUsage,
 	SUBAGENT_RUN_CUSTOM_ENTRY,
 	writeFullSubagentReport,
@@ -319,31 +316,5 @@ describe("Task 5 (M1) — Subagent storage, atomic records, reconciliation, and 
 		expect(ledger.runCount).toBe(1);
 		expect(ledger.usage.totalTokens).toBe(130);
 		expect(ledger.usage.cost.total).toBeCloseTo(0.013, 6);
-	});
-
-	it("leaves out what a session from before runs were pis of their own had counted already, when a run resumes it", () => {
-		const agentDir = makeTempDir("ledger");
-		const parentSessionId = "sess_ledger_4";
-		writeEarlierLedger(agentDir, parentSessionId);
-		const session = SessionManager.create("/proj", makeTempDir("old-run"));
-		session.appendMessage({ role: "user", content: "Old task.", timestamp: Date.now() });
-		session.appendMessage({ ...fauxAssistantMessage("Old answer."), usage: { ...tokens(280, 0.002), input: 280 } });
-		const sessionFile = session.getSessionFile()!;
-
-		recordCountedSessionUsage(agentDir, parentSessionId, sessionFile);
-		// A second resume of the same old run must not count it twice either.
-		recordCountedSessionUsage(agentDir, parentSessionId, sessionFile);
-		// Its Report holds the old turns as well as the new ones.
-		recordRunSessionUsage(
-			agentDir,
-			{ parentSessionId, runId: "sub_in_process" },
-			session.getSessionId(),
-			tokens(330, 0.005),
-		);
-
-		const ledger = readRunUsageLedger(agentDir, parentSessionId);
-		expect(ledger.runCount).toBe(1);
-		expect(ledger.usage.totalTokens).toBe(330);
-		expect(ledger.usage.cost.total).toBeCloseTo(0.005, 6);
 	});
 });

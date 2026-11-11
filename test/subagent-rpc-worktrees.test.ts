@@ -91,7 +91,6 @@ function runRecord(agentDir: string, name: string): { runId: string; status: str
 
 /** An orchestrator pane whose runs are RPC children. */
 async function startOrchestrator(): Promise<RealPi> {
-	vi.stubEnv("BLUCLAWD_RPC_RUNS", "1");
 	vi.stubEnv("BLUCLAWD_RPC_PROVIDER_EXTENSIONS", FAUX);
 	return startRealPi();
 }
@@ -142,6 +141,7 @@ describe.skipIf(!hasTmux)("an RPC run that edits", () => {
 		const workspace = workspaceOf(report);
 		expect(report).toMatch(/^Baseline: [0-9a-f]{40} \(refs\/bluclawd\/runs\/sub_[^/]+\/baseline\)/m);
 		expect(report).toMatch(/^Changes since its baseline: M a\.txt, A pkg\/new\.txt$/m);
+		expect(report).toMatch(/^Integration: once you have reviewed its changes, subagent_integrate "w" applies them/m);
 
 		// The checkout is as it was: no edit, no new file, no commit, no branch.
 		expect(checkoutState(repo)).toBe(before);

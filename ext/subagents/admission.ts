@@ -13,11 +13,8 @@ import * as forkSettings from "../_shared/settings.ts";
 import { evaluateSubagentDelegationDeny } from "../permissions/policy.ts";
 import { prepareRunContainment } from "../sandbox/run-containment.ts";
 import {
-	type AgentDefinition,
-	type AgentDefinitionCatalog,
 	createInlineAgentDefinition,
 	discoverAgentDefinitions,
-	type InlineAgentRole,
 	isSubagentThinkingLevel,
 	parseSubagentModelSpec,
 	resolveAgentDefinition,
@@ -29,7 +26,6 @@ import type { RunDirectory } from "./directory.ts";
 import { PARENT_MESSAGE_ADDRESS } from "./messages.ts";
 import { resolveChildModelAndRuntime } from "./models.ts";
 import type { ParentScopeChecks } from "./parent-scope.ts";
-import type { RpcDenyRules } from "./rpc-child.ts";
 import { processAlive, readRpcHostSpec, readRpcHostState } from "./rpc-host.ts";
 import {
 	claimRunGeneration,
@@ -40,12 +36,12 @@ import {
 	rpcDenyRules,
 	rpcGrantableTools,
 	rpcRunMayShell,
-	rpcRunsEnabled,
+	rpcRunProviderRefusal,
 	rpcRunTools,
 	runDefinitionPath,
 	WORKTREE_TOOLS,
 } from "./rpc-runs.ts";
-import { type RunWorkspace, resolveRunWorkspace, within } from "./run-workspace.ts";
+import { resolveRunWorkspace, within } from "./run-workspace.ts";
 import {
 	captureRunBaseline,
 	dropRunBaseline,
@@ -63,21 +59,16 @@ import {
 	type SubagentRunScheduler,
 	type WorkspaceSnapshot,
 } from "./runs.ts";
-import { ensureRunStorageDir, recordCountedSessionUsage, writeAtomicPrivateFile } from "./storage.ts";
+import { ensureRunStorageDir, writeAtomicPrivateFile } from "./storage.ts";
 import type { RunLaunch } from "./tmux-runs.ts";
 
 export const MAX_TASK_INPUT_BYTES = 32 * 1024;
 /** Recorded when no level is chosen: the run's pi picks its model's default. */
 const MODEL_DEFAULT_THINKING = "model default";
-/** How many runs an orchestrator holds open at once: each is a full pi. */
-export const MAX_OPEN_RUNS = 8;
 const QUEUE_DOWN = "the daemon that queues runs is not running and could not be started.";
-const TOO_MANY_OPEN = `An orchestrator holds at most ${MAX_OPEN_RUNS} open subagents. Close one whose work is done with subagent_close, then try again.`;
 /** Pi built-in extensions a run can be given like tools, when the orchestrator declares them. */
 const BUILTIN_EXTENSIONS = ["codemode", "tool_search"];
 export const AGENT_NAME_RE = /^[a-z0-9][a-z0-9_-]{0,63}$/;
-export const NEEDS_TMUX =
-	"Subagents need tmux: each run is a pi session of its own in agent view's tmux server, and this pi does not run there. Install tmux if it is missing (brew install tmux), then start pi again in a terminal.";
 
 /** The tools a role may name: those the orchestrator can call, and the built-in extensions it declares. */
 export function orchestratorTools(loadout: ToolLoadout): string[] {
@@ -86,8 +77,8 @@ export function orchestratorTools(loadout: ToolLoadout): string[] {
 }
 
 /**
- * What a run needs from its admission to execute: it starts as a pi of its own in tmux (ADR-0006), its role as its
- * launch flags, or, behind a switch, as a pi on pi's RPC (ADR-0010).
+ * What a run needs from its admission to execute: it starts as a pi on pi's RPC (ADR-0010). A run in tmux, from before
+ * (ADR-0006), is only followed in its pane until it ends.
  */
 export type RunExecutionContext = { launch: RunLaunch } | { rpc: RpcLaunch };
 
@@ -325,6 +316,16 @@ export function formatRunLabel(run: Pick<SubagentRunRecord, "name" | "runId">): 
 	return run.name ? `"${run.name}" (${run.runId})` : `"${run.runId}"`;
 }
 
+/**
+ * Why a run in tmux, from before runs ran on pi's RPC, does not go on (ADR-0010): its work continues in a new run,
+ * admitted afresh, pointed at its history.
+ */
+export function legacyRunRefusal(
+	run: Pick<SubagentRunRecord, "name" | "runId" | "reportPath" | "transcriptPath">,
+): string {
+	return `${formatRunLabel(run)} ran in tmux, before runs ran on pi's RPC, and is not resumed. To continue its work, launch a new subagent and point it at its Report (${run.reportPath ?? "none was stored"}) and transcript (${run.transcriptPath ?? "none was stored"}).`;
+}
+
 export interface LaunchRequest {
 	toolCallId: string;
 	parentTurnId: string;
@@ -372,11 +373,9 @@ export interface RunAdmissionDeps {
 	/** Which names the runs of a parent scope hold. */
 	directory: Pick<RunDirectory, "nameHolder" | "list">;
 	agentDir: () => string;
-	/** Saved roles frozen at session start; discovered on demand when session start was skipped. */
-	catalog: () => AgentDefinitionCatalog | undefined;
 	parentThinkingLevel: () => string;
 	scope: ParentScopeChecks;
-	/** The orchestrator's tmux session, where its runs start as pis of their own; without one, none starts. */
+	/** The orchestrator's tmux session, which takes over its runs in tmux from before runs ran on pi's RPC. */
 	pane: () => string | undefined;
 	/** The tools the orchestrator has, which a role may name. */
 	tools: () => readonly string[];
@@ -408,8 +407,8 @@ export interface ResumeChanges {
 export interface RunAdmission {
 	launch(request: LaunchRequest, ctx: AdmissionContext): Promise<AdmissionResult>;
 	/**
-	 * Admits a closed run's next generation. `buildPrompt` is called only once every check has
-	 * passed, just before the run starts again. Without one, the run resumes for the user to type in.
+	 * Admits a finished run's next generation on pi's RPC. `buildPrompt` is called only once every check has passed,
+	 * just before the run starts again; without one, it is refused. A run in tmux from before is never resumed.
 	 */
 	resume(
 		run: Readonly<SubagentRunRecord>,
@@ -418,10 +417,10 @@ export interface RunAdmission {
 		changes?: ResumeChanges,
 	): Promise<AdmissionResult>;
 	/**
-	 * Takes over an open run this orchestrator's session started before a reload, its pi still running in its pane,
-	 * into the current scope.
+	 * Takes over an open run in tmux, from before runs ran on pi's RPC, that this orchestrator's session started before a
+	 * reload, its pi still running in its pane, into the current scope: it is followed until it ends or is stopped.
 	 */
-	adopt(run: Readonly<SubagentRunRecord>, ctx: AdmissionContext): void;
+	adopt(run: Readonly<SubagentRunRecord>): void;
 	/**
 	 * Takes over an open run on pi's RPC that an earlier instance of this session admitted and left behind (a reload or
 	 * a crash), as its run directory stored it: false when that does not hold what it was launched with.
@@ -446,20 +445,6 @@ function summarizeTaskLabel(task: string): string {
 			.find((line) => line.trim().length > 0) ?? "";
 	const compact = firstLine.replace(/\s+/g, " ").trim();
 	return compact.length > 120 ? `${compact.slice(0, 119)}…` : compact;
-}
-
-/** The inline role of the subagent call `toolCallId` on the orchestrator's branch. */
-function launchedRole(toolCallId: string, ctx: AdmissionContext): AgentDefinition | undefined {
-	for (const entry of ctx.sessionManager.getBranch()) {
-		if (entry.type !== "message" || entry.message.role !== "assistant") continue;
-		const call = entry.message.content.find((part) => part.type === "toolCall" && part.id === toolCallId);
-		const agent = call?.type === "toolCall" ? call.arguments.agent : undefined;
-		if (agent === undefined) continue;
-		if (typeof agent !== "object" || agent === null || Array.isArray(agent)) return undefined;
-		const role = createInlineAgentDefinition(agent as unknown as InlineAgentRole);
-		return role.ok ? role.definition : undefined;
-	}
-	return undefined;
 }
 
 /** Why the parent's Subagent / Subagent(agentName) deny rules refuse a run, evaluated before any model activity. */
@@ -526,50 +511,9 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 			requestedThinkingLevel,
 			parentModelRegistry: ctx.modelRegistry,
 		});
-		return resolved.ok ? resolved : { ...resolved, error: sanitizeDiagnosticText(resolved.error) };
-	};
-
-	/**
-	 * A closed run, or a run known only from disk (an earlier instance's, or one from before runs were pis of their
-	 * own), reopens its session as a pi in tmux, as its next generation in the current scope.
-	 */
-	const resumeInTmux = (
-		run: Readonly<SubagentRunRecord>,
-		parentPane: string,
-		buildPrompt: (() => string) | undefined,
-		ctx: AdmissionContext,
-		refuse: { invalidated: AdmissionResult; unavailable: (error: string) => AdmissionResult },
-	): AdmissionResult => {
-		const label = formatRunLabel(run);
-		const scope = deps.scope.current();
-		const known = deps.scheduler.getRun(run.runId);
-		if (!scope || !deps.scope.inScope(scope) || run.parentSessionId !== scope.parentSessionId) {
-			return refuse.invalidated;
-		}
-		if (known && !deps.scope.inScope(known)) return refuse.invalidated;
-		const current = known ?? run;
-		if (!isResumableSubagentStatus(current.status)) {
-			return refuse.unavailable(`${label} is ${current.status}; only a closed subagent can be resumed.`);
-		}
-		if (deps.directory.list(scope).length >= MAX_OPEN_RUNS) return refuse.unavailable(TOO_MANY_OPEN);
-		const sessionFile = current.transcriptPath;
-		if (!sessionFile || !existsSync(sessionFile))
-			return refuse.unavailable(`${label} has no saved session to resume.`);
-		const holder = current.name ? deps.directory.nameHolder(scope, current.name)?.record : undefined;
-		if (holder) return refuse.unavailable(`${label} cannot resume: its name is now used by ${holder.runId}.`);
-		const denied = deniedReason(current.agentName, ctx);
-		if (denied) return refuse.unavailable(denied);
-		const storage = ensureRunStorageDir(deps.agentDir(), current.parentSessionId, current.runId);
-		if (!storage.ok) return refuse.unavailable(`Cannot resume ${label}: storage is unavailable (${storage.error}).`);
-		// A run from before runs were pis of their own had its session's usage counted by its orchestrator already.
-		if (!current.pane) recordCountedSessionUsage(deps.agentDir(), current.parentSessionId, sessionFile);
-		const resumed = deps.scheduler.resume(
-			current.runId,
-			{ launch: { ...launchOf(current, storage.runDir, parentPane, ctx), task: buildPrompt?.() } },
-			known ? undefined : { ...current, sessionEpoch: scope.sessionEpoch },
-		);
-		if (!resumed.ok) return refuse.unavailable(resumed.error);
-		return { ok: true, handle: resumed.handle };
+		if (!resolved.ok) return { ...resolved, error: sanitizeDiagnosticText(resolved.error) };
+		const refused = rpcRunProviderRefusal(resolved.model.provider, ctx.modelRegistry.getRegisteredProviderIds());
+		return refused ? { ok: false as const, error: refused } : resolved;
 	};
 
 	/**
@@ -763,59 +707,8 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 			return undefined;
 		};
 
-	/** How the run is started again, as its record and its role say. */
-	const launchOf = (
-		run: Readonly<SubagentRunRecord>,
-		runDir: string,
-		parentPane: string,
-		ctx: AdmissionContext,
-	): RunLaunch => {
-		const previous = deps.scheduler.getContext(run.runId);
-		return {
-			name: run.name ?? run.runId,
-			definition: previous && "launch" in previous ? previous.launch.definition : roleOf(run, ctx),
-			model: `${run.provider}/${run.modelId}`,
-			thinkingLevel: run.thinkingLevel === MODEL_DEFAULT_THINKING ? undefined : run.thinkingLevel,
-			cwd: run.cwd,
-			runDir,
-			sessionFile: run.transcriptPath,
-			parent: parentPane,
-			projectTrusted: ctx.isProjectTrusted(),
-		};
-	};
-
-	/**
-	 * The role a run known only from disk resumes with: an inline role as the call that launched it gave it, a saved
-	 * role as it is now. One found in neither resumes with no instructions of its own and every tool.
-	 */
-	const roleOf = (run: Readonly<SubagentRunRecord>, ctx: AdmissionContext): AgentDefinition => {
-		const inline = run.definitionSource === "inline" ? launchedRole(run.originToolCallId, ctx) : undefined;
-		if (inline) return inline;
-		const saved = resolveAgentDefinition(
-			deps.catalog() ??
-				discoverAgentDefinitions({
-					cwd: ctx.cwd,
-					agentDir: deps.agentDir(),
-					projectTrusted: ctx.isProjectTrusted(),
-				}),
-			run.agentName,
-		);
-		if (saved.ok) return saved.definition;
-		return {
-			name: run.agentName,
-			description: "",
-			model: "inherit",
-			instructions: "",
-			source: run.definitionSource,
-		};
-	};
-
 	return {
 		async launch({ toolCallId, parentTurnId, params, signal, batch, chain, ready }, ctx) {
-			// A run is a pi of its own in tmux (ADR-0006), unless runs on pi's RPC are switched on.
-			const rpc = rpcRunsEnabled();
-			const parentPane = deps.pane();
-			if (parentPane === undefined && !rpc) return reject(NEEDS_TMUX);
 			const dispatched = deps.scope.current();
 			if (!dispatched) return reject("Subagent runtime is not initialized for this session.");
 			const parentSessionId = ctx.sessionManager.getSessionId();
@@ -844,61 +737,45 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 				);
 			}
 
-			if (!rpc && (params.cwd !== undefined || params.agentScope !== undefined)) {
-				return reject("A subagent's own cwd or agentScope needs runs on pi's RPC; omit them.");
-			}
-			let workspace: RunWorkspace | undefined;
-			let deny: RpcDenyRules[] = [];
-			if (rpc) {
-				const resolved = resolveRunWorkspace(params.cwd, {
-					cwd: ctx.cwd,
-					projectTrusted,
-					agentDir,
-					denyRules: forkSettings.denyRules(SettingsManager.create(ctx.cwd, agentDir, { projectTrusted })),
-				});
-				if (!resolved.ok) return reject(resolved.error);
-				workspace = resolved.workspace;
-				const read = rpcDenyRules(agentDir, [
-					{ cwd: ctx.cwd, trusted: projectTrusted },
-					{ cwd: workspace.cwd, trusted: workspace.trusted(workspace.cwd) },
-				]);
-				if (!read.ok) return reject(read.error);
-				deny = read.deny;
-			}
-			const cwd = workspace?.cwd ?? ctx.cwd;
+			const resolved = resolveRunWorkspace(params.cwd, {
+				cwd: ctx.cwd,
+				projectTrusted,
+				agentDir,
+				denyRules: forkSettings.denyRules(SettingsManager.create(ctx.cwd, agentDir, { projectTrusted })),
+			});
+			if (!resolved.ok) return reject(resolved.error);
+			const { workspace } = resolved;
+			const read = rpcDenyRules(agentDir, [
+				{ cwd: ctx.cwd, trusted: projectTrusted },
+				{ cwd: workspace.cwd, trusted: workspace.trusted(workspace.cwd) },
+			]);
+			if (!read.ok) return reject(read.error);
+			const { deny } = read;
+			const { cwd } = workspace;
 
-			// An inline role is validated. A saved one is found from the run's own directory on pi's RPC, else in the
-			// catalog frozen at session start.
+			// An inline role is validated. A saved one is found from the run's own directory.
 			const resolvedDef = inlineRole
 				? createInlineAgentDefinition(inlineRole)
 				: resolveAgentDefinition(
-						workspace
-							? discoverAgentDefinitions({
-									cwd,
-									root: workspace.root,
-									agentDir,
-									projectTrusted: workspace.trusted,
-									scope: params.agentScope,
-								})
-							: (deps.catalog() ?? discoverAgentDefinitions({ cwd, agentDir, projectTrusted })),
+						discoverAgentDefinitions({
+							cwd,
+							root: workspace.root,
+							agentDir,
+							projectTrusted: workspace.trusted,
+							scope: params.agentScope,
+						}),
 						agentName,
 					);
 			if (!resolvedDef.ok) {
 				return reject(resolvedDef.error);
 			}
 			const definition = resolvedDef.definition;
-			const available = rpc ? rpcGrantableTools(deps.tools(), deps.registeredTools()) : deps.tools();
+			const available = rpcGrantableTools(deps.tools(), deps.registeredTools());
 			// Whether a run's commands can be contained here is known before it is given a shell.
-			const shell = rpc && rpcRunMayShell(definition) ? await prepareRunContainment() : undefined;
-			const rpcTools = rpc ? rpcRunTools(definition, available, shell) : undefined;
-			if (rpcTools && !rpcTools.ok) return reject(rpcTools.error);
-			const unknownTools = definition.tools?.filter((name) => !available.includes(name)) ?? [];
-			if (unknownTools.length > 0) {
-				return reject(
-					`Subagent role "${definition.name}" names tools the orchestrator cannot give a child: ${unknownTools.join(", ")}. Available: ${available.join(", ") || "none"}.`,
-				);
-			}
-			const writes = rpcTools?.tools.some((tool) => WORKTREE_TOOLS.includes(tool)) === true;
+			const shell = rpcRunMayShell(definition) ? await prepareRunContainment() : undefined;
+			const rpcTools = rpcRunTools(definition, available, shell);
+			if (!rpcTools.ok) return reject(rpcTools.error);
+			const writes = rpcTools.tools.some((tool) => WORKTREE_TOOLS.includes(tool));
 			const cannotIsolate = (why: string) =>
 				reject(
 					`Subagent role "${definition.name}" may edit files or run commands, so it works in an isolated Git worktree, and none can be made: ${why}. Such a run never works in a shared checkout: give it a cwd in a Git repository with a commit, or a role that only reads.`,
@@ -924,14 +801,19 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 				params.thinkingLevel === "inherit"
 					? parentThinkingLevel
 					: (params.thinkingLevel ?? definition.thinkingLevel);
+			// A level is resolved apart from the model, as the parent's when none is chosen.
 			const rpcThinkingLevel = explicitThinkingLevel ?? parentThinkingLevel;
-			// On pi's RPC a level is resolved apart from the model, as the parent's when none is chosen. In tmux a chosen
-			// model without a level gets the SDK's default for that model; an inherited one keeps the parent's.
-			const requestedThinkingLevel = rpc || requestedModel === "inherit" ? rpcThinkingLevel : explicitThinkingLevel;
-			const childModel = await resolveChildModel(requestedModel, requestedThinkingLevel, ctx);
-			if (!childModel.ok) return reject(childModel.error);
-			if (rpc && !(await deps.ensureQueue())) return reject(`Cannot launch subagent: ${QUEUE_DOWN}`);
-			if (ready && !(await ready({ cwd, root: workspace?.root ?? cwd, writes }))) {
+			const childModel = await resolveChildModel(requestedModel, rpcThinkingLevel, ctx);
+			if (!childModel.ok) {
+				const inherited = explicitThinkingLevel === undefined && childModel.error.startsWith("Thinking level");
+				return reject(
+					inherited
+						? `${childModel.error} That level is yours, inherited as neither the call nor the role sets one: set thinkingLevel ("off" for a model that does not reason).`
+						: childModel.error,
+				);
+			}
+			if (!(await deps.ensureQueue())) return reject(`Cannot launch subagent: ${QUEUE_DOWN}`);
+			if (ready && !(await ready({ cwd, root: workspace.root, writes }))) {
 				return reject("Not admitted: another task of its batch was refused.");
 			}
 
@@ -943,8 +825,6 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 			) {
 				return reject("Parent session or branch changed before subagent admission; request cancelled.");
 			}
-			// Runs on pi's RPC have no such bound: those over the daemon's active ones wait in its queue.
-			if (!rpc && deps.directory.list(dispatched).length >= MAX_OPEN_RUNS) return reject(TOO_MANY_OPEN);
 			const startSnapshot = captureWorkspaceSnapshot(cwd);
 
 			const holderOf = (name: string) => deps.directory.nameHolder(dispatched, name)?.record;
@@ -981,7 +861,7 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 			if (!storage.ok) {
 				return reject(`Cannot launch subagent: storage is unavailable (${storage.error}).`);
 			}
-			const childTrusted = workspace?.trusted(cwd) ?? projectTrusted;
+			const childTrusted = workspace.trusted(cwd);
 			// A run that edits works in a worktree of its own, made from the checkout as it is now, and never in the
 			// checkout. It keeps the checkout's trust and deny rules: its files are the checkout's.
 			let isolated: IsolatedWorkspace | undefined;
@@ -1005,37 +885,35 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 				if (isolated && typeof shared !== "object") dropRunBaseline(isolated.baseline);
 				return reject(error);
 			};
-			if (rpcTools) {
-				// The role as admitted, with what it may do and the model and level it runs at: what the run, and any later
-				// continuation of it, is held to.
-				const admitted = {
-					provider: childModel.model.provider,
-					modelId: childModel.model.id,
-					thinkingLevel: rpcThinkingLevel,
-				};
-				try {
-					writeAtomicPrivateFile(
-						join(storage.runDir, "definition.json"),
-						JSON.stringify(
-							{
-								...definition,
-								tools: rpcTools.tools,
-								deny,
-								cwd: runCwd,
-								projectTrusted: childTrusted,
-								admitted,
-								...(isolated ? { workspace: isolated } : {}),
-								...(rpcTools.tools.includes("bash") ? { shell: { runId, runDir: storage.runDir } } : {}),
-							},
-							null,
-							2,
-						),
-					);
-				} catch (error) {
-					return refuseIsolated(
-						`Cannot launch subagent: storage is unavailable (${error instanceof Error ? error.message : String(error)}).`,
-					);
-				}
+			// The role as admitted, with what it may do and the model and level it runs at: what the run, and any later
+			// continuation of it, is held to.
+			const admitted = {
+				provider: childModel.model.provider,
+				modelId: childModel.model.id,
+				thinkingLevel: rpcThinkingLevel,
+			};
+			try {
+				writeAtomicPrivateFile(
+					join(storage.runDir, "definition.json"),
+					JSON.stringify(
+						{
+							...definition,
+							tools: rpcTools.tools,
+							deny,
+							cwd: runCwd,
+							projectTrusted: childTrusted,
+							admitted,
+							...(isolated ? { workspace: isolated } : {}),
+							...(rpcTools.tools.includes("bash") ? { shell: { runId, runDir: storage.runDir } } : {}),
+						},
+						null,
+						2,
+					),
+				);
+			} catch (error) {
+				return refuseIsolated(
+					`Cannot launch subagent: storage is unavailable (${error instanceof Error ? error.message : String(error)}).`,
+				);
 			}
 
 			const admitRes = deps.scheduler.admit({
@@ -1046,7 +924,7 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 				originToolCallId: toolCallId,
 				originEntryId,
 				name: runName,
-				...(rpcTools ? { backend: "rpc" as const } : {}),
+				backend: "rpc",
 				agentName: definition.name,
 				definitionSource: definition.source,
 				provider: childModel.model.provider,
@@ -1058,56 +936,41 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 				deliveryMode: isBackground ? "background" : "foreground",
 				...(batch ? { batch } : {}),
 				...(chain ? { chain: chain.id } : {}),
-				// Cancelling a foreground call on pi's RPC cancels its run's work; one in tmux only stops waiting for its
-				// Report. A run in the background goes on whatever becomes of the call.
-				...(rpcTools && !isBackground && signal ? { signal } : {}),
-				context: rpcTools
-					? {
-							rpc: {
-								name: runName,
-								definition,
-								provider: childModel.model.provider,
-								modelId: childModel.model.id,
-								thinkingLevel: rpcThinkingLevel,
-								tools: rpcTools.tools,
-								task: taskText,
-								cwd: runCwd,
-								runDir: storage.runDir,
-								agentDir,
-								projectTrusted: childTrusted,
-								...(isolated ? { workspace: isolated } : {}),
-								...(typeof shared === "object" ? { worktreeMade: true } : {}),
-								...(chain ? { keepWorktree: true } : {}),
-								recheck: recheckRpc(runId, storage.runDir, 0, { cwd: ctx.cwd, trusted: projectTrusted }),
-							},
-						}
-					: {
-							launch: {
-								name: runName,
-								definition,
-								model: `${childModel.model.provider}/${childModel.model.id}`,
-								thinkingLevel: childModel.thinkingLevel,
-								task: taskText,
-								cwd,
-								runDir: storage.runDir,
-								// Without a pane, a launch gets this far only with runs on pi's RPC switched on.
-								parent: parentPane!,
-								projectTrusted,
-							},
-						},
+				// Cancelling a foreground call cancels its run's work. A run in the background goes on whatever becomes of
+				// the call.
+				...(!isBackground && signal ? { signal } : {}),
+				context: {
+					rpc: {
+						name: runName,
+						definition,
+						provider: childModel.model.provider,
+						modelId: childModel.model.id,
+						thinkingLevel: rpcThinkingLevel,
+						tools: rpcTools.tools,
+						task: taskText,
+						cwd: runCwd,
+						runDir: storage.runDir,
+						agentDir,
+						projectTrusted: childTrusted,
+						...(isolated ? { workspace: isolated } : {}),
+						...(typeof shared === "object" ? { worktreeMade: true } : {}),
+						...(chain ? { keepWorktree: true } : {}),
+						recheck: recheckRpc(runId, storage.runDir, 0, { cwd: ctx.cwd, trusted: projectTrusted }),
+					},
+				},
 			});
 			if (!admitRes.ok) return refuseIsolated(admitRes.error);
 			return { ok: true, handle: admitRes.handle };
 		},
 
-		adopt(run, ctx) {
+		adopt(run) {
 			const parentPane = deps.pane();
 			const scope = deps.scope.current();
 			const storage = ensureRunStorageDir(deps.agentDir(), run.parentSessionId, run.runId);
 			if (!parentPane || !scope || !run.pane || !storage.ok) return;
 			deps.scheduler.takeOver(
 				{ ...run, sessionEpoch: scope.sessionEpoch },
-				{ launch: { ...launchOf(run, storage.runDir, parentPane, ctx), pane: run.pane } },
+				{ launch: { runDir: storage.runDir, sessionFile: run.transcriptPath, parent: parentPane, pane: run.pane } },
 			);
 		},
 
@@ -1168,13 +1031,8 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 					`Resuming ${label} is not supported in one-shot "${ctx.mode}" mode because a resume runs in the background and the process exits before it completes.`,
 				);
 			}
-			if (run.backend === "rpc") return resumeOnRpc(run, buildPrompt, ctx, changes, { invalidated, unavailable });
-			if (changes.model !== undefined || changes.thinkingLevel !== undefined) {
-				return unavailable(`${label} runs in tmux, and resumes only with the model and level it had.`);
-			}
-			const parentPane = deps.pane();
-			if (parentPane === undefined) return unavailable(NEEDS_TMUX);
-			return resumeInTmux(run, parentPane, buildPrompt, ctx, { invalidated, unavailable });
+			if (run.backend !== "rpc") return unavailable(legacyRunRefusal(run));
+			return resumeOnRpc(run, buildPrompt, ctx, changes, { invalidated, unavailable });
 		},
 	};
 }

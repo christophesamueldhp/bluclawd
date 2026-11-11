@@ -35,7 +35,6 @@ const everythingSaid = (real: RealPi, name: string) => JSON.stringify(real.reque
 
 /** An orchestrator pane whose runs are RPC children, each with the approval policy besides the faux provider. */
 async function startOrchestrator(): Promise<RealPi> {
-	vi.stubEnv("BLUCLAWD_RPC_RUNS", "1");
 	vi.stubEnv("BLUCLAWD_RPC_PROVIDER_EXTENSIONS", [FAUX, GATE].join(":"));
 	const real = await startRealPi();
 	writeFileSync(join(real.cwd, "notes.gated"), "HERON\n");

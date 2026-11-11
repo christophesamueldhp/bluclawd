@@ -1,4 +1,5 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -16,12 +17,12 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import type { Component } from "@earendil-works/pi-tui";
 import { vi } from "vitest";
-import type { AgentActivity } from "../../daemon/activity.ts";
 import { stripAnsi } from "../../daemon/ansi.ts";
-import type { SessionMessage } from "../../daemon/ipc/protocol.ts";
 import { OrchestratorClient } from "../../daemon/orchestrator-client.ts";
 import { PANE_ENV, Tmux } from "../../daemon/tmux.ts";
 import { STATUS_KEYS } from "../../ext/_shared/status-keys.ts";
+import { readRpcHostSpec } from "../../ext/subagents/rpc-host.ts";
+import { writeRunOutbox } from "../../ext/subagents/run-mailbox.ts";
 import { storeRunReport } from "../../ext/subagents/storage.ts";
 import { createParentSessionWithSubagents } from "./subagent-session.ts";
 import { waitFor } from "./wait-for.ts";
@@ -29,21 +30,21 @@ import { waitFor } from "./wait-for.ts";
 /** The orchestrator's own tmux session in these tests. */
 const ORCHESTRATOR_PANE = "pi-orchestrator";
 
-/** A run the orchestrator started, as a pane that never runs a pi. */
+/**
+ * A run the orchestrator started on pi's RPC, as a host the test speaks for: a process that only sleeps, in a group
+ * of its own, whose state and Report the test writes as a host would.
+ */
 interface FakeRun {
-	readonly pane: string;
-	/** Its session name, from its launch flags. */
+	/** Its name, from its pi's launch flags. */
 	readonly name: string;
+	readonly runDir: string;
+	/** Its pi's command, as its host would start it. */
 	readonly args: readonly string[];
-	/** Whether its pane is gone: ended by a close, or its pi exited. */
+	readonly generation: number;
+	readonly hostPid: number;
+	/** Whether its host is gone: it reported and exited, or it was stopped. */
 	ended: boolean;
 }
-
-type SessionMessageBody = SessionMessage extends infer M
-	? M extends SessionMessage
-		? Omit<M, "type" | "from" | "name">
-		: never
-	: never;
 
 type Rendered = Component & { dispose?(): void; focused?: boolean };
 type InputHandler = Parameters<ExtensionUIContext["onTerminalInput"]>[0];
@@ -112,6 +113,8 @@ export async function createSubagentTui(
 		batchWindowMs?: number;
 		/** Whether pistatusline draws the footer; on by default. */
 		pistatusline?: boolean;
+		/** Whether the orchestrator runs outside tmux, in no pane of its own. */
+		outsideTmux?: boolean;
 	} = {},
 ) {
 	initTheme("dark");
@@ -232,48 +235,76 @@ export async function createSubagentTui(
 		setToolsExpanded: () => {},
 	};
 
-	// The orchestrator runs in a pane of its own, and each run it starts is a fake pane: the test speaks for it.
+	// The orchestrator runs in a pane of its own; each run it starts is a fake host, which the test speaks for, given
+	// its turn at once by a daemon that is never asked.
 	const previousPane = process.env[PANE_ENV];
-	process.env[PANE_ENV] = ORCHESTRATOR_PANE;
+	process.env[PANE_ENV] = options.outsideTmux ? "" : ORCHESTRATOR_PANE;
+	// The faux provider is this session's own; no run's pi starts to need it.
+	vi.stubEnv("BLUCLAWD_RPC_PROVIDER_EXTENSIONS", "faux");
 	const runs: FakeRun[] = [];
-	const sent: { to: string; message: SessionMessage }[] = [];
 	const switched: string[] = [];
+	const writeState = (run: FakeRun, state: Record<string, unknown>) =>
+		writeFileSync(
+			join(run.runDir, "rpc-host.json"),
+			JSON.stringify({ hostPid: run.hostPid, generation: run.generation, ...state }),
+		);
 	const spies = [
-		vi.spyOn(Tmux.prototype, "newSession").mockImplementation((spec) => {
-			const pane = `pi-run${runs.length + 1}`;
-			runs.push({ pane, name: spec.args[spec.args.indexOf("--name") + 1], args: spec.args, ended: false });
-			// As pi does, it keeps a session in its session directory, which a resume reopens.
-			const sessionDir = spec.args.indexOf("--session-dir");
-			if (sessionDir >= 0) writeFileSync(join(spec.args[sessionDir + 1], `${pane}.jsonl`), "");
-			return pane;
-		}),
-		vi.spyOn(Tmux.prototype, "end").mockImplementation((pane) => {
-			for (const run of runs) if (run.pane === pane) run.ended = true;
-		}),
-		vi
-			.spyOn(Tmux.prototype, "hasSession")
-			.mockImplementation((pane) => runs.some((run) => run.pane === pane && !run.ended)),
 		vi.spyOn(Tmux.prototype, "switchTo").mockImplementation((pane) => {
 			switched.push(pane);
 		}),
-		vi.spyOn(OrchestratorClient.prototype, "send").mockImplementation(async (to, message) => {
-			if (message.type === "session_message") sent.push({ to, message });
+		vi.spyOn(OrchestratorClient.prototype, "ensureDaemon").mockResolvedValue(true),
+		vi.spyOn(OrchestratorClient.prototype, "claimRun").mockResolvedValue(true),
+		vi.spyOn(OrchestratorClient.prototype, "releaseRun").mockResolvedValue(undefined),
+		vi.spyOn(OrchestratorClient.prototype, "launchRun").mockImplementation(async (_run, host) => {
+			const spec = readRpcHostSpec(host.cwd);
+			if (!spec) throw new Error(`No host spec in ${host.cwd}`);
+			// Named after its run directory, as a host is: a pid on disk counts as the run's host only then.
+			const sleeper = spawn("/bin/sh", ["-c", "sleep 600; :", host.cwd], { detached: true, stdio: "ignore" });
+			sleeper.unref();
+			const hostPid = sleeper.pid ?? 0;
+			const name = spec.command[spec.command.indexOf("--name") + 1];
+			const run: FakeRun = {
+				name,
+				runDir: host.cwd,
+				args: spec.command,
+				generation: spec.generation ?? 0,
+				hostPid,
+				ended: false,
+			};
+			sleeper.on("exit", () => {
+				run.ended = true;
+			});
+			// As a host does, it takes its generation, which a reloaded orchestrator then follows.
+			mkdirSync(join(run.runDir, "hosts"), { recursive: true });
+			writeFileSync(join(run.runDir, "hosts", String(run.generation)), String(hostPid));
+			writeState(run, {});
+			runs.push(run);
+			return hostPid;
 		}),
 	];
-	const eventBus = createEventBus();
 	const runNamed = (name: string) => {
 		const run = [...runs].reverse().find((candidate) => candidate.name === name);
 		if (!run) throw new Error(`No run named ${name} has started.`);
 		return run;
 	};
-	/** What the run's pi sends its orchestrator, through the daemon. */
-	const fromRun = (name: string, message: SessionMessageBody) =>
-		eventBus.emit("bluclawd:session-message", {
-			type: "session_message",
-			from: runNamed(name).pane,
-			name,
-			...message,
-		} satisfies SessionMessage);
+	/** The run stores its Report `text` and its host exits, as an RPC run's does once its work settled. */
+	const report = (name: string, text: string) => {
+		const run = runNamed(name);
+		const reportSeq = storeRunReport(run.runDir, {
+			text,
+			outcome: { status: "completed" },
+			generation: run.generation,
+		});
+		writeState(run, { reportSeq, outcome: { status: "completed" }, exit: { code: 0, signal: null } });
+		process.kill(-run.hostPid, "SIGKILL");
+	};
+	let sentOut = 0;
+	/** The run tells its orchestrator its progress, with its own subagent_message, as a host relays it. */
+	const progress = (name: string, content: string) => {
+		const run = runNamed(name);
+		writeRunOutbox(run.runDir, run.generation, { seq: ++sentOut, to: "parent", kind: "progress", content });
+	};
+	const eventBus = createEventBus();
 
 	const { session, faux } = await createParentSessionWithSubagents({
 		cwd,
@@ -310,27 +341,15 @@ export async function createSubagentTui(
 			};
 			faux.setResponses(Array.from({ length: 50 }, () => next));
 		},
-		/** The runs started so far, as fake panes, oldest first. */
+		/** The runs started so far, as fake hosts, oldest first. */
 		runs,
 		/** Resolves once a run of that name has started. */
 		started: (name: string) => waitFor(() => runs.some((run) => run.name === name)),
-		/** What the orchestrator sent other sessions through the daemon. */
-		sent,
 		/** The panes the terminal was switched to. */
 		switched,
-		/** The run reports `text` to its orchestrator, as its pi does when it settles; `seq` once it stored it. */
-		report: (name: string, text: string, seq?: number) => fromRun(name, { kind: "report", text, seq }),
-		/** The run stores its Report `text`, as its pi does before sending it, and the send never gets through. */
-		storeReport: (name: string, text: string) => {
-			const { args } = runNamed(name);
-			return storeRunReport(args[args.indexOf("--session-dir") + 1], { text });
-		},
-		/** The orchestrator's pane reaches the daemon again after a heartbeat that could not. */
-		reconnect: () => eventBus.emit("bluclawd:daemon-reconnected", true),
-		/** The run tells its orchestrator what it is doing now. */
-		activity: (name: string, activity: AgentActivity, dialog?: string) =>
-			fromRun(name, { kind: "activity", activity, ...(dialog ? { dialog } : {}) }),
-		fromRun,
+		/** The run reports `text` and its process ends, as an RPC run's does once its work settled. */
+		report,
+		progress,
 		/** The subagent panel, the multi-line status pistatusline draws below its chips, as plain lines; empty when none. */
 		panel: () => {
 			const text = statuses.get(STATUS_KEYS.subagents);
@@ -379,6 +398,13 @@ export async function createSubagentTui(
 		},
 		dispose() {
 			session.dispose();
+			for (const run of runs) {
+				try {
+					if (!run.ended) process.kill(-run.hostPid, "SIGKILL");
+				} catch {
+					// Gone meanwhile.
+				}
+			}
 			for (const spy of spies) spy.mockRestore();
 			if (previousPane === undefined) delete process.env[PANE_ENV];
 			else process.env[PANE_ENV] = previousPane;

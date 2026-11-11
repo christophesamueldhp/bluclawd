@@ -100,7 +100,6 @@ const started = (real: RealPi, session: string, before = 0) =>
 
 /** An orchestrator pane whose runs are RPC children, which load the faux provider as the pane does. */
 async function startOrchestrator(): Promise<RealPi> {
-	vi.stubEnv("BLUCLAWD_RPC_RUNS", "1");
 	vi.stubEnv("BLUCLAWD_RPC_PROVIDER_EXTENSIONS", FAUX);
 	return startRealPi();
 }
@@ -210,7 +209,7 @@ describe.skipIf(!hasTmux)("a chain of RPC runs", () => {
 		expect(aggregate).toMatch(
 			/### chain\[1\] "rev" \(sub_[\w-]+\): completed\nChecks: [^\n]+\nFINDING: new\.txt says v1/,
 		);
-		expect(aggregate).toMatch(/ready for you to review and integrate/);
+		expect(aggregate).toMatch(/ready for you to review and integrate with subagent_integrate "chain_[\w-]+"/);
 		const workspace = /^Workspace: (.+?), an isolated Git worktree/m.exec(aggregate)?.[1] ?? "";
 		expect(aggregate).toMatch(/^Changes since its baseline: A pkg\/new\.txt$/m);
 		expect(readFileSync(join(workspace, "pkg", "new.txt"), "utf8")).toBe("v2\n");

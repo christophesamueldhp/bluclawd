@@ -81,7 +81,6 @@ function addSettings(real: RealPi, added: Record<string, unknown>): void {
 
 /** An orchestrator pane whose runs are RPC children. */
 async function startOrchestrator(): Promise<RealPi> {
-	vi.stubEnv("BLUCLAWD_RPC_RUNS", "1");
 	vi.stubEnv("BLUCLAWD_RPC_PROVIDER_EXTENSIONS", FAUX);
 	return startRealPi();
 }

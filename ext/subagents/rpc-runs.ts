@@ -1,5 +1,5 @@
 /**
- * Runs on pi's RPC (ADR-0010), behind a switch until they replace runs in tmux: a run is a pi with no pane, held by
+ * Runs on pi's RPC (ADR-0010), every new run since they replaced runs in tmux: a run is a pi with no pane, held by
  * a host process of its own (rpc-host.ts), that takes its task in a fresh session, stores its Report once its work
  * settles, and exits; a Resume starts another on its saved session, as its next generation. Either waits its turn
  * in the daemon's queue (daemon/run-queue.ts), which starts the host once a slot is free. Its tools are a plain
@@ -73,16 +73,13 @@ import { readRunReports, storedRunReportTextPath } from "./storage.ts";
 import type { RunReports } from "./tmux-runs.ts";
 import { sessionUsage } from "./usage.ts";
 
-/** Set to launch runs on pi's RPC instead of in tmux. */
-const RPC_RUNS_ENV = "BLUCLAWD_RPC_RUNS";
 /**
  * Extensions an RPC run's pi loads besides bluclawd's own, separated as PATH is: those that register the providers
- * its model needs, which `-ne` leaves out.
+ * its model needs, which `-ne` leaves out. A stopgap for tests and development; without it, a run of a provider an
+ * extension registers is refused at Admission (rpcRunProvider).
  */
 const RPC_PROVIDER_EXTENSIONS_ENV = "BLUCLAWD_RPC_PROVIDER_EXTENSIONS";
 const CHILD_EXTENSION = fileURLToPath(new URL("./rpc-child.ts", import.meta.url));
-
-export const rpcRunsEnabled = (): boolean => Boolean(process.env[RPC_RUNS_ENV]);
 
 /** pi's tools that only read. */
 const READ_TOOLS = ["read", "grep", "find", "ls"];
@@ -92,10 +89,13 @@ export const WRITE_TOOLS = ["edit", "write"];
 export const WORKTREE_TOOLS = [...WRITE_TOOLS, "bash"];
 /** All an RPC run may have: the read tools, codemode over them, the edit tools and the shell. */
 const RPC_TOOLS = [...READ_TOOLS, "codemode", ...WORKTREE_TOOLS];
-/** What a run gets when its role names no tools: it reads. */
-const DEFAULT_RPC_TOOLS = [...READ_TOOLS, "codemode"];
-/** The bundled role made to implement changes, which names no tools so that it keeps every tool in tmux. */
-const BUNDLED_WRITER = "general-purpose";
+/**
+ * Marks a tool a role names as given only where it can be: where the orchestrator has it, and for bash where a run's
+ * commands can be contained. Without it, a tool that cannot be given refuses the run.
+ */
+const OPTIONAL_TOOL = "?";
+/** What a run gets when its role names no tools: it reads, with what of these its orchestrator can give. */
+const DEFAULT_RPC_TOOLS = [...READ_TOOLS, "codemode"].map((tool) => `${tool}${OPTIONAL_TOOL}`);
 
 /** pi's names for MCP tools, which its `--tools` list does not filter. */
 const MCP_TOOLS = ["mcp__*", "list_mcp_resources", "list_mcp_resource_templates", "read_mcp_resource"];
@@ -220,36 +220,50 @@ export function rpcGrantableTools(callable: readonly string[], registered: reado
 	return [...callable, ...(registered.includes("codemode") && !callable.includes("codemode") ? ["codemode"] : [])];
 }
 
-const bundledWriter = (definition: Pick<AgentDefinition, "name" | "source">) =>
-	definition.source === "bundled" && definition.name === BUNDLED_WRITER;
+const toolName = (listed: string) => (listed.endsWith(OPTIONAL_TOOL) ? listed.slice(0, -1) : listed);
+
+/**
+ * Why a run cannot have a model of `provider`, which an extension of the orchestrator's pi registers: a run's pi
+ * loads only bluclawd's child extension, so it would lack that provider, or have only pi's own of that name.
+ */
+export function rpcRunProviderRefusal(provider: string, extensionProviders: readonly string[]): string | undefined {
+	if (!extensionProviders.includes(provider) || process.env[RPC_PROVIDER_EXTENSIONS_ENV]) return undefined;
+	return `Cannot launch subagent: provider "${provider}" is registered by an extension of this pi, which a run's pi does not load, so the run would not have it as you do. Choose a model of a provider pi has built in, or one configured in models.json.`;
+}
 
 /** Whether a run of this role may get `bash`, so whether Admission must know first that its shell can be contained. */
-export function rpcRunMayShell(definition: Pick<AgentDefinition, "name" | "tools" | "source">): boolean {
-	return definition.tools ? definition.tools.includes("bash") : bundledWriter(definition);
+export function rpcRunMayShell(definition: Pick<AgentDefinition, "tools">): boolean {
+	return definition.tools?.some((tool) => toolName(tool) === "bash") === true;
 }
 
 /**
  * The tools an RPC run gets: those its role names, or every read tool and codemode the orchestrator can give it
- * when it names none, and the edit tools and the shell besides for the bundled general-purpose role; the shell only
- * where `shell` says its commands can be contained. Anything else is refused, MCP and subagents among them;
- * Admission checks that the orchestrator can give those named.
+ * when it names none. A tool named with a trailing `?` is given only where it can be; any other the orchestrator
+ * cannot give, or bash where `shell` says commands cannot be contained, refuses the run. So does a tool no run may
+ * have, MCP and subagents among them.
  */
 export function rpcRunTools(
-	definition: Pick<AgentDefinition, "name" | "tools" | "source">,
+	definition: Pick<AgentDefinition, "name" | "tools">,
 	available: readonly string[],
 	shell: RunContainmentReady | undefined,
 ): { ok: true; tools: string[] } | { ok: false; error: string } {
-	const defaults = bundledWriter(definition)
-		? [...DEFAULT_RPC_TOOLS, ...WRITE_TOOLS, ...(shell?.ok ? ["bash"] : [])]
-		: DEFAULT_RPC_TOOLS;
-	const named = definition.tools ?? defaults.filter((tool) => available.includes(tool));
-	const refused = named.filter((tool) => !RPC_TOOLS.includes(tool));
+	const listed = definition.tools ?? DEFAULT_RPC_TOOLS;
+	const givable = (tool: string) => available.includes(tool) && (tool !== "bash" || shell?.ok === true);
+	const refused = listed.map(toolName).filter((tool) => !RPC_TOOLS.includes(tool));
 	if (refused.length > 0) {
 		return {
 			ok: false,
 			error: `Subagent role "${definition.name}" names tools a run on pi's RPC cannot have: ${refused.join(", ")}. It may only read, script its reads with codemode, and edit files and run commands in a worktree of its own (${RPC_TOOLS.join(", ")}): no MCP, tool search or subagents.`,
 		};
 	}
+	const unknown = listed.filter((tool) => !tool.endsWith(OPTIONAL_TOOL) && !available.includes(tool));
+	if (unknown.length > 0) {
+		return {
+			ok: false,
+			error: `Subagent role "${definition.name}" names tools the orchestrator cannot give a child: ${unknown.join(", ")}. Available: ${available.join(", ") || "none"}.`,
+		};
+	}
+	const named = listed.filter((tool) => !tool.endsWith(OPTIONAL_TOOL) || givable(toolName(tool))).map(toolName);
 	if (named.includes("bash") && !shell?.ok) {
 		return {
 			ok: false,
@@ -700,6 +714,12 @@ export async function executeRpcRun(
 		`Process: exited with ${state.exit.signal ? `signal ${state.exit.signal}` : `code ${state.exit.code}`}, after its Report was stored.`,
 		...checksLines(launch.tools, commandsRun(entries ?? [], queuedAt)),
 		...(workspace ? workspaceLines : ["Changes: none: it had no tool that changes files."]),
+		// A step of a chain is integrated with its chain, once the chain has completed.
+		...(workspace && outcome.status === "completed" && !launch.keepWorktree && existsSync(workspace.root)
+			? [
+					`Integration: once you have reviewed its changes, subagent_integrate "${launch.name}" applies them to your checkout.`,
+				]
+			: []),
 		`Transcript: ${state.sessionFile ?? "none"}`,
 		`Report: ${fullReport}`,
 		...(report.untaken ? [`Untaken: ${untakenText(report.untaken, launch.runDir, record.generation)}.`] : []),

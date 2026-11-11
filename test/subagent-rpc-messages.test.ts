@@ -35,7 +35,6 @@ const lastToolResult = (request: FauxRequest) =>
 
 /** An orchestrator pane whose runs are RPC children, which load the faux provider as the pane does. */
 async function startOrchestrator(extensions = DEFAULT_EXTENSIONS): Promise<RealPi> {
-	vi.stubEnv("BLUCLAWD_RPC_RUNS", "1");
 	vi.stubEnv("BLUCLAWD_RPC_PROVIDER_EXTENSIONS", FAUX);
 	return startRealPi({ extensions });
 }
@@ -288,7 +287,7 @@ describe.skipIf(!hasTmux)("messages with a working RPC run", () => {
 			expect(conversation(look[1]).at(-1)?.text).toMatch(/One more: HERON\.$/);
 		} else {
 			expect(receipt).toMatch(
-				/unavailable: "look" \(sub_[^)]+\) (has finished|can no longer receive messages \(has finished\))\.$/,
+				/unavailable: "look" \(sub_[^)]+\) (has finished|can no longer receive messages \(has finished\))\.( Only subagent_resume continues it, with your next instruction\.)?$/,
 			);
 			expect(look).toHaveLength(1);
 		}
@@ -316,7 +315,7 @@ describe.skipIf(!hasTmux)("messages with a working RPC run", () => {
 
 		const screen = () => real.tmux.capture(orchestrator, 50).join("\n");
 		real.tmux.sendKeys(orchestrator, ["Down"]);
-		await waitFor(() => expect(screen()).toContain("x to close"));
+		await waitFor(() => expect(screen()).toContain("x to stop"));
 		real.tmux.sendKeys(orchestrator, ["x"]);
 		const dir = runDir(real.agentDir, "look");
 		await waitFor(() => expect(readJson(join(dir, "record.json")).status).toBe("cancelled"));

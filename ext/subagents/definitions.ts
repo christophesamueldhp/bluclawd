@@ -78,7 +78,8 @@ export type ResolveAgentDefinitionResult =
 const SUPPORTED_FRONTMATTER_KEYS = new Set(["name", "description", "tools", "model", "thinkingLevel"]);
 const AGENT_NAME_RE = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 const RESERVED_NAME_PREFIXES = ["sub_", "bg_", "mon_", "agent_", "task_"];
-const TOOL_NAME_RE = /^[A-Za-z0-9_.:-]{1,128}$/;
+/** A tool name, a trailing `?` giving it only where it can be (rpc-runs.ts). */
+const TOOL_NAME_RE = /^[A-Za-z0-9_.:-]{1,128}\??$/;
 const MODEL_SPEC_RE = /^[A-Za-z0-9._-]+\/[A-Za-z0-9._:-]+$/;
 const CONTROL_CHAR_RE = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/;
 

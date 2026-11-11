@@ -65,7 +65,6 @@ const alive = (pid: number) => {
 
 /** An orchestrator pane whose runs are RPC children, which load the faux provider, and `extensions`, as the pane does. */
 async function startOrchestrator(extensions: string[] = []): Promise<RealPi> {
-	vi.stubEnv("BLUCLAWD_RPC_RUNS", "1");
 	vi.stubEnv("BLUCLAWD_RPC_PROVIDER_EXTENSIONS", [FAUX, ...extensions].join(":"));
 	return startRealPi();
 }
@@ -179,7 +178,9 @@ describe.skipIf(!hasTmux)("stopping an RPC run", () => {
 
 		real.tmux.sendKeys(pane, ["message work", "Enter"]);
 		const main = await real.waitForRequests("main", 6);
-		expect(lastToolResult(main[5])).toMatch(/^Message \d+ unavailable: "work" \(sub_[\w-]+\) was stopped\.$/);
+		expect(lastToolResult(main[5])).toMatch(
+			/^Message \d+ unavailable: "work" \(sub_[\w-]+\) was stopped\. Only subagent_resume continues it/,
+		);
 		real.tmux.sendKeys(pane, ["/reload", "Enter"]);
 		await waitFor(() => expect(real.tmux.capture(pane, 50).join("\n")).toMatch(/Reloaded/i));
 		// Proves only that neither its Report nor the reload woke anyone, nor started it, within this while.

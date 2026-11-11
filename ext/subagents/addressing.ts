@@ -1,85 +1,48 @@
-import { type AdmissionContext, formatRunLabel, type ResumeChanges, type RunAdmission } from "./admission.ts";
-import type { RunDirectory } from "./directory.ts";
 import {
-	formatMessageReceipt,
-	PARENT_MESSAGE_ADDRESS,
-	type SubagentMessageBus,
-	type SubagentMessageReceipt,
-} from "./messages.ts";
+	type AdmissionContext,
+	formatRunLabel,
+	legacyRunRefusal,
+	type ResumeChanges,
+	type RunAdmission,
+} from "./admission.ts";
+import type { RunDirectory } from "./directory.ts";
+import { formatMessageReceipt, PARENT_MESSAGE_ADDRESS, type SubagentMessageBus } from "./messages.ts";
 import type { ParentScope } from "./parent-scope.ts";
-import { isTerminalSubagentStatus, type SubagentRunRecord } from "./runs.ts";
+import { isTerminalSubagentStatus } from "./runs.ts";
 
 export interface RunAddressingDeps {
 	directory: Pick<RunDirectory, "find">;
-	bus: Pick<SubagentMessageBus, "send" | "accept">;
+	bus: Pick<SubagentMessageBus, "send">;
 }
 
-/**
- * Takes the orchestrator's message for a run, from lookup to outcome: a final run resumes with it, any other
- * gets it through the bus. A run that ended other than closed is refused by admission.
- */
+/** Takes the orchestrator's message or Resume for a run, from lookup to outcome. */
 export function createRunAddressing(deps: RunAddressingDeps) {
 	const { bus } = deps;
 
-	/** Admits a final run's next generation with `content` as its prompt; its Reports wake the orchestrator. */
-	const resume = async (
-		run: Readonly<SubagentRunRecord>,
-		content: string,
-		scope: ParentScope,
-		admission: Pick<RunAdmission, "resume">,
-		ctx: AdmissionContext,
-	): Promise<SubagentMessageReceipt> => {
-		let receipt: SubagentMessageReceipt | undefined;
-		const resumed = await admission.resume(
-			run,
-			() => {
-				receipt = bus.accept({ address: PARENT_MESSAGE_ADDRESS, scope }, run.runId, run.name);
-				// The run frames it as from its orchestrator.
-				return content;
-			},
-			ctx,
-		);
-		if (!resumed.ok) {
-			return {
-				status: resumed.refusal ?? "unavailable",
+	/**
+	 * A message from the orchestrator's `subagent_message`. It looks the run up by name or run ID: among the
+	 * scope's open runs (epoch only), the session's finished runs, then disk, and goes through the bus, which refuses
+	 * a stale epoch. A message is information only: it continues no finished run, which only a Resume does, and never
+	 * one in tmux from before runs ran on pi's RPC.
+	 */
+	const messageFromParent = async (scope: ParentScope, to: string, content: string) => {
+		const run = deps.directory.find(scope, to)?.record;
+		const finished = run !== undefined && isTerminalSubagentStatus(run.status);
+		if (finished && run.backend !== "rpc") {
+			return formatMessageReceipt({
+				status: "unavailable",
 				seq: 0,
 				to: run.runId,
 				toName: run.name,
-				reason: resumed.error,
-			};
+				reason: legacyRunRefusal(run),
+			});
 		}
-		// A resume is admitted only after buildPrompt ran, so the receipt is set.
-		return receipt!;
-	};
-
-	/**
-	 * A message from the orchestrator's `subagent_message`. It looks the run up by name or run ID: among the
-	 * scope's open runs (epoch only), the session's finished runs, then disk. A final run resumes; any other goes
-	 * through the bus, which refuses a stale epoch.
-	 */
-	const messageFromParent = async (
-		scope: ParentScope,
-		to: string,
-		content: string,
-		admission: Pick<RunAdmission, "resume">,
-		ctx: AdmissionContext | undefined,
-	) => {
-		const run = deps.directory.find(scope, to)?.record;
-		// A message to a run on pi's RPC is information only: the bus refuses a final one, which only a Resume continues.
-		if (run && isTerminalSubagentStatus(run.status) && run.backend !== "rpc" && ctx) {
-			const receipt = await resume(run, content, scope, admission, ctx);
-			if (receipt.status !== "accepted") return formatMessageReceipt(receipt);
-			return {
-				...formatMessageReceipt(receipt),
-				content: [
-					{
-						type: "text" as const,
-						text: `Message ${receipt.seq} accepted: resuming ${formatRunLabel(run)} in the background with its earlier context. Its report will be delivered when it finishes.`,
-					},
-				],
-			};
-		}
-		return formatMessageReceipt(await bus.send({ address: PARENT_MESSAGE_ADDRESS, scope }, to, content));
+		const receipt = await bus.send({ address: PARENT_MESSAGE_ADDRESS, scope }, to, content);
+		return formatMessageReceipt(
+			finished && receipt.status === "unavailable"
+				? { ...receipt, reason: `${receipt.reason} Only subagent_resume continues it, with your next instruction.` }
+				: receipt,
+		);
 	};
 
 	/**

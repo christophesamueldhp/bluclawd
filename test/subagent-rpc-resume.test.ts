@@ -60,7 +60,6 @@ const alive = (pid: number) => {
 
 /** An orchestrator pane whose runs are RPC children, which load the faux provider as the pane does. */
 async function startOrchestrator(): Promise<RealPi> {
-	vi.stubEnv("BLUCLAWD_RPC_RUNS", "1");
 	vi.stubEnv("BLUCLAWD_RPC_PROVIDER_EXTENSIONS", FAUX);
 	return startRealPi();
 }
@@ -138,7 +137,9 @@ describe.skipIf(!hasTmux)("resuming an RPC run", () => {
 
 		expect(lastToolResult(main[2])).toMatchObject({
 			toolName: "subagent_message",
-			text: expect.stringMatching(/unavailable: "look" \(sub_[^)]+\) has finished/),
+			text: expect.stringMatching(
+				/unavailable: "look" \(sub_[^)]+\) has finished\. Only subagent_resume continues it/,
+			),
 		});
 		expect(
 			conversation(real.requests("again")[0]).map(({ role, text }) => `${role}: ${text.split("\n").at(-1)}`),

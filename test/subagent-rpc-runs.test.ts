@@ -46,7 +46,6 @@ const alive = (pid: number) => {
 /** An orchestrator pane whose runs are RPC children, which load the faux provider as the pane does. */
 async function startOrchestrator(): Promise<RealPi> {
 	// Before the pane starts: the tmux server, and so the pane, takes this process's environment.
-	vi.stubEnv("BLUCLAWD_RPC_RUNS", "1");
 	vi.stubEnv("BLUCLAWD_RPC_PROVIDER_EXTENSIONS", FAUX);
 	return startRealPi();
 }
@@ -124,8 +123,8 @@ describe.skipIf(!hasTmux)("a read-only run on pi's RPC", () => {
 	it("reports a pi that could not start as failed, with how it exited, and no claim of its own", async () => {
 		const real = await startOrchestrator();
 		pi = real;
-		// Without the provider's extension the run's pi does not know its model, and exits at once.
-		vi.stubEnv("BLUCLAWD_RPC_PROVIDER_EXTENSIONS", "");
+		// Given an extension that is not there in place of the provider's, the run's pi exits at once.
+		vi.stubEnv("BLUCLAWD_RPC_PROVIDER_EXTENSIONS", join(real.cwd, "missing-provider.ts"));
 		real.script("main", [
 			{ tool: "subagent", args: { agent: "explorer", name: "broken", task: "Look." } },
 			{ text: "it failed" },

@@ -67,7 +67,7 @@ export function renderPanel(options: {
 		].join("  ");
 	});
 	const collapsed = idle > 0 ? [theme.fg("dim", `  ${idle} idle agent${idle === 1 ? "" : "s"}`)] : [];
-	const x = selected !== undefined && shown[selected - 1]?.state === "finished" ? "x to dismiss" : "x to close";
+	const x = selected !== undefined && shown[selected - 1]?.state === "finished" ? "x to dismiss" : "x to stop";
 	const hint =
 		selected === undefined ? [] : [theme.fg("dim", `  ↑/↓ to select · Enter to open · ${x} · Esc to go back`)];
 	return [main, ...rows, ...collapsed, ...hint].map((line) => truncateToWidth(line, width));
@@ -84,7 +84,7 @@ export interface PanelActions {
 }
 
 /**
- * The panel as a TUI component that can take the keyboard from the prompt: ↑/↓ pick a row, `x` closes an open run
+ * The panel as a TUI component that can take the keyboard from the prompt: ↑/↓ pick a row, `x` stops an open run
  * or dismisses one that ended, Enter opens it, Esc gives the keyboard back, as do Enter and `x` on `main`, which
  * hands the `x` to the prompt. Any other key goes back to the prompt with it.
  * Under pistatusline it renders nothing itself: its `lines` go out as a status, which pistatusline draws below

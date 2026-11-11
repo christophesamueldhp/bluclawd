@@ -32,11 +32,10 @@ export function removeGenerationsFixtures(): void {
 	while (tempDirs.length > 0) rmSync(tempDirs.pop()!, { recursive: true, force: true });
 }
 
-/** A run's pi as the fake tmux started it: a pane that never runs anything. */
+/** A run in tmux, from before runs ran on pi's RPC, as the fake tmux has it: a pane that never runs anything. */
 export interface FakePane {
 	readonly name: string;
-	readonly args: readonly string[];
-	/** Whether its session is gone: ended by a close, or its pi exited. */
+	/** Whether its session is gone: ended by a stop, or its pi exited. */
 	ended: boolean;
 }
 
@@ -51,8 +50,8 @@ export function fakeSessionContext(cwd: string) {
 }
 
 /**
- * An orchestrator's subagents over the generations factory, a fake tmux server and a fake daemon; given an earlier
- * one's, a reload of it: the same parent session and agent dir.
+ * An orchestrator's subagents over the generations factory, a fake tmux server and a fake daemon, following runs in
+ * tmux from before runs ran on pi's RPC; given an earlier one's, a reload of it: the same parent session and agent dir.
  */
 export function createGenerationsFixture(earlier?: { cwd: string; agentDir: string; session: ExtensionContext }) {
 	const cwd = earlier?.cwd ?? makeTempDir("cwd");
@@ -85,20 +84,11 @@ export function createGenerationsFixture(earlier?: { cwd: string; agentDir: stri
 		onChange: () => {},
 		reports,
 		tmux: () => ({
-			newSession: (spec) => {
-				const name = `pi-run${panes.length + 1}`;
-				panes.push({ name, args: spec.args, ended: false });
-				// As pi does, it keeps a session in its session directory, which a resume reopens.
-				const sessionDir = spec.args.indexOf("--session-dir");
-				if (sessionDir >= 0) writeFileSync(join(spec.args[sessionDir + 1], `${name}.jsonl`), "");
-				return name;
-			},
 			end: (name) => {
 				for (const pane of panes) if (pane.name === name) pane.ended = true;
 			},
 			hasSession: (name) => panes.some((pane) => pane.name === name && !pane.ended),
 			shown: () => false,
-			moveClients: () => {},
 		}),
 		handOff: new AbortController().signal,
 		// Its runs are in tmux, which take no turn in the daemon's queue.
@@ -133,7 +123,10 @@ export function createGenerationsFixture(earlier?: { cwd: string; agentDir: stri
 		agentDir: () => agentDir,
 	});
 	let calls = 0;
-	/** Launches a background run in the current parent scope, named and tasked as given. */
+	/**
+	 * A background run in tmux in the current parent scope, named and tasked as given, as an earlier bluclawd launched
+	 * it: its pi runs in a pane of its own, which this orchestrator follows.
+	 */
 	const launch = (
 		name: string,
 		task: string,
@@ -142,6 +135,10 @@ export function createGenerationsFixture(earlier?: { cwd: string; agentDir: stri
 		const current = scope.current()!;
 		const storage = ensureRunStorageDir(agentDir, current.parentSessionId, `sub_${name}_${++calls}`);
 		if (!storage.ok) throw new Error(storage.error);
+		const pane = `pi-run${panes.length + 1}`;
+		panes.push({ name: pane, ended: false });
+		// As pi does, it keeps a session in its run directory.
+		writeFileSync(join(storage.runDir, `${pane}.jsonl`), "");
 		const admitted = generations.scheduler.admit({
 			runId: `sub_${name}_${calls}`,
 			parentSessionId: current.parentSessionId,
@@ -157,24 +154,7 @@ export function createGenerationsFixture(earlier?: { cwd: string; agentDir: stri
 			cwd,
 			taskSummary: task,
 			deliveryMode: "background",
-			context: {
-				launch: {
-					name,
-					definition: {
-						name: "general-purpose",
-						description: "",
-						model: "inherit",
-						instructions: "Work.",
-						source: "bundled",
-					},
-					model: "faux/faux-1",
-					task,
-					cwd,
-					runDir: storage.runDir,
-					parent: ORCHESTRATOR_PANE,
-					projectTrusted: false,
-				},
-			},
+			context: { launch: { runDir: storage.runDir, parent: ORCHESTRATOR_PANE, pane } },
 			...overrides,
 		});
 		if (!admitted.ok) throw new Error(admitted.error);
@@ -206,7 +186,6 @@ export function createGenerationsFixture(earlier?: { cwd: string; agentDir: stri
 		scheduler: generations.scheduler,
 		directory,
 		agentDir: () => agentDir,
-		catalog: () => undefined,
 		parentThinkingLevel: () => "off",
 		scope,
 		pane: () => ORCHESTRATOR_PANE,
@@ -235,7 +214,7 @@ export function createGenerationsFixture(earlier?: { cwd: string; agentDir: stri
 	const orchestrator = async () => {
 		await loadModels();
 		return async (to: string, content: string) => {
-			const result = await generations.messageFromParent(scope.current()!, to, content, admission, session);
+			const result = await generations.messageFromParent(scope.current()!, to, content);
 			return result.content.map((part) => part.text).join("");
 		};
 	};

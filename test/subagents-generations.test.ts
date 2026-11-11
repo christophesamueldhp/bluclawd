@@ -1,7 +1,5 @@
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
-import type { SessionManager } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it } from "vitest";
 import type { SubagentRunRecord } from "../ext/subagents/runs.ts";
 import {
@@ -54,13 +52,12 @@ const storedRun = (parentSessionId: string): SubagentRunRecord => ({
 });
 
 describe("A run's generations", () => {
-	it("writes a stub report at launch, each Report as its progress, and its final record once it is closed", async () => {
+	it("writes each Report of a run in tmux as its progress, and its final record once it is stopped", async () => {
 		const { agentDir, scope, generations, panes, launch, paneOf, report } = setup();
 		const backend = launch("backend", "Build the API.");
 		const pane = await paneOf(backend);
 		const { parentSessionId } = scope.current()!;
 		const reportFile = subagentReportPath(agentDir, parentSessionId, backend.runId);
-		expect(readFileSync(reportFile, "utf8")).toContain("Task: Build the API.");
 		expect(readPersistedRunRecord(agentDir, parentSessionId, backend.runId)).toMatchObject({
 			status: "running",
 			pane,
@@ -181,7 +178,7 @@ describe("Delivering a run's Reports", () => {
 
 		const next = setup(first);
 		const { parentSessionId } = next.scope.current()!;
-		next.admission.adopt(readPersistedRunRecord(first.agentDir, parentSessionId, backend.runId)!, next.session);
+		next.admission.adopt(readPersistedRunRecord(first.agentDir, parentSessionId, backend.runId)!);
 		expect(next.notices()).toEqual([expect.stringMatching(/\n\nPagination added\.$/)]);
 	});
 
@@ -194,7 +191,7 @@ describe("Delivering a run's Reports", () => {
 
 		const next = setup(first);
 		const { parentSessionId } = next.scope.current()!;
-		next.admission.adopt(readPersistedRunRecord(first.agentDir, parentSessionId, backend.runId)!, next.session);
+		next.admission.adopt(readPersistedRunRecord(first.agentDir, parentSessionId, backend.runId)!);
 		expect(next.generations.scheduler.getRun(backend.runId)?.deliveryMode).toBe("background");
 		expect(next.notices()).toEqual([expect.stringMatching(/\n\nAPI built\.$/)]);
 		await waitFor(() =>
@@ -287,6 +284,10 @@ describe("Delivering a run's Reports", () => {
 	});
 });
 
+/** What the orchestrator sent its runs as messages, apart from telling each taken over where it is now. */
+const messagesIn = (delivered: ReturnType<typeof setup>["delivered"]) =>
+	delivered.filter(({ message }) => message.kind === "message");
+
 describe("Addressing a run", () => {
 	it("delivers the orchestrator's message to an open run through the daemon, from the orchestrator's pane", async () => {
 		const { launch, paneOf, delivered, orchestrator } = setup();
@@ -297,7 +298,7 @@ describe("Addressing a run", () => {
 		expect(await message("backend", "Use REST.")).toBe(
 			`Message 1 accepted for delivery to backend (${backend.runId}) (not yet handled).`,
 		);
-		expect(delivered).toEqual([
+		expect(messagesIn(delivered)).toEqual([
 			{
 				to: pane,
 				message: { type: "session_message", kind: "message", from: ORCHESTRATOR_PANE, text: "Use REST." },
@@ -316,7 +317,7 @@ describe("Addressing a run", () => {
 		expect(await message("backend", "Use REST.")).toBe(
 			`Message 1 accepted for delivery to backend (${backend.runId}) (not yet handled).`,
 		);
-		expect(delivered).toHaveLength(1);
+		expect(messagesIn(delivered)).toHaveLength(1);
 	});
 
 	it("holds a run's name until it is closed; then a new run takes the name and its messages", async () => {
@@ -335,11 +336,11 @@ describe("Addressing a run", () => {
 		expect(await message("backend", "Page size 50.")).toBe(
 			`Message 1 accepted for delivery to backend (${second.runId}) (not yet handled).`,
 		);
-		expect(delivered.map((entry) => entry.to)).toEqual([pane]);
+		expect(messagesIn(delivered).map((entry) => entry.to)).toEqual([pane]);
 	});
 
-	it("resumes a closed run with the message, as a pi on its session under the same run ID", async () => {
-		const { generations, panes, launch, paneOf, orchestrator, report, notices } = setup();
+	it("refuses a message to a closed run in tmux, pointing at its Report and transcript rather than resuming it", async () => {
+		const { generations, panes, launch, paneOf, orchestrator } = setup();
 		const message = await orchestrator();
 		const backend = launch("backend", "Build the API.");
 		await paneOf(backend);
@@ -347,48 +348,10 @@ describe("Addressing a run", () => {
 		const closed = await backend.completion;
 
 		expect(await message("backend", "Now add pagination.")).toBe(
-			`Message 1 accepted: resuming "backend" (${backend.runId}) in the background with its earlier context. Its report will be delivered when it finishes.`,
+			`Message 0 unavailable: "backend" (${backend.runId}) ran in tmux, before runs ran on pi's RPC, and is not resumed. To continue its work, launch a new subagent and point it at its Report (${closed.reportPath}) and transcript (${closed.transcriptPath}).`,
 		);
-		await waitFor(() => panes.length === 2);
-		const args = panes[1].args;
-		expect(args[args.indexOf("--session") + 1]).toBe(closed.transcriptPath);
-		const resumed = generations.scheduler.getRun(backend.runId);
-		expect(resumed).toMatchObject({ generation: 1, status: "running", pane: panes[1].name });
-		const taskFile = join(args[args.indexOf("--append-system-prompt") + 1], "..", "task.md");
-		expect(readFileSync(taskFile, "utf8")).toContain("Now add pagination.");
-
-		await report({ ...backend }, "Pagination added.");
-		expect(notices().at(-1)).toMatch(/Pagination added\.$/);
-	});
-
-	it("resumes a run known only from disk with its inline role's instructions and tools, from the call that launched it", async () => {
-		const { agentDir, scope, session, panes, orchestrator } = setup();
-		const message = await orchestrator();
-		const { parentSessionId } = scope.current()!;
-		// The orchestrator's session keeps the launch call, its inline role with it.
-		const role = { name: "checker", description: "Checks.", instructions: "INLINE-MARKER: check.", tools: ["read"] };
-		(session.sessionManager as SessionManager).appendMessage(
-			fauxAssistantMessage([fauxToolCall("subagent", { agent: role, task: "Check." }, { id: "call_inline" })]),
-		);
-		const runDir = join(getSubagentsRootDir(agentDir), parentSessionId, "sub_inline");
-		mkdirSync(runDir, { recursive: true });
-		writeFileSync(join(runDir, "old.jsonl"), "");
-		writePersistedRunRecord(agentDir, {
-			...storedRun(parentSessionId),
-			runId: "sub_inline",
-			originToolCallId: "call_inline",
-			name: "checker-1",
-			agentName: "checker",
-			definitionSource: "inline",
-			status: "closed",
-			transcriptPath: join(runDir, "old.jsonl"),
-		});
-
-		expect(await message("checker-1", "Check again.")).toMatch(/^Message 1 accepted: resuming/);
-		await waitFor(() => panes.length === 1);
-		const args = panes[0].args;
-		expect(args[args.indexOf("--tools") + 1]).toBe("read");
-		expect(readFileSync(args[args.indexOf("--append-system-prompt") + 1], "utf8")).toBe("INLINE-MARKER: check.");
+		expect(panes).toHaveLength(1);
+		expect(generations.scheduler.getRun(backend.runId)).toMatchObject({ generation: 0, status: "closed" });
 	});
 
 	it("refuses a message to a run that was interrupted, with the reason", async () => {
@@ -400,8 +363,8 @@ describe("Addressing a run", () => {
 			transcriptPath: join(getSubagentsRootDir(agentDir), parentSessionId, "sub_old", "missing.jsonl"),
 		});
 
-		expect(await message("sub_old", "Go on.")).toBe(
-			'Message 0 unavailable: "old" (sub_old) is interrupted; only a closed subagent can be resumed.',
+		expect(await message("sub_old", "Go on.")).toMatch(
+			/^Message 0 unavailable: "old" \(sub_old\) ran in tmux, before runs ran on pi's RPC, and is not resumed\./,
 		);
 	});
 

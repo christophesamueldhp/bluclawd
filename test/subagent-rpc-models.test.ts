@@ -41,7 +41,6 @@ const subagentResults = (requests: FauxRequest[]) =>
 
 /** An orchestrator whose runs are RPC children, which load `providers` for their model's provider. */
 async function startOrchestrator(providers = FAUX): Promise<RealPi> {
-	vi.stubEnv("BLUCLAWD_RPC_RUNS", "1");
 	vi.stubEnv("BLUCLAWD_RPC_PROVIDER_EXTENSIONS", providers);
 	return startRealPi();
 }

@@ -23,7 +23,7 @@ import { timed } from "../_shared/timing.ts";
 import {
 	createRunAdmission,
 	formatRunLabel,
-	MAX_OPEN_RUNS,
+	legacyRunRefusal,
 	orchestratorTools,
 	SUBAGENT_TOOL_PARAMETERS,
 	subagentInvocation,
@@ -51,7 +51,7 @@ import { describeSubagentModels } from "./models.ts";
 import { createPanel, formatRunElapsed, SUBAGENT_PANEL_WIDGET } from "./panel.ts";
 import { createParentScope, inParentScope, type ParentInboxItem } from "./parent-scope.ts";
 import type { SubagentResultDetails } from "./results.ts";
-import { daemonRunSlots, rpcRunsEnabled } from "./rpc-runs.ts";
+import { daemonRunSlots } from "./rpc-runs.ts";
 import { createRunIntervention, RUN_CONVERSATION_ENTRY } from "./run-intervention.ts";
 import { messageAsRun } from "./run-messages.ts";
 import { isResumableSubagentStatus, isTerminalSubagentStatus, type SubagentRunRecord } from "./runs.ts";
@@ -63,7 +63,7 @@ import {
 	reconcileInterruptedRuns,
 } from "./storage.ts";
 import { createAgentTaskSource } from "./task-source.ts";
-import { actAsRun, paneUp, RunReports, stopTurn } from "./tmux-runs.ts";
+import { actAsRun, paneUp, RunReports } from "./tmux-runs.ts";
 import { createParentScopeViews, runStatus } from "./views.ts";
 import { registerWorkspaceCleanup } from "./workspace-cleanup.ts";
 
@@ -86,30 +86,16 @@ const AFTER_YOU_DELEGATE = [
 	"- With no independent work left, end your turn and say you are waiting: the report will wake you.",
 	"- Never predict or invent a pending run's result; if the user asks, say it is still running.",
 ];
-const CLOSE_RUNS = `- A run stays open after it reports, and nothing closes it for you: once its work is done, close it with \`subagent_close\`. At most ${MAX_OPEN_RUNS} runs stay open; \`subagent_message\` resumes a closed one.`;
 const RPC_RUNS_END = [
 	"- Progress from a run does not wake you; its findings, questions and blockers reach you as messages.",
 	"- A run's process ends by itself once it reports: there is nothing to close. `subagent_stop` cancels a run's work; only `subagent_resume` continues a finished or stopped run.",
-];
-const TMUX_DELEGATION = [
-	`${SUBAGENT_DESCRIPTION_LEAD} that works in this same checkout, with your tools and permission rules and a fresh context window. Children cannot delegate further.`,
-	"",
-	"You own the split. Give each child a distinct task over separate files or areas: there are no locks, edits are live for you and every sibling, and the last write wins. Verify the combined result yourself.",
-	"",
-	"When to delegate:",
-	"- Independent pieces of work that can run in parallel: put their subagent calls together in one message, since calls in separate messages run one after another.",
-	"- Exploration or review whose intermediate output does not belong in the main conversation.",
-	"",
-	"When NOT to delegate:",
-	"- Single-file lookups or edits you can do directly.",
-	"- Tightly coupled sequential steps where each step depends on the previous result.",
 ];
 // Selective by design (spec #290 §13): no required role sequence, no quota, no full-history copying.
 const RPC_DELEGATION = [
 	`${SUBAGENT_DESCRIPTION_LEAD}: a pi of its own with a fresh context window and only the tools its role is granted. Children cannot delegate further.`,
 	"",
 	"Do small work yourself: a lookup, a one-file edit, or anything quicker to do than to describe. Delegate only when it helps:",
-	"- Independent pieces that can run side by side: give them together as `tasks` in one call, which returns one combined report once all have finished.",
+	"- Independent pieces that can run side by side: give them together as `tasks` in one call, which returns one combined report once all have finished; its manifest lists every member's status meanwhile.",
 	"- Dependent steps, such as an edit, then an independent review, then a repair: give them as `chain` in one call, which runs them one after another in one worktree.",
 	"- A specialized investigation or review whose intermediate output does not belong in your context.",
 	"No sequence of roles is required and there is no quota: use as many runs as the work needs. Runs past the active limit wait in a queue; that limit is not a target, so there is no need to fill every slot.",
@@ -132,20 +118,25 @@ function buildBaseSubagentDescription(catalog?: AgentDefinitionCatalog, oneShot 
 	const rolesSection = catalog
 		? formatAgentRoutingDescriptions(catalog)
 		: "- `general-purpose`: Implementation work.\n- `explorer`: Codebase exploration.\n- `reviewer`: Code review.";
-	const rpc = rpcRunsEnabled();
 	return [
-		...(rpc ? RPC_DELEGATION : TMUX_DELEGATION),
+		...RPC_DELEGATION,
 		"",
+		...(process.platform === "darwin"
+			? []
+			: [
+					`Runs get no shell on ${process.platform}: general-purpose edits files without running commands, and a role naming bash is refused.`,
+					"",
+				]),
 		...(oneShot
 			? ["Background runs are unavailable in this one-shot mode: omit `background`.", ""]
 			: [
 					"Run in the foreground (the default) when your next step needs the result. Set `background: true` only when you have independent work to do meanwhile.",
 					"",
 					...AFTER_YOU_DELEGATE,
-					...(rpc ? RPC_RUNS_END : [CLOSE_RUNS]),
+					...RPC_RUNS_END,
 					"",
 				]),
-		"Available subagent roles:",
+		"Available subagent roles, as found from your directory (a run given a `cwd` of its own finds roles from there):",
 		rolesSection,
 	].join("\n");
 }
@@ -153,7 +144,7 @@ function buildBaseSubagentDescription(catalog?: AgentDefinitionCatalog, oneShot 
 export function createSubagentsExtension(options: SubagentExtensionOptions = {}): (pi: ExtensionAPI) => void {
 	return function subagentsFactory(pi: ExtensionAPI): void {
 		const resolveAgentDir = () => options.agentDir ?? getAgentDir();
-		// Runs are pi sessions of their own (ADR-0006): this pi may be one, and launches them from its pane.
+		// This pi may be a run in tmux, from before runs ran on pi's RPC (ADR-0006), that reports from its pane.
 		const pane = Tmux.currentPane();
 		const launchedBy = runParent();
 		if (launchedBy) {
@@ -240,8 +231,10 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 
 		/** Whether a final run ended within the last half minute: the panel still tells of it, as Claude Code's does. */
 		const lately = (record: { endedAt?: number }) => now() - (record.endedAt ?? 0) < ENDED_SHOWN_MS;
+		/** A run that finished, or was stopped as asked, leaves the panel at once, as a closed run in tmux did. */
+		const leftAtOnce = (record: { status: string }) => record.status === "closed" || record.status === "cancelled";
 		/** The runs that failed or were interrupted lately: their rows stay in the panel until then, or until dismissed. */
-		const endedLately = () => views.done().filter(({ record }) => record.status !== "closed" && lately(record));
+		const endedLately = () => views.done().filter(({ record }) => !leftAtOnce(record) && lately(record));
 
 		const refreshFooterStatus = () => {
 			try {
@@ -328,7 +321,6 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			scheduler,
 			directory,
 			agentDir: resolveAgentDir,
-			catalog: () => catalog,
 			parentThinkingLevel: () => pi.getThinkingLevel(),
 			scope: parentScope,
 			pane: () => pane,
@@ -406,8 +398,9 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 		};
 
 		/**
-		 * Switches this terminal to a run of the current parent scope, its own pi session (ADR-0006); any other run is
-		 * refused with a notice.
+		 * Opens a run of the current parent scope: one on pi's RPC shows its conversation and takes an instruction; one in
+		 * tmux from before switches this terminal to its pane while it is open (ADR-0006), else shows its conversation
+		 * only. Any other run is refused with a notice.
 		 */
 		const openRun = (runId: string, owner?: string): Promise<void> | undefined => {
 			const ctx = parentScope.context();
@@ -422,10 +415,12 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 				ctx.ui.notify("That run belongs to an earlier session and can no longer be opened.", "warning");
 				return undefined;
 			}
-			if (!run.pane && run.backend === "rpc") return openRpcRun(run, ctx);
-			if (!run.pane) {
-				ctx.ui.notify(`${run.name ?? runId} has no session of its own to open.`, "warning");
-				return undefined;
+			if (run.backend === "rpc") return openRpcRun(run, ctx);
+			// A run in tmux from before runs ran on pi's RPC: its pane while it is open, else its history only.
+			if (!run.pane || isTerminalSubagentStatus(run.status)) {
+				pi.appendEntry(RUN_CONVERSATION_ENTRY, { lines: intervention.conversation(run) });
+				ctx.ui.notify(legacyRunRefusal(run), "info");
+				return Promise.resolve();
 			}
 			try {
 				showRun(run.pane);
@@ -448,35 +443,6 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			const result = await intervention.instruct(run, text, ctx);
 			if (result.ok) ctx.ui.notify(result.text, "info");
 			else ctx.ui.notify(result.error, "warning");
-		};
-
-		/**
-		 * Opening a closed run of this scope, from `/tasks`, resumes it with no message: its pi reopens on its session
-		 * for the user to type in. Undefined for any other run.
-		 */
-		const resumeClosed = (runId: string, owner?: string): Promise<void> | undefined => {
-			const run = scheduler.getRun(runId);
-			const ctx = parentScope.context();
-			// A run on pi's RPC resumes only with an instruction: opening it asks for one.
-			if (
-				!pane ||
-				!ctx ||
-				run?.status !== "closed" ||
-				run.backend === "rpc" ||
-				(owner !== undefined && owner !== run.parentSessionId)
-			) {
-				return undefined;
-			}
-			return admission.resume(run, undefined, ctx).then((resumed) => {
-				if (!resumed.ok) return ctx.ui.notify(resumed.error, "warning");
-				const reopened = scheduler.getRun(runId)?.pane;
-				try {
-					// The user's own key asked for it, so the terminal moves to the run.
-					if (reopened) showRun(reopened);
-				} catch {
-					// No terminal shows this pane.
-				}
-			});
 		};
 
 		pi.on("session_start", async (event, ctx) => {
@@ -512,8 +478,9 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			}
 
 			const branchEntries = ctx.sessionManager.getBranch();
-			// Its open runs whose pis still run, after a reload or a crash of the instance that ran them: this instance
-			// takes them over (ADR-0008). Those this process runs already are left as they are. A run is on the branch
+			// Its open runs in tmux, from before runs ran on pi's RPC, whose pis still run, after a reload or a crash of
+			// the instance that ran them: this instance takes them over (ADR-0008), and follows each until it ends or is
+			// stopped, never ending one itself. Those this process runs already are left as they are. A run is on the branch
 			// as tree navigation judges it, by the entry it was launched from.
 			if (pane) {
 				for (const run of listPersistedRunRecords(agentDir, sessionId)) {
@@ -523,7 +490,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 						parentScope.onBranch(run.originEntryId) &&
 						paneUp(timedTmux(), run.pane)
 					)
-						admission.adopt(run, ctx);
+						admission.adopt(run);
 				}
 			}
 			// Its open runs on pi's RPC, whose hosts outlive any instance of the session (ADR-0008, ADR-0010): this one
@@ -578,7 +545,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			);
 			const unpublishTasks = publishAgentTasks({
 				...taskSource,
-				open: (id, owner) => resumeClosed(id, owner) ?? openRun(id, owner),
+				open: (id, owner) => openRun(id, owner),
 			});
 			unpublish = () => {
 				unpublishTasks();
@@ -600,8 +567,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 							theme,
 							runs: () => views.open(),
 							ended: endedLately,
-							closedLately: () =>
-								views.done().some(({ record }) => record.status === "closed" && lately(record)),
+							closedLately: () => views.done().some(({ record }) => leftAtOnce(record) && lately(record)),
 							waitingFor: views.waitingFor,
 							now,
 							belowPrompt: !panelInStatus,
@@ -727,8 +693,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 
 		// The orchestrator's only: a run messages through the daemon (messageAsRun), and manages no runs.
 		const registerOrchestratorTool: typeof pi.registerTool = (tool) => {
-			// Runs on pi's RPC end their pis by themselves: the model has none to close, only work to stop.
-			if (!launchedBy && !(tool.name === "subagent_close" && rpcRunsEnabled())) pi.registerTool(tool);
+			if (!launchedBy) pi.registerTool(tool);
 		};
 		registerOrchestratorTool({
 			name: SUBAGENT_MESSAGE_TOOL,
@@ -741,10 +706,9 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 				openWorldHint: false,
 			},
 			description:
-				"Send a message to a subagent by name or run ID (sub_…). A working child gets it at its next safe point; an idle one that is still open takes a turn on it. A closed child resumes in the background with its earlier context and the message as its next instruction. The receipt says accepted, unavailable, or invalidated, never handled.",
+				"Send a message to a working subagent by name or run ID (sub_…): it gets it at its next safe point, as information for its work. A message continues no finished subagent: subagent_resume does. The receipt says accepted, unavailable, or invalidated, never handled.",
 			parameters: SUBAGENT_MESSAGE_PARAMETERS,
-			execute: async (_toolCallId, params, _signal, _onUpdate, toolCtx) => {
-				const ctx = toolCtx ?? parentScope.context();
+			execute: async (_toolCallId, params) => {
 				const scope = parentScope.current();
 				if (!scope) {
 					return {
@@ -753,14 +717,14 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 						isError: true,
 					};
 				}
-				return messageFromParent(scope, params.to.trim(), params.content, admission, ctx);
+				return messageFromParent(scope, params.to.trim(), params.content);
 			},
 		});
 
-		// Collaboration between independent orchestrators: with runs on pi's RPC only, until they are the default.
-		if (!launchedBy && rpcRunsEnabled()) collaborateAsParent(pi, { agentDir: resolveAgentDir });
-		// Only runs on pi's RPC that edit have worktrees of their own; only the user removes one that holds changes.
-		if (!launchedBy && rpcRunsEnabled()) {
+		// Collaboration between independent orchestrators, which only the user opens.
+		if (!launchedBy) collaborateAsParent(pi, { agentDir: resolveAgentDir });
+		// Runs that edit have worktrees of their own; only the user removes one that holds changes.
+		if (!launchedBy) {
 			registerWorkspaceCleanup(pi, { agentDir: resolveAgentDir, scope: () => parentScope.current(), directory });
 			registerIntegration(pi, {
 				agentDir: resolveAgentDir,
@@ -771,54 +735,43 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			});
 		}
 
-		// Only with runs on pi's RPC, whose finished runs a message does not continue.
-		if (rpcRunsEnabled()) {
-			registerOrchestratorTool({
-				name: "subagent_resume",
-				label: "Resume subagent",
-				exposure: "model-only",
-				annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
-				description:
-					"Resume a finished subagent by name or run ID with your next instruction: it continues in the background in its own saved session, with its earlier context, the role and permissions it was launched with (never more than you have now) and its own workspace. It keeps its model and thinking level unless you set them. Its report is delivered when it finishes. A message does not resume a finished subagent; for fresh context, launch a new one.",
-				parameters: Type.Object(
-					{
-						agent: Type.String({ description: "The finished subagent's name or run ID (sub_…)." }),
-						task: Type.String({ description: "Its next instruction, self-contained." }),
-						model: Type.Optional(
-							Type.String({ description: '"provider/model" from subagent_models, or "inherit" for yours.' }),
-						),
-						thinkingLevel: Type.Optional(
-							Type.String({ description: 'A thinking level, or "inherit" for yours.' }),
-						),
-					},
-					{ additionalProperties: false },
-				),
-				execute: async (_toolCallId, params, _signal, _onUpdate, toolCtx) => {
-					const ctx = toolCtx ?? parentScope.context();
-					const scope = parentScope.current();
-					if (!scope || !ctx) {
-						return {
-							content: [{ type: "text", text: "Subagent runtime is not initialized for this session." }],
-							details: undefined,
-							isError: true,
-						};
-					}
-					const { model, thinkingLevel } = params;
-					return resumeFromParent(
-						scope,
-						params.agent.trim(),
-						params.task,
-						{ model, thinkingLevel },
-						admission,
-						ctx,
-					);
+		// A message does not continue a finished run: only a Resume does.
+		registerOrchestratorTool({
+			name: "subagent_resume",
+			label: "Resume subagent",
+			exposure: "model-only",
+			annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
+			description:
+				"Resume a finished subagent by name or run ID with your next instruction: it continues in the background in its own saved session, with its earlier context, the role and permissions it was launched with (never more than you have now) and its own workspace. It keeps its model and thinking level unless you set them. Its report is delivered when it finishes. A message does not resume a finished subagent; for fresh context, launch a new one.",
+			parameters: Type.Object(
+				{
+					agent: Type.String({ description: "The finished subagent's name or run ID (sub_…)." }),
+					task: Type.String({ description: "Its next instruction, self-contained." }),
+					model: Type.Optional(
+						Type.String({ description: '"provider/model" from subagent_models, or "inherit" for yours.' }),
+					),
+					thinkingLevel: Type.Optional(Type.String({ description: 'A thinking level, or "inherit" for yours.' })),
 				},
-			});
-		}
+				{ additionalProperties: false },
+			),
+			execute: async (_toolCallId, params, _signal, _onUpdate, toolCtx) => {
+				const ctx = toolCtx ?? parentScope.context();
+				const scope = parentScope.current();
+				if (!scope || !ctx) {
+					return {
+						content: [{ type: "text", text: "Subagent runtime is not initialized for this session." }],
+						details: undefined,
+						isError: true,
+					};
+				}
+				const { model, thinkingLevel } = params;
+				return resumeFromParent(scope, params.agent.trim(), params.task, { model, thinkingLevel }, admission, ctx);
+			},
+		});
 
 		const describeProgress = ({ record: run }: RunEntry, now: number) =>
 			[
-				`${run.name ?? run.runId} (${run.agentName}, ${run.runId}): ${runStatus(run)}`,
+				`${run.name ?? run.runId} (${run.agentName}, ${run.runId}): ${runStatus(run)}${run.backend === "rpc" ? "" : ", in tmux, from before runs ran on pi's RPC: stop it once its work is done"}`,
 				`  task: ${run.taskSummary}`,
 				`  elapsed: ${formatRunElapsed(run, now)}`,
 			].join("\n");
@@ -828,7 +781,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			exposure: "model-only",
 			annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
 			description:
-				"Show your open subagents: status, whether each is working or idle, task and elapsed time. Use it to judge whether a child is stuck; stop its turn with subagent_stop.",
+				"Show your open subagents: status (queued, running or stopping), task and elapsed time. Use it to judge whether a child is stuck; stop it with subagent_stop.",
 			parameters: Type.Object(
 				{ agent: Type.Optional(Type.String({ description: "A subagent name or run ID; omit for all." })) },
 				{ additionalProperties: false },
@@ -866,10 +819,10 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 				void final.then(resolve);
 			});
 		/**
-		 * Cancels a run on pi's RPC, queued or working, and waits while the call does until nothing of it runs: a stop
-		 * asked for is not told as done.
+		 * Stops a run, queued or working, and waits while the call does until nothing of it runs: a stop asked for is not
+		 * told as done. A run on pi's RPC is cancelled; one in tmux from before has its pi ended.
 		 */
-		const stopRpcRun = async (
+		const stopRun = async (
 			run: Readonly<SubagentRunRecord>,
 			signal: AbortSignal | undefined,
 			reason = "Stopped by its orchestrator",
@@ -877,6 +830,9 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			const label = formatRunLabel(run);
 			scheduler.cancelRun(run.runId, "model", reason);
 			const final = await untilFinal(run.runId, signal);
+			if (run.backend !== "rpc" && final?.status === "closed") {
+				return { text: `Stopped ${label}: its pi in tmux ended. ${legacyRunRefusal(final)}`, stopped: true };
+			}
 			if (final?.status === "cancelled") {
 				return {
 					text: `Stopped ${label}: its work was cancelled, and none of its processes runs any more. Its session, Reports and files are kept; only subagent_resume continues it.`,
@@ -901,57 +857,39 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			label: "Stop subagent",
 			exposure: "model-only",
 			annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
-			description: rpcRunsEnabled()
-				? 'Stop a subagent by name or run ID, every member of a batch by its ID (batch_…), or every one with "all": its work is cancelled, queued or under way, and the call returns once none of its processes runs. Its session, Reports and files are kept; only subagent_resume continues it.'
-				: 'Stop the turn in progress of a subagent by name or run ID, or of every subagent with "all", as Esc does: the run stays open and takes messages. To end a run, use subagent_close.',
+			description:
+				'Stop a subagent by name or run ID, every member of a batch or chain by its ID (batch_… or chain_…), or every one with "all": its work is cancelled, queued or under way, and the call returns once none of its processes runs. Its session, Reports and files are kept; only subagent_resume continues it. A run in tmux, from before runs ran on pi\'s RPC, stays open after it reports: stop it once its work is done.',
 			parameters: Type.Object(
-				{ agent: Type.String({ description: 'A subagent name or run ID, or "all".' }) },
+				{ agent: Type.String({ description: 'A subagent name or run ID, a batch or chain ID, or "all".' }) },
 				{ additionalProperties: false },
 			),
 			execute: async (_toolCallId, params, signal) => {
 				const target = params.agent.trim();
-				if (target === "all") {
-					const open = views.open().map(({ record }) => record);
-					const rpc = open.filter((record) => record.backend === "rpc");
-					const [asked, cancelled] = await Promise.all([
-						Promise.all(
-							open.map((record) => (record.pane && pane ? stopTurn(record.pane, pane, signal) : false)),
-						),
-						Promise.all(rpc.map((record) => stopRpcRun(record, signal))),
-					]);
-					const stopped = asked.filter(Boolean).length;
-					const text = [
-						...(stopped > 0 || rpc.length === 0
-							? [`Stopped the turn of ${stopped} subagent${stopped === 1 ? "" : "s"}.`]
-							: []),
-						...cancelled.map((result) => result.text),
-					].join("\n");
-					return {
-						content: [{ type: "text", text }],
-						details: undefined,
-						isError: cancelled.some((result) => !result.stopped),
-					};
-				}
-				const run = views.findOpen(target)?.record;
-				const members = run
-					? []
-					: views.open().filter(({ record }) => record.batch === target || record.chain === target);
+				const run = target === "all" ? undefined : views.findOpen(target)?.record;
+				const members =
+					target === "all"
+						? views.open()
+						: run
+							? []
+							: views.open().filter(({ record }) => record.batch === target || record.chain === target);
 				const chain = run ? undefined : chains.get(target);
-				if (members.length > 0 || chain) {
-					const kind = chain ? "chain" : "batch";
+				if (target === "all" || members.length > 0 || chain) {
+					const kind = target === "all" ? undefined : chain ? "chain" : "batch";
 					// Each member's stop is asked first, for its reason; then a chain starts no further step.
 					const stopping = members.map(({ record }) =>
-						stopRpcRun(record, signal, `Its ${kind} ${target} was stopped`),
+						stopRun(record, signal, kind ? `Its ${kind} ${target} was stopped` : undefined),
 					);
 					chain?.abort();
-					const cancelled = await Promise.all(stopping);
-					const text = cancelled.length
-						? cancelled.map((result) => result.text).join("\n")
-						: `Stopped chain ${target}: no further step of it starts.`;
+					const stopped = await Promise.all(stopping);
+					const text = stopped.length
+						? stopped.map((result) => result.text).join("\n")
+						: chain
+							? `Stopped chain ${target}: no further step of it starts.`
+							: "No subagents are running.";
 					return {
 						content: [{ type: "text", text }],
 						details: undefined,
-						isError: cancelled.some((result) => !result.stopped),
+						isError: stopped.some((result) => !result.stopped),
 					};
 				}
 				if (!run) {
@@ -961,57 +899,8 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 						isError: true,
 					};
 				}
-				if (run.backend === "rpc") {
-					const { text, stopped } = await stopRpcRun(run, signal);
-					return { content: [{ type: "text", text }], details: undefined, isError: !stopped };
-				}
-				const label = `${run.name ?? run.runId}'s turn (${run.runId})`;
-				const stopped = run.pane !== undefined && pane !== undefined && (await stopTurn(run.pane, pane, signal));
-				return {
-					content: [
-						{
-							type: "text",
-							text: stopped
-								? `Stopped ${label}. It stays open and takes messages.`
-								: `Could not stop ${label}: its pi cannot be reached.`,
-						},
-					],
-					details: undefined,
-					isError: !stopped,
-				};
-			},
-		});
-
-		registerOrchestratorTool({
-			name: "subagent_close",
-			label: "Close subagent",
-			exposure: "model-only",
-			annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
-			description:
-				"Close an open subagent by name or run ID: its pi ends at once, without asking it, and its session is kept. Close a run once its work is done; subagent_message resumes a closed run with its earlier context.",
-			parameters: Type.Object(
-				{ agent: Type.String({ description: "A subagent name or run ID." }) },
-				{ additionalProperties: false },
-			),
-			execute: async (_toolCallId, params) => {
-				const target = params.agent.trim();
-				const run = views.findOpen(target)?.record;
-				const closed = run !== undefined && taskSource.close(run.runId, { source: "model" }).ok;
-				const label = run && formatRunLabel(run);
-				return {
-					content: [
-						{
-							type: "text",
-							text: closed
-								? `Closed ${label}.${run.pane ? " Its session is kept: a message resumes it." : ""}`
-								: run
-									? `${label} is ending already.`
-									: `No open subagent "${target}".`,
-						},
-					],
-					details: undefined,
-					isError: !closed,
-				};
+				const { text, stopped } = await stopRun(run, signal);
+				return { content: [{ type: "text", text }], details: undefined, isError: !stopped };
 			},
 		});
 
@@ -1083,33 +972,9 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 				}
 				const parentTurnId = `turn_${activeTurnIndex}`;
 				if ("chain" in invocation) {
-					if (!rpcRunsEnabled()) {
-						return {
-							content: [
-								{
-									type: "text",
-									text: "A `chain` needs runs on pi's RPC; give each subagent call one agent and task instead.",
-								},
-							],
-							details: undefined,
-							isError: true,
-						};
-					}
 					return runChain(chainDeps, invocation.chain, { toolCallId, parentTurnId, signal }, ctx);
 				}
 				if ("tasks" in invocation) {
-					if (!rpcRunsEnabled()) {
-						return {
-							content: [
-								{
-									type: "text",
-									text: "A `tasks` batch needs runs on pi's RPC; give each subagent call one agent and task instead.",
-								},
-							],
-							details: undefined,
-							isError: true,
-						};
-					}
 					const scope = parentScope.current();
 					return runTaskBatch(
 						{
@@ -1156,9 +1021,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 									text:
 										run && isTerminalSubagentStatus(run.status)
 											? `${name} ended before it reported: ${run.errorMessage ?? run.stopReason ?? run.status}.`
-											: run?.backend === "rpc"
-												? `Cancelling ${name}: its work was asked to stop, and it is ${run.status}. Its session and Reports are kept; only subagent_resume continues it.`
-												: `Stopped waiting for ${name}'s report; it stays open in its own session.`,
+											: `Cancelling ${name}: its work was asked to stop, and it is ${run?.status ?? "stopping"}. Its session and Reports are kept; only subagent_resume continues it.`,
 								},
 							],
 							details,
@@ -1168,7 +1031,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 					return { content: [{ type: "text", text: parentText }], details: { ...details, truncated } };
 				}
 
-				// A run delivers its own Reports, after each of its turns.
+				// Its Report arrives as a notice once it has finished.
 				return {
 					content: [
 						{
@@ -1177,7 +1040,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 								`Background subagent launched: ${handle.record.name} (${handle.runId})`,
 								`Agent: ${handle.record.agentName} (${handle.record.provider}/${handle.record.modelId})`,
 								`Status: ${handle.record.status}`,
-								"It stays open, and its report arrives here each time it finishes a turn.",
+								"Its report arrives here once it has finished; its process then ends by itself.",
 								`While ${handle.record.name} runs, do not redo or touch its work, including the files in its scope, and do not poll \`subagent_status\` by reflex. With no independent work left, end your turn and say you are waiting for ${handle.record.name}: its report will wake you. Never predict or invent its result; if the user asks, say it is still running.`,
 							].join("\n"),
 						},

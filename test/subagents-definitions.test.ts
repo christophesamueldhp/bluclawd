@@ -26,14 +26,18 @@ afterEach(() => {
 });
 
 describe("Task 1 (M1) — Agent definitions and bundled roles", () => {
-	it("loads bundled general-purpose, explorer and reviewer roles with responsibilities but no tool ceilings", () => {
+	it("loads bundled general-purpose, explorer and reviewer roles: the readers name no tools, general-purpose its own", () => {
 		const cwd = makeTempDir("cwd");
 		const agentDir = makeTempDir("agent");
 
 		const catalog = discoverAgentDefinitions({ cwd, agentDir, projectTrusted: true });
 		expect(catalog.diagnostics).toEqual([]);
 		expect(catalog.definitions.map((d) => d.name)).toEqual(["explorer", "general-purpose", "reviewer"]);
-		expect(catalog.definitions.every((d) => d.tools === undefined)).toBe(true);
+		expect(catalog.definitions.map((d) => d.tools)).toEqual([
+			undefined,
+			["read", "grep?", "find?", "ls?", "codemode?", "edit", "write", "bash?"],
+			undefined,
+		]);
 
 		const generalPurpose = resolveAgentDefinition(catalog, "general-purpose");
 		expect(generalPurpose.ok).toBe(true);

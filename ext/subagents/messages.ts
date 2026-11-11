@@ -123,18 +123,6 @@ export class SubagentMessageBus {
 		if (this.endpoints.delete(address)) this.closed.set(address, reason);
 	}
 
-	/** Records a message the runtime delivers itself, such as the prompt that resumes a finished child. */
-	accept(
-		from: { readonly address: string; readonly scope: ParentScope },
-		to: string,
-		toName?: string,
-	): SubagentMessageReceipt {
-		const receipt = { status: "accepted" as const, seq: this.nextSeq++, to, toName };
-		const fromName = this.recipients.find(from.scope, from.address)?.record.name;
-		this.onRecord?.({ ...receipt, from: from.address, fromName }, from.scope);
-		return receipt;
-	}
-
 	async send(
 		from: { readonly address: string; readonly scope: ParentScope },
 		to: string,

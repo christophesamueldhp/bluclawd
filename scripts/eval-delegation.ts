@@ -367,10 +367,7 @@ async function trialIn(base: string, agentDir: string, cwd: string, options: Tri
 	const piRoot = piPackageRoot(PI_CLI);
 	if (piRoot) env.PI_PACKAGE_ROOT = piRoot;
 	const providers = options.providerExtensions ?? [];
-	if (arm === "bluclawd") {
-		env.BLUCLAWD_RPC_RUNS = "1";
-		if (providers.length > 0) env.BLUCLAWD_RPC_PROVIDER_EXTENSIONS = providers.join(":");
-	}
+	if (arm === "bluclawd" && providers.length > 0) env.BLUCLAWD_RPC_PROVIDER_EXTENSIONS = providers.join(":");
 	const extensions = [...providers, ...ARM_EXTENSIONS[arm]].flatMap((path) => ["-e", path]);
 	const args = [PI_CLI, "--mode", "rpc", "-ne", ...extensions, "--model", options.model];
 	args.push("--thinking", options.thinking);

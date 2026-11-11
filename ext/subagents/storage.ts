@@ -11,12 +11,12 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
-import { type ExtensionAPI, parseSessionEntries, type SessionEntry } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { SessionUsage } from "../../daemon/ipc/protocol.ts";
 import { sanitizeDiagnosticText } from "./diagnostics.ts";
 import { sanitizeReportText } from "./results.ts";
 import { isTerminalSubagentStatus, type RunRuntimeOutcome, type SubagentRunRecord } from "./runs.ts";
-import { addSubagentUsage, createEmptySubagentUsage, sessionUsage } from "./usage.ts";
+import { addSubagentUsage, createEmptySubagentUsage } from "./usage.ts";
 
 export const SUBAGENT_RUN_CUSTOM_ENTRY = "bluclawd.subagent-run";
 export const MAX_AUTHORIZED_REPORT_VIEW_BYTES = 16 * 1024;
@@ -536,25 +536,6 @@ export function recordRunSessionUsage(
 		...current.sessions,
 		[record.runId]: { ...current.sessions?.[record.runId], [sessionId]: usage },
 	};
-	writeLedgerFile(agentDir, current);
-}
-
-/**
- * Notes what a session from before runs were pis of their own had counted already, once, before a run resumes it:
- * the run's Reports carry that session's whole total, earlier turns included.
- */
-export function recordCountedSessionUsage(agentDir: string, parentSessionId: string, sessionFile: string): void {
-	let entries: ReturnType<typeof parseSessionEntries>;
-	try {
-		entries = parseSessionEntries(readFileSync(sessionFile, "utf8"));
-	} catch {
-		return;
-	}
-	const header = entries.find((entry) => entry.type === "session");
-	const current = readLedgerFile(agentDir, parentSessionId);
-	if (!header || current.counted?.[header.id]) return;
-	const counted = sessionUsage(entries.filter((entry): entry is SessionEntry => entry.type !== "session"));
-	current.counted = { ...current.counted, [header.id]: counted };
 	writeLedgerFile(agentDir, current);
 }
 

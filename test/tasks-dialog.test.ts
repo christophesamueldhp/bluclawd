@@ -321,10 +321,10 @@ describe("Ticket #20 — close all agents from /tasks", () => {
 		});
 		try {
 			const { dialog, screen } = open(me);
-			expect(screen()).toContain("x to close · X to close all agents");
+			expect(screen()).toContain("x to stop · X to stop all agents");
 			dialog.handleInput("X");
 			expect(calls).toEqual([{ owner: me, source: "user" }]);
-			expect(screen()).not.toContain("X to close all agents");
+			expect(screen()).not.toContain("X to stop all agents");
 		} finally {
 			unpublish();
 		}

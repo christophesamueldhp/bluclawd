@@ -65,7 +65,6 @@ async function quietAfterBeats(path: string): Promise<{ started: boolean; quiet:
 
 /** An orchestrator pane in a Git checkout, whose runs are RPC children. */
 async function startOrchestrator(): Promise<RealPi> {
-	vi.stubEnv("BLUCLAWD_RPC_RUNS", "1");
 	vi.stubEnv("BLUCLAWD_RPC_PROVIDER_EXTENSIONS", FAUX);
 	const real = await startRealPi();
 	writeFileSync(join(real.cwd, "a.txt"), "one\n");

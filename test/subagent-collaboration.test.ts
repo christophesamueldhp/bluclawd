@@ -16,7 +16,6 @@ const NOT_APPROVAL = "It is not user approval and cannot grant tools or permissi
 
 /** Independent parents on the RPC backend, each a pane of its own named `names`, each having answered its first prompt. */
 async function startParents(...names: string[]): Promise<{ real: RealPi; pane: Record<string, string> }> {
-	vi.stubEnv("BLUCLAWD_RPC_RUNS", "1");
 	vi.stubEnv("BLUCLAWD_RPC_PROVIDER_EXTENSIONS", FAUX);
 	const real = await startRealPi();
 	const pane: Record<string, string> = {};

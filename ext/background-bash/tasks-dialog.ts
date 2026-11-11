@@ -186,9 +186,9 @@ function outputTail(row: TaskRow): { lines: string[]; size: number; read: number
 }
 
 /** What `x` does to a running task: a shell is stopped, a run is closed, a wake-up is cancelled. */
-const stopVerb = (row: TaskRow) => (row.kind === "agent" ? "close" : row.kind === "wakeup" ? "cancel" : "stop");
+const stopVerb = (row: TaskRow) => (row.kind === "wakeup" ? "cancel" : "stop");
 
-/** Stops a shell, closes a run, or cancels a wake-up, as the user; the model is told of a shell or a run. */
+/** Stops a shell or a run, or cancels a wake-up, as the user; the model is told of a shell or a run. */
 export function stopTask(row: TaskRow, owner?: string, source: "user" | "remote" = "user"): void {
 	if (row.kind === "agent") agentTasks()?.close(row.id, { owner, source });
 	else if (row.kind === "wakeup") wakeups.take(row.id, owner);
@@ -458,7 +458,7 @@ export class TasksDialog implements Component {
 			"↑/↓ to select",
 			...(!current || hasDetail(current) ? ["Enter to view"] : []),
 			...(current ? [sectionOf(current) === "done" ? "x to dismiss" : `x to ${stopVerb(current)}`] : []),
-			...(rows.some((row) => row.kind === "agent" && row.state === "running") ? ["X to close all agents"] : []),
+			...(rows.some((row) => row.kind === "agent" && row.state === "running") ? ["X to stop all agents"] : []),
 			"Esc to close",
 		];
 	}
