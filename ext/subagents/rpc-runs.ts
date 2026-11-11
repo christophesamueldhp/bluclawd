@@ -10,7 +10,7 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { linkSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, linkSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseSessionEntries, type SessionEntry, SettingsManager } from "@earendil-works/pi-coding-agent";
@@ -30,7 +30,16 @@ import type { AgentDefinition } from "./definitions.ts";
 import { SUBAGENT_MESSAGE_TOOL } from "./messages.ts";
 import { truncateUtf8Safe } from "./results.ts";
 import { type RpcDenyRules, RUN_DEFINITION_FLAG } from "./rpc-child.ts";
-import { prepareRpcHost, processAlive, processGroupAlive, readRpcHostState, stopRpcHost } from "./rpc-host.ts";
+import {
+	generationHost,
+	prepareRpcHost,
+	processAlive,
+	processGroupAlive,
+	type RpcHostSpec,
+	readRpcHostState,
+	runGroupAlive,
+	stopRpcHost,
+} from "./rpc-host.ts";
 import {
 	answerRunApproval,
 	markRunApprovalSeen,
@@ -40,7 +49,15 @@ import {
 	runApprovalWithdrawn,
 } from "./run-approvals.ts";
 import { checksLines, commandsRun } from "./run-evidence.ts";
-import { openRunInbox, type RunOutboxMessage, readRunOutbox, sealedRunInbox, sealRunInbox } from "./run-mailbox.ts";
+import {
+	markRunOutboxRelayed,
+	openRunInbox,
+	type RunOutboxMessage,
+	readRunOutbox,
+	relayedRunOutbox,
+	sealedRunInbox,
+	sealRunInbox,
+} from "./run-mailbox.ts";
 import { rpcRunMessageText, runTaskText } from "./run-messages.ts";
 import { runShellTmp } from "./run-shell.ts";
 import {
@@ -106,6 +123,11 @@ export interface RpcLaunch {
 	worktreeMade?: boolean;
 	/** Set on a step of a chain: its worktree is kept, even unchanged, for the steps after it; the chain releases it. */
 	keepWorktree?: boolean;
+	/**
+	 * Set on a generation an earlier instance of its orchestrator's session admitted and left behind (a reload or a
+	 * crash): the spec it was launched with, as stored then. Its host is followed if one took it, else it queues again.
+	 */
+	recovered?: RpcHostSpec;
 	/**
 	 * Why the run may no longer start, asked once its turn comes: it may have waited in the queue since Admission. It
 	 * narrows what the run is held to, never widens it.
@@ -393,6 +415,8 @@ export interface RpcRunDeps {
 	slots: RunSlots;
 	/** A background run did not start: the orchestrator is told why. */
 	notStarted(reason: string): void;
+	/** A run taken over ended with no Report while none watched it: the orchestrator is told what is uncertain. */
+	lost(reason: string): void;
 	/** A Report no foreground launch took: it goes to the orchestrator. */
 	notify(report: Extract<SessionMessage, { kind: "report" }>): void;
 	/** The usage of the run's session `sessionId`. */
@@ -419,26 +443,33 @@ export async function executeRpcRun(
 	deps: RpcRunDeps,
 ): Promise<SubagentRunOutcome> {
 	const instructions = join(launch.runDir, "instructions.md");
-	const { workspace } = launch;
-	writeFileSync(
-		instructions,
-		launch.definition.instructions +
-			(workspace
-				? `\n${workspaceInstructions(
-						workspace,
-						launch.tools.some((tool) => WORKTREE_TOOLS.includes(tool)),
-						launch.tools.includes("bash"),
-					)}`
-				: "") +
-			REPORT_INSTRUCTIONS,
-	);
-	// Open before anything is awaited: the run takes messages from its Admission on, queued or working.
-	openRunInbox(launch.runDir, record.generation);
-	/** What the run's pi has sent out since it was last looked at: its progress is only noted, wakes nobody. */
-	let relayed = 0;
+	const { workspace, recovered } = launch;
+	// A generation recovered has its files from its Admission, its inbox perhaps sealed since.
+	if (!recovered) {
+		writeFileSync(
+			instructions,
+			launch.definition.instructions +
+				(workspace
+					? `\n${workspaceInstructions(
+							workspace,
+							launch.tools.some((tool) => WORKTREE_TOOLS.includes(tool)),
+							launch.tools.includes("bash"),
+						)}`
+					: "") +
+				REPORT_INSTRUCTIONS,
+		);
+		// Open before anything is awaited: the run takes messages from its Admission on, queued or working.
+		openRunInbox(launch.runDir, record.generation);
+	}
+	/**
+	 * What the run's pi has sent out since it was last looked at: its progress is only noted, wakes nobody. How far
+	 * it was relayed is stored before each is relayed, so an instance that takes the run over goes on from there.
+	 */
+	let relayed = relayedRunOutbox(launch.runDir, record.generation);
 	const relay = () => {
 		for (const message of readRunOutbox(launch.runDir, record.generation, relayed)) {
 			relayed = message.seq;
+			markRunOutboxRelayed(launch.runDir, record.generation, relayed);
 			if (message.kind === "progress") controller.updateProgress(message.content);
 			else deps.relay(message);
 		}
@@ -457,18 +488,21 @@ export async function executeRpcRun(
 	/** What finds the processes its commands start, for a run with a shell: none may outlive its generation. */
 	let contained: RunContainment | undefined;
 	// Built before anything is awaited, so within its Admission: the run starts as admitted, however long it queues.
-	const host = prepareRpcHost(launch.runDir, {
-		command: rpcCommand(launch, instructions, runDefinitionPath(launch.runDir, record.generation)),
-		cwd: launch.cwd,
-		agentDir: launch.agentDir,
-		prompt:
-			launch.taskFrom === "user"
-				? rpcRunMessageText({ kind: "user" }, record, launch.task)
-				: runTaskText(launch.task, launch.sessionFile !== undefined),
-		model: { provider: launch.provider, id: launch.modelId, thinkingLevel: launch.thinkingLevel },
-		generation: record.generation,
-		...(launch.sessionFile ? { sessionFile: launch.sessionFile } : {}),
-	});
+	const host = prepareRpcHost(
+		launch.runDir,
+		recovered ?? {
+			command: rpcCommand(launch, instructions, runDefinitionPath(launch.runDir, record.generation)),
+			cwd: launch.cwd,
+			agentDir: launch.agentDir,
+			prompt:
+				launch.taskFrom === "user"
+					? rpcRunMessageText({ kind: "user" }, record, launch.task)
+					: runTaskText(launch.task, launch.sessionFile !== undefined),
+			model: { provider: launch.provider, id: launch.modelId, thinkingLevel: launch.thinkingLevel },
+			generation: record.generation,
+			...(launch.sessionFile ? { sessionFile: launch.sessionFile } : {}),
+		},
+	);
 	if (launch.tools.includes("bash")) {
 		const ready = await prepareRunContainment();
 		if (!ready.ok) {
@@ -483,8 +517,16 @@ export async function executeRpcRun(
 		}
 		contained = { helper: ready.helper, marker: runMarker(record.runId) };
 	}
+	/** The host that took this generation before this instance did, if one did: followed, never launched again. */
+	const taken = recovered ? generationHost(launch.runDir, record.generation) : undefined;
 	// A run that edits gets its worktree as its Admission recorded it, before it waits for its turn.
-	if (workspace && !launch.sessionFile && !launch.worktreeMade) {
+	if (
+		workspace &&
+		!launch.sessionFile &&
+		!launch.worktreeMade &&
+		!taken &&
+		!(recovered && existsSync(workspace.root))
+	) {
 		try {
 			await materializeWorktree(workspace);
 		} catch (error) {
@@ -493,19 +535,22 @@ export async function executeRpcRun(
 			return { status: "failed", summaryText: "", errorMessage: `It did not start: ${reason}${untakenNote()}` };
 		}
 	}
-	// Its session's entries from here on are this generation's: an earlier one ended before it was claimed.
-	const queuedAt = Date.now();
-	const turn = await startInTurn(
-		`${record.runId}/${record.generation}`,
-		record.parentSessionId,
-		contained ? { ...host, contained } : host,
-		launch.recheck,
-		deps.slots,
-		AbortSignal.any([signal, deps.handOff]),
-	);
+	// Its session's entries from here on are this generation's: an earlier one ended before it was claimed. A generation
+	// taken over began when its run was first started.
+	const queuedAt = recovered ? (record.startedAt ?? Date.now()) : Date.now();
+	const turn = taken
+		? { hostPid: taken }
+		: await startInTurn(
+				`${record.runId}/${record.generation}`,
+				record.parentSessionId,
+				contained ? { ...host, contained } : host,
+				launch.recheck,
+				deps.slots,
+				AbortSignal.any([signal, deps.handOff]),
+			);
 	if (!turn) {
-		// Handed off before it started: the next instance of the session finds it never started.
-		if (!signal.aborted) return new Promise<never>(() => {});
+		// Handed off before it started: the next instance of the session finds it never started, and queues it again.
+		if (deps.handOff.aborted) return new Promise<never>(() => {});
 		return { status: "cancelled", summaryText: "", errorMessage: `It was stopped before it started${untakenNote()}` };
 	}
 	if (!("hostPid" in turn)) {
@@ -518,15 +563,18 @@ export async function executeRpcRun(
 			errorMessage: `It did not start: ${reason}${untakenNote()}`,
 		};
 	}
-	const { hostPid } = turn;
 	controller.markRunning();
+	/** The generation's host: the one that took it, which a host launched again leaves it to, or the one launched. */
+	const hostOf = () => generationHost(launch.runDir, record.generation) ?? turn.hostPid;
+	/** A host taken over that is gone: its pid, read from disk, may run another process by now, never signalled. */
+	const gone = taken !== undefined && !runGroupAlive(taken, launch.runDir);
 
 	// The run's directory keeps the state of its earlier generation's host until this one stores its own.
 	const ownState = () => {
 		const state = readRpcHostState(launch.runDir);
-		return state?.hostPid === hostPid ? state : undefined;
+		return state?.hostPid === hostOf() ? state : undefined;
 	};
-	const ended = () => ownState()?.exit !== undefined || !processAlive(hostPid);
+	const ended = () => gone || ownState()?.exit !== undefined || !processAlive(hostOf());
 	/** The approvals asked for that this orchestrator saw and has not answered, each aborted once it takes no answer. */
 	const asked = new Map<string, AbortController>();
 	const approvals = () => {
@@ -553,6 +601,8 @@ export async function executeRpcRun(
 	};
 	await until(
 		() => {
+			// Handed off, it is the next instance's to relay and answer for: its scope here is gone.
+			if (deps.handOff.aborted) return false;
 			relay();
 			approvals();
 			return ended();
@@ -560,17 +610,20 @@ export async function executeRpcRun(
 		AbortSignal.any([signal, deps.handOff]),
 	);
 	// No one here answers them any more. A stopped run's host withdraws them, and an answer would let its pi go on;
-	// a run handed off goes on, blocked on them.
+	// a run handed off is the next instance's to answer.
 	for (const [id, pending] of asked) {
 		pending.abort();
-		if (!signal.aborted) answerRunApproval(launch.runDir, record.generation, id, "blocked");
+		if (!signal.aborted && !deps.handOff.aborted) answerRunApproval(launch.runDir, record.generation, id, "blocked");
 	}
-	// Handed off: the run goes on, its Report kept on disk, and this instance of the session stores nothing more.
-	if (!ended() && !signal.aborted) return new Promise<never>(() => {});
+	// Handed off: the run goes on, and the next instance of the session takes it over; this one stores nothing more,
+	// even of a run it was stopping, which that instance stops again.
+	if (deps.handOff.aborted) return new Promise<never>(() => {});
+	const hostPid = hostOf();
 	if (!ended()) stopRpcHost(hostPid);
 	// The generation ends once nothing of it runs: its host, its pi, whatever they started in the host's group, and every
 	// process its commands started, wherever they went.
-	const terminated = await endHostGroup(hostPid, contained);
+	const terminated = gone ? !contained || (await endRunProcesses(contained)) : await endHostGroup(hostPid, contained);
+	if (deps.handOff.aborted) return new Promise<never>(() => {});
 	if (terminated && contained) rmSync(runShellTmp(launch.agentDir, record.runId), { recursive: true, force: true });
 	// Once nothing of it runs, a worktree it left as it was made goes, a Resume making it again; any other stays.
 	if (workspace && terminated && !launch.keepWorktree) {
@@ -618,10 +671,21 @@ export async function executeRpcRun(
 				transcriptPath: state?.sessionFile,
 			};
 		}
+		if (!recovered) {
+			return {
+				status: "failed",
+				summaryText: report?.text ?? "",
+				errorMessage: `The run's host ended before its pi did; see rpc-host.error and rpc-child.stderr in ${launch.runDir}.${workspaceNote}`,
+				transcriptPath: state?.sessionFile,
+			};
+		}
+		// Taken over from an instance that is gone: whatever it did may have had effects nothing recorded.
+		const uncertain = `its host ended with no Report stored, so what its work did by then is uncertain, side effects included; it is not started again. Its transcript says how far it got: ${state?.sessionFile ?? "none was stored"}`;
+		deps.lost(uncertain);
 		return {
 			status: "failed",
-			summaryText: report?.text ?? "",
-			errorMessage: `The run's host ended before its pi did; see rpc-host.error and rpc-child.stderr in ${launch.runDir}.${workspaceNote}`,
+			summaryText: "",
+			errorMessage: `${uncertain[0].toUpperCase()}${uncertain.slice(1)}; see also rpc-host.error and rpc-child.stderr in ${launch.runDir}.${workspaceNote}`,
 			transcriptPath: state?.sessionFile,
 		};
 	}
@@ -650,8 +714,10 @@ export async function executeRpcRun(
 		...(usage ? { usage } : {}),
 		...(state.sessionId ? { sessionId: state.sessionId } : {}),
 	};
-	// A run stopped by its orchestrator or the user keeps its Report on disk, and wakes nobody with it.
-	if (!signal.aborted && !deps.reports.take(record.runId, message)) deps.notify(message);
+	// A run stopped by its orchestrator or the user keeps its Report on disk, and wakes nobody with it. One taken over
+	// after its Report was delivered, before its end was stored, is not delivered again.
+	const delivered = (record.lastDeliveredSeq ?? 0) >= report.seq;
+	if (!signal.aborted && !delivered && !deps.reports.take(record.runId, message)) deps.notify(message);
 	return {
 		// Stopped, and nothing of it runs any more; one that finished its work first was not cancelled.
 		status: signal.aborted && outcome.status !== "completed" ? "cancelled" : "closed",

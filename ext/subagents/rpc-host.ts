@@ -8,8 +8,8 @@
  * host stops the run.
  */
 
-import { type ChildProcess, spawn } from "node:child_process";
-import { appendFileSync, openSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { type ChildProcess, spawn, spawnSync } from "node:child_process";
+import { appendFileSync, mkdirSync, openSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { piPackageRoot } from "../../daemon/orchestrator-client.ts";
@@ -55,6 +55,8 @@ export interface RpcHostSpec {
 /** The host as it last stored itself. */
 export interface RpcHostState {
 	hostPid: number;
+	/** The run's generation it runs; absent in a state stored before hosts said. */
+	generation?: number;
 	/** Stored as soon as the run's pi is spawned. */
 	childPid?: number;
 	/** The run's session; pi writes the file only once it holds a message. */
@@ -69,6 +71,8 @@ export interface RpcHostState {
 
 const specPath = (runDir: string) => join(runDir, "rpc-spec.json");
 const statePath = (runDir: string) => join(runDir, "rpc-host.json");
+/** Holds the pid of the one host that runs the generation: whichever started first, however often it was launched. */
+const hostClaimPath = (runDir: string, generation: number) => join(runDir, "hosts", String(generation));
 /** Child stderr: pi reports a failed start only there. */
 const stderrPath = (runDir: string) => join(runDir, "rpc-child.stderr");
 /** How often the host looks for messages posted to the run. */
@@ -107,6 +111,35 @@ export function readRpcHostState(runDir: string): RpcHostState | undefined {
 	} catch {
 		return undefined;
 	}
+}
+
+/** The spec the run's latest generation was launched with, as stored before it queued. */
+export function readRpcHostSpec(runDir: string): RpcHostSpec | undefined {
+	try {
+		return JSON.parse(readFileSync(specPath(runDir), "utf8")) as RpcHostSpec;
+	} catch {
+		return undefined;
+	}
+}
+
+/** The pid of the host that took generation `generation` of the run, once one did. */
+export function generationHost(runDir: string, generation: number): number | undefined {
+	try {
+		const pid = Number(readFileSync(hostClaimPath(runDir, generation), "utf8"));
+		return pid > 0 ? pid : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+/**
+ * Whether anything of the run still runs in the process group its host `pid` led, a pid read from disk: one given to
+ * another process since is not the host, whose command names the run's directory. No pid is given out again while a
+ * group of that id has members, so once the host is gone, any member left is the run's.
+ */
+export function runGroupAlive(pid: number, runDir: string): boolean {
+	if (!processAlive(pid)) return processGroupAlive(pid);
+	return spawnSync("ps", ["-o", "command=", "-p", String(pid)], { encoding: "utf8" }).stdout.includes(runDir);
 }
 
 export function processAlive(pid: number): boolean {
@@ -205,7 +238,15 @@ const textOf = (content: unknown): string =>
 
 async function host(runDir: string): Promise<void> {
 	const spec = JSON.parse(readFileSync(specPath(runDir), "utf8")) as RpcHostSpec;
-	const state: RpcHostState = { hostPid: process.pid };
+	// A generation runs once: a host launched for it again, after a lost reply or a recovery, leaves it to the first.
+	mkdirSync(dirname(hostClaimPath(runDir, spec.generation)), { recursive: true, mode: 0o700 });
+	try {
+		writeFileSync(hostClaimPath(runDir, spec.generation), String(process.pid), { flag: "wx", mode: 0o600 });
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "EEXIST") return;
+		throw error;
+	}
+	const state: RpcHostState = { hostPid: process.pid, generation: spec.generation };
 	const save = () => writeAtomicPrivateFile(statePath(runDir), JSON.stringify(state));
 	save();
 

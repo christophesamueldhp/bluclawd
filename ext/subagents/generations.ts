@@ -179,7 +179,8 @@ export function createGenerations(deps: GenerationDeps) {
 			const usage = (sessionId: string, totals: SessionUsage) =>
 				recordRunSessionUsage(deps.agentDir(), params.record, sessionId, totals);
 			if ("rpc" in execCtx) {
-				if (!params.record.generation) recordLaunch(params.record);
+				// A run taken over was recorded when it launched.
+				if (!params.record.generation && !execCtx.rpc.recovered) recordLaunch(params.record);
 				const scope = { parentSessionId: params.record.parentSessionId, sessionEpoch: params.record.sessionEpoch };
 				// Posted to the run's inbox, which its host gives its pi at its next safe point, until the run settles.
 				deps.bus.register(runId, {
@@ -199,23 +200,26 @@ export function createGenerations(deps: GenerationDeps) {
 						}
 					},
 				});
+				/** Tells the orchestrator what became of the run, with no Report of it. */
+				const tell = (what: string) => {
+					const record = scheduler.getRun(runId);
+					if (!record) return;
+					deps.scope.notify(record, {
+						parentText: `Subagent ${formatRunLabel(record)} ${what}`,
+						details: {
+							...buildSubagentResultEnvelope(record, MAX_PARENT_REPORT_BYTES).details,
+							truncated: false,
+						},
+					});
+				};
 				try {
 					return await executeRpcRun(params, execCtx.rpc, {
 						reports: deps.reports,
 						handOff: deps.handOff,
 						slots: deps.slots,
 						notify,
-						notStarted: (reason) => {
-							const record = scheduler.getRun(runId);
-							if (!record) return;
-							deps.scope.notify(record, {
-								parentText: `Subagent ${formatRunLabel(record)} did not start: ${reason}`,
-								details: {
-									...buildSubagentResultEnvelope(record, MAX_PARENT_REPORT_BYTES).details,
-									truncated: false,
-								},
-							});
-						},
+						notStarted: (reason) => tell(`did not start: ${reason}`),
+						lost: (reason) => tell(`ended while its orchestrator's session was gone: ${reason}`),
 						usage,
 						// Sent as the run, in the scope it was admitted in: a stale one is refused, and kept on record.
 						relay: (message) => {
@@ -320,5 +324,17 @@ export function createGenerations(deps: GenerationDeps) {
 	const directory = createRunDirectory({ scheduler, agentDir: deps.agentDir });
 	const { messageFromParent, resumeFromParent } = createRunAddressing({ directory, bus: deps.bus });
 
-	return { scheduler, directory, messageFromParent, resumeFromParent, pullReports };
+	/**
+	 * Tells the orchestrator of a final run's latest Report, which a batch's waiter took and never passed on: that
+	 * instance of the session is gone, its batch with it.
+	 */
+	const retellReport = (run: Readonly<SubagentRunRecord>) => {
+		const agentDir = deps.agentDir();
+		const report = readRunReports(subagentRunDir(agentDir, run.parentSessionId, run.runId), 0)
+			.filter(({ generation }) => generation === run.generation)
+			.at(-1);
+		if (report) deps.scope.notify(run, noticeOf(agentDir, run, report));
+	};
+
+	return { scheduler, directory, messageFromParent, resumeFromParent, pullReports, retellReport };
 }

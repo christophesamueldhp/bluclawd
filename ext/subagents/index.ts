@@ -29,7 +29,7 @@ import {
 	subagentInvocation,
 } from "./admission.ts";
 import { runTaskBatch } from "./batches.ts";
-import { runChain } from "./chains.ts";
+import { type ChainDeps, resumeChains, runChain } from "./chains.ts";
 import { collaborateAsParent } from "./collaboration.ts";
 import {
 	type AgentDefinitionCatalog,
@@ -310,18 +310,19 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 		const slots = daemonRunSlots(() =>
 			maxActiveSubagents(SettingsManager.create(process.cwd(), resolveAgentDir(), { projectTrusted: false })),
 		);
-		const { scheduler, directory, messageFromParent, resumeFromParent, pullReports } = createGenerations({
-			agentDir: resolveAgentDir,
-			bus: messageBus,
-			scope: parentScope,
-			pi,
-			onChange: runsChanged,
-			reports,
-			tmux: timedTmux,
-			send: (to, message) => new OrchestratorClient().send(to, message),
-			handOff: handOff.signal,
-			slots,
-		});
+		const { scheduler, directory, messageFromParent, resumeFromParent, pullReports, retellReport } =
+			createGenerations({
+				agentDir: resolveAgentDir,
+				bus: messageBus,
+				scope: parentScope,
+				pi,
+				onChange: runsChanged,
+				reports,
+				tmux: timedTmux,
+				send: (to, message) => new OrchestratorClient().send(to, message),
+				handOff: handOff.signal,
+				slots,
+			});
 
 		const admission = createRunAdmission({
 			scheduler,
@@ -335,6 +336,25 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			registeredTools: () => latestLoadout?.registered.map((tool) => tool.name) ?? [],
 			ensureQueue: () => slots.ensure(),
 		});
+
+		/** What a chain's driver works with: a `chain` call's, and one taken over from an earlier instance's. */
+		const chainDeps: ChainDeps = {
+			admission,
+			nameHolder: (name) => {
+				const scope = parentScope.current();
+				return scope ? directory.nameHolder(scope, name)?.record : undefined;
+			},
+			agentDir: resolveAgentDir,
+			reports,
+			getRun: (runId) => scheduler.getRun(runId),
+			whenFinal: (runId) => scheduler.whenFinal(runId),
+			handOff: handOff.signal,
+			cancel: (runId, reason) => scheduler.cancelRun(runId, "caller", reason),
+			scope: parentScope,
+			context: () => parentScope.context(),
+			live: chains,
+			notify: (first, notice) => parentScope.notify(first, notice),
+		};
 
 		/** The orchestrator is told, and goes on as it was: it still owns the work (ADR-0005). */
 		const noteToOrchestrator = (text: string) =>
@@ -506,6 +526,23 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 						admission.adopt(run, ctx);
 				}
 			}
+			// Its open runs on pi's RPC, whose hosts outlive any instance of the session (ADR-0008, ADR-0010): this one
+			// takes each over as its run directory has it, after a reload or a crash. One whose host took it is followed
+			// to its end; one that never started queues again, and starts only if this session may still start it. A
+			// stop requested before stays requested, and a run off the branch is stopped, as tree navigation would.
+			for (const run of listPersistedRunRecords(agentDir, sessionId)) {
+				if (run.backend !== "rpc" || isTerminalSubagentStatus(run.status) || scheduler.getRun(run.runId)) continue;
+				if (!admission.recover(run, ctx)) continue;
+				if (run.status === "stopping") {
+					scheduler.cancelRun(run.runId, run.stopSource ?? "user", run.stopReason ?? "Subagent run cancelled");
+				} else if (!parentScope.onBranch(run.originEntryId)) {
+					scheduler.cancelRun(
+						run.runId,
+						"session_invalidated",
+						"Originating branch is no longer active after tree navigation",
+					);
+				}
+			}
 			// The session's runs an earlier instance left open and this one did not take over, on any branch.
 			const liveIds = new Set(scheduler.listActiveRuns(sessionId).map((r) => r.runId));
 			for (const run of reconcileInterruptedRuns(agentDir, sessionId, liveIds)) {
@@ -522,6 +559,16 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 				}
 				// Reports its runs stored but could not send while it was gone.
 				pullReports(reopened);
+				// Its chains under way go on, their next steps admitted by this instance.
+				resumeChains(chainDeps, sessionId);
+				// A batch with a member still open never settled: those of its members that ended, their Reports taken by its
+				// waiter, are told of one by one, as the members still open will be.
+				const unsettled = new Set(scheduler.listActiveRuns(sessionId).flatMap((run) => run.batch ?? []));
+				for (const run of listPersistedRunRecords(agentDir, sessionId)) {
+					if (run.batch && unsettled.has(run.batch) && isTerminalSubagentStatus(run.status)) {
+						retellReport({ ...run, sessionEpoch: reopened.sessionEpoch });
+					}
+				}
 			}
 
 			unpublish?.();
@@ -660,6 +707,8 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 				parentScope.release();
 				handOff.abort();
 			} else {
+				// The session ends: no later step of its chains starts, whoever reopens it.
+				for (const stop of chains.values()) stop.abort();
 				parentScope.shutdown();
 				await scheduler.waitForSettled();
 			}
@@ -1046,24 +1095,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 							isError: true,
 						};
 					}
-					const scope = parentScope.current();
-					return runChain(
-						{
-							admission,
-							nameHolder: (name) => (scope ? directory.nameHolder(scope, name)?.record : undefined),
-							agentDir: resolveAgentDir,
-							reports,
-							getRun: (runId) => scheduler.getRun(runId),
-							cancel: (runId, reason) => scheduler.cancelRun(runId, "caller", reason),
-							scope: parentScope,
-							context: () => parentScope.context(),
-							live: chains,
-							notify: (first, notice) => parentScope.notify(first, notice),
-						},
-						invocation.chain,
-						{ toolCallId, parentTurnId, signal },
-						ctx,
-					);
+					return runChain(chainDeps, invocation.chain, { toolCallId, parentTurnId, signal }, ctx);
 				}
 				if ("tasks" in invocation) {
 					if (!rpcRunsEnabled()) {
