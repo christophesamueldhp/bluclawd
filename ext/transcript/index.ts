@@ -256,6 +256,7 @@ const OWN_LOOKS: Record<string, OwnLook> = {
 	subagent,
 	subagent_message: answers("SubagentMessage", "to"),
 	subagent_stop: answers("SubagentStop", "agent"),
+	// Removed from the model (ADR-0010): kept so sessions from before still show their calls to it.
 	subagent_close: answers("SubagentClose", "agent"),
 	subagent_roster: answers("SubagentRoster"),
 	subagent_status,

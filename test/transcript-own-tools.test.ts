@@ -136,6 +136,7 @@ describe("the subagent tools", () => {
 	it.each([
 		["subagent_message", { to: "auth-scan", content: "hi" }, "Message 2 accepted.", "SubagentMessage(auth-scan)"],
 		["subagent_stop", { agent: "all" }, "Stopped the turn of 2 subagents.", "SubagentStop(all)"],
+		// As a session from before its removal holds it.
 		["subagent_close", { agent: "auth-scan" }, 'Closed "auth-scan" (sub_1).', "SubagentClose(auth-scan)"],
 		["subagent_roster", {}, "You can message: parent (your orchestrator), lint.", "SubagentRoster()"],
 		["subagent_status", {}, "No subagents are running.", "SubagentStatus()"],
