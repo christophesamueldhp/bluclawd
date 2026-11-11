@@ -107,12 +107,14 @@ The review scenario's bluclawd wall time includes the test's own wait while it n
 
 ## First live run (2026-11-11)
 
-One trial of `investigate`, stock vs bluclawd, on `openai-codex/gpt-6.1-sol` with thinking `low`, revision 75b0136, pi 1.5.2. The command was the one above with `--trials 1 --arms stock,bluclawd --scenarios investigate --max-tokens 200000 --max-dollars 2`.
+One trial each of `investigate` and `parallel`, stock vs bluclawd, on `openai-codex/gpt-6.1-sol` with thinking `low`, revision 75b0136, pi 1.5.2. The command was the one above with `--trials 1 --arms stock,bluclawd --max-dollars 2`, with `--scenarios investigate --max-tokens 200000` or `--scenarios parallel --max-tokens 400000`.
 
 | arm | correct | wall ms | tokens | cost $ | parent requests | Runs started |
 |---|---|---|---|---|---|---|
-| stock | yes | 10997 | 10740 | 0.0081 | 4 | — |
-| bluclawd | yes | 10797 | 21517 | 0.0143 | 4 | 0 |
+| investigate: stock | yes | 10997 | 10740 | 0.0081 | 4 | — |
+| investigate: bluclawd | yes | 10797 | 21517 | 0.0143 | 4 | 0 |
+| parallel: stock | yes | 29384 | 24392 | 0.0195 | 8 | — |
+| parallel: bluclawd | yes | 24266 | 44528 | 0.0310 | 8 | 0 |
 
-- **The model did not delegate**, so no Run's pi ran on the real provider. The bluclawd orchestrator worked on the real provider; the extra tokens are the tools' cost even when unused (see above).
-- **This is one trial of one scenario.** It shows no delegation quality and supports no cost or speed claim. A `parallel` or `review` trial is needed to see a Run on a real provider.
+- **The model delegated nothing in either scenario**, so no Run's pi ran on the real provider. Its guidance tells it to do small work itself, and the fixture tasks are small. The bluclawd orchestrator worked on the real provider; the extra tokens are the tools' cost even when unused (see above).
+- **One trial per scenario** shows no delegation quality and supports no cost or speed claim. Seeing a Run on a real provider needs a task the model chooses to delegate, or one that tells it to.
