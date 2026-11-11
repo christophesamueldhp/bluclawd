@@ -30,6 +30,7 @@ function fakeEngine(overrides: Partial<SandboxEngine> = {}): SandboxEngine & { c
 		calls,
 		isSupportedPlatform: () => true,
 		checkDependencies: () => ({ errors: [], warnings: [] }),
+		canBlockUnixSockets: async () => true,
 		initialize: async () => {
 			calls.push("initialize");
 		},
@@ -84,11 +85,52 @@ describe("startSandbox", () => {
 
 	it("is unavailable with the missing dependencies and how to install them on Linux", async () => {
 		setSandboxEngine(
-			fakeEngine({ checkDependencies: () => ({ errors: ["bubblewrap (bwrap) not installed"], warnings: [] }) }),
+			fakeEngine({
+				checkDependencies: () => ({ errors: ["bubblewrap (bwrap) not installed"], warnings: [] }),
+				// The missing dependencies come first: the filter's own message does not say how to install them.
+				canBlockUnixSockets: async () => false,
+			}),
 		);
 		const status = await startSandbox(config, deny, "linux");
 		expect(status.kind === "unavailable" && status.reason).toContain("bubblewrap (bwrap) not installed");
 		expect(status.kind === "unavailable" && status.reason).toContain("apt install bubblewrap socat ripgrep");
+	});
+
+	it("is unavailable on Linux when Unix sockets cannot be blocked, naming the missing binary", async () => {
+		const engine = fakeEngine({ canBlockUnixSockets: async () => false });
+		setSandboxEngine(engine);
+		const status = await startSandbox(config, deny, "linux");
+		expect(status.kind).toBe("unavailable");
+		expect(status.kind === "unavailable" && status.reason).toContain("apply-seccomp");
+		expect(status.kind === "unavailable" && status.reason).toContain("allowAllUnixSockets");
+		expect(engine.calls).toEqual([]);
+	});
+
+	it("starts on Linux without the Unix-socket filter when the settings allow every Unix socket", async () => {
+		setSandboxEngine(fakeEngine({ canBlockUnixSockets: async () => false }));
+		const allowAll = { ...config, network: { ...config.network, allowAllUnixSockets: true } };
+		expect(await startSandbox(allowAll, deny, "linux")).toEqual({ kind: "ready" });
+	});
+
+	it("becomes unavailable on Linux when the settings stop allowing every Unix socket and none can be blocked", async () => {
+		const engine = fakeEngine({ canBlockUnixSockets: async () => false });
+		setSandboxEngine(engine);
+		const allowAll = { ...config, network: { ...config.network, allowAllUnixSockets: true } };
+		await startSandbox(allowAll, deny, "linux");
+		const status = await startSandbox(config, deny, "linux");
+		expect(status.kind === "unavailable" && status.reason).toContain("apply-seccomp");
+		expect(engine.calls).toEqual(["initialize"]);
+	});
+
+	it("starts on macOS whatever the Linux Unix-socket filter", async () => {
+		setSandboxEngine(fakeEngine({ canBlockUnixSockets: async () => false }));
+		expect(await startSandbox(config, deny, "darwin")).toEqual({ kind: "ready" });
+	});
+
+	it("starts on Linux with the apply-seccomp binary the settings name", async () => {
+		const seccomp = { applyPath: "/opt/srt/apply-seccomp" };
+		setSandboxEngine(fakeEngine({ canBlockUnixSockets: async (given) => given?.applyPath === seccomp.applyPath }));
+		expect(await startSandbox({ ...config, seccomp }, deny, "linux")).toEqual({ kind: "ready" });
 	});
 
 	it("is unavailable when the platform is unsupported or the engine throws", async () => {
