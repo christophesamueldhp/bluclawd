@@ -33,7 +33,8 @@ export interface RunOutboxMessage {
 let posted = 0;
 
 const inboxPath = (runDir: string, generation: number) => join(runDir, "inbox", String(generation));
-const sealedPath = (runDir: string, generation: number) => `${inboxPath(runDir, generation)}.sealed`;
+/** Where the inbox of the run's generation is kept once sealed. */
+export const sealedRunInbox = (runDir: string, generation: number) => `${inboxPath(runDir, generation)}.sealed`;
 const outboxPath = (runDir: string, generation: number) => join(runDir, "outbox", String(generation));
 
 export function openRunInbox(runDir: string, generation: number): void {
@@ -54,7 +55,7 @@ export function postToRun(
 ): { accepted: true; id: string } | { accepted: false } {
 	const keyed = key && `-${key.replaceAll("/", ".")}`;
 	if (keyed) {
-		const landed = [inboxPath(runDir, generation), sealedPath(runDir, generation)]
+		const landed = [inboxPath(runDir, generation), sealedRunInbox(runDir, generation)]
 			.flatMap((dir) => {
 				try {
 					return readdirSync(dir);
@@ -120,24 +121,24 @@ function settlePosts(runDir: string): void {
 /** Seals the inbox, if still open, so nothing more lands in it; returns every message that did. */
 export function sealRunInbox(runDir: string, generation: number): RunInboxMessage[] {
 	try {
-		renameSync(inboxPath(runDir, generation), sealedPath(runDir, generation));
+		renameSync(inboxPath(runDir, generation), sealedRunInbox(runDir, generation));
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
 	}
 	// Listed only after the rename: a post that starts later finds no open inbox.
 	settlePosts(runDir);
-	return readMessages(sealedPath(runDir, generation));
+	return readMessages(sealedRunInbox(runDir, generation));
 }
 
 /** Opens a sealed inbox again: what landed just before the seal gave the run more work. */
 export function unsealRunInbox(runDir: string, generation: number): void {
-	if (existsSync(sealedPath(runDir, generation)))
-		renameSync(sealedPath(runDir, generation), inboxPath(runDir, generation));
+	if (existsSync(sealedRunInbox(runDir, generation)))
+		renameSync(sealedRunInbox(runDir, generation), inboxPath(runDir, generation));
 }
 
 /** Notes that the host gave message `id` to the run's pi, which takes it at its next safe point. */
 export function markGiven(runDir: string, generation: number, id: string): void {
-	for (const dir of [inboxPath(runDir, generation), sealedPath(runDir, generation)]) {
+	for (const dir of [inboxPath(runDir, generation), sealedRunInbox(runDir, generation)]) {
 		try {
 			writeFileSync(join(dir, `${id}.given`), "", { mode: 0o600 });
 			return;
@@ -151,7 +152,7 @@ export function markGiven(runDir: string, generation: number, id: string): void 
 export async function whenGiven(runDir: string, generation: number, id: string, timeoutMs: number): Promise<boolean> {
 	const deadline = Date.now() + timeoutMs;
 	for (;;) {
-		const given = [inboxPath(runDir, generation), sealedPath(runDir, generation)].some((dir) =>
+		const given = [inboxPath(runDir, generation), sealedRunInbox(runDir, generation)].some((dir) =>
 			existsSync(join(dir, `${id}.given`)),
 		);
 		if (given) return true;
@@ -159,9 +160,6 @@ export async function whenGiven(runDir: string, generation: number, id: string, 
 		await new Promise((resolve) => setTimeout(resolve, 25));
 	}
 }
-
-/** Where the inbox of the run's generation is kept once sealed. */
-export const sealedRunInbox = sealedPath;
 
 export function writeRunOutbox(runDir: string, generation: number, message: RunOutboxMessage): void {
 	writeAtomicPrivateFile(join(outboxPath(runDir, generation), `${message.seq}.json`), JSON.stringify(message));
