@@ -57,6 +57,8 @@ describe.skipIf(!supported)(
 					allowWrite: [],
 					denyRead: [],
 					denyWrite: [],
+					denyUnixSockets: [],
+					credentialFiles: [],
 					written: { credentials: { envVars: [{ name: "BLUCLAWD_IT_TOKEN", mode: "deny" }] } },
 				},
 				["Read(**/.env*)"],

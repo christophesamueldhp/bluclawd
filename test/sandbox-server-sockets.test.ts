@@ -10,8 +10,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SandboxManager } from "@anthropic-ai/sandbox-runtime";
 import { createLocalBashOperations } from "@earendil-works/pi-coding-agent";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { runtimeConfig, serverDirs } from "../ext/sandbox/config.ts";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { parseSandbox, runtimeConfig, serverDirs } from "../ext/sandbox/config.ts";
 import { setSandboxEngine, startSandbox, stopSandbox, wrapExec } from "../ext/sandbox/runtime.ts";
 
 const supported =
@@ -50,14 +50,9 @@ describe.skipIf(!supported)("the orchestrator's shell and bluclawd's own sockets
 	}
 
 	async function start(network: Record<string, unknown>): Promise<void> {
-		const config = runtimeConfig(
-			{ allowedDomains: [], allowWrite: [], denyRead: [], denyWrite: [], written: { network } },
-			[],
-			project,
-			home,
-			tmpdir(),
-			dirs,
-		);
+		const setting = parseSandbox({ enabled: true, network });
+		if (setting.kind !== "on") throw new Error(setting.kind);
+		const config = runtimeConfig(setting.settings, [], project, home, tmpdir(), dirs);
 		expect(await startSandbox(config, async () => false)).toEqual({ kind: "ready" });
 	}
 
@@ -102,17 +97,11 @@ describe.skipIf(!supported)("the orchestrator's shell and bluclawd's own sockets
 			await new Promise<void>((resolve) => server.listen(path, resolve));
 			servers.push(server);
 		}
-		const saved = { HOME: process.env.HOME, PI_SERVER_DIR: process.env.PI_SERVER_DIR };
-		process.env.HOME = home;
-		process.env.PI_SERVER_DIR = privateDir;
-		try {
-			dirs = serverDirs();
-		} finally {
-			for (const [key, value] of Object.entries(saved)) {
-				if (value === undefined) delete process.env[key];
-				else process.env[key] = value;
-			}
-		}
+		vi.stubEnv("HOME", home);
+		vi.stubEnv("PI_SERVER_DIR", privateDir);
+		dirs = serverDirs();
+		// The sandbox itself starts under the real home.
+		vi.unstubAllEnvs();
 		setSandboxEngine(undefined);
 	});
 

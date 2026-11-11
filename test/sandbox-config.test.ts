@@ -9,7 +9,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { pathRule } from "../ext/permissions/rules.ts";
 import { checkRuntimeConfig, parseSandbox, runtimeConfig, sandboxSetting, serverDirs } from "../ext/sandbox/config.ts";
 
-const none = { allowedDomains: [], allowWrite: [], denyRead: [], denyWrite: [], written: {} };
+const none = {
+	allowedDomains: [],
+	allowWrite: [],
+	denyRead: [],
+	denyWrite: [],
+	denyUnixSockets: [],
+	credentialFiles: [],
+	written: {},
+};
 
 describe("pathRule", () => {
 	it("reads Read, Edit and Write rules with a path, any case", () => {
@@ -35,6 +43,21 @@ describe("parseSandbox", () => {
 				...none,
 				allowedDomains: ["github.com"],
 				written: { network: { allowedDomains: ["github.com"] } },
+			},
+		});
+	});
+
+	it("carries the Unix-socket denies and credential files it checked", () => {
+		const setting = parseSandbox({
+			enabled: true,
+			network: { denyUnixSockets: ["/var/run/other"] },
+			credentials: { files: [{ path: "~/.aws/credentials", mode: "deny" }] },
+		});
+		expect(setting).toMatchObject({
+			kind: "on",
+			settings: {
+				denyUnixSockets: ["/var/run/other"],
+				credentialFiles: [{ path: "~/.aws/credentials", mode: "deny" }],
 			},
 		});
 	});
@@ -112,11 +135,11 @@ describe("runtimeConfig", () => {
 	it("writes to the project and temp, plus allowWrite; adds the settings' own lists once", () => {
 		const config = runtimeConfig(
 			{
+				...none,
 				allowedDomains: ["github.com"],
 				allowWrite: ["~/.npm"],
 				denyRead: ["~/**/.env*", "~/**/.env*"],
 				denyWrite: ["/etc"],
-				written: {},
 			},
 			["Read(~/**/.env*)"],
 			cwd,

@@ -119,6 +119,8 @@ describe.skipIf(!supported)("a run's shell, on the operating system", () => {
 					allowWrite: [sibling],
 					denyRead: [join(sibling, "s.txt")],
 					denyWrite: [],
+					denyUnixSockets: [],
+					credentialFiles: [],
 					written: { credentials: { envVars: [{ name: "RUN_SHELL_TOKEN", mode: "deny" }] } },
 				},
 			}),

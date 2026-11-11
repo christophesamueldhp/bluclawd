@@ -37,9 +37,10 @@ What bluclawd adds before it hands the config to `srt`:
 | `filesystem.allowWrite` | Plus the working directory and the temp directory |
 | Everything else | Sent as written |
 
-These four lists take strings only. bluclawd turns their paths absolute: `~/x` is under home,
+`network.allowedDomains`, `network.denyUnixSockets` and the three `filesystem` lists take strings
+only. bluclawd turns the `filesystem` lists' paths absolute: `~/x` is under home,
 and a relative path is under the working directory; a trailing `/` is dropped. `srt`'s `{ "path": …, "literal": true }`
-form works in `filesystem.allowRead`, but not in these four lists. Paths in other keys
+form works in `filesystem.allowRead`, but not in these lists. Paths in other keys
 (`allowRead`, `credentials.files`) reach `srt` as written: `srt` expands `~`, and resolves a
 relative path against pi's own working directory.
 
@@ -95,15 +96,22 @@ port per session (no UI: refused).
 
 ### bluclawd's own sockets
 
-bluclawd's own sockets are never a way out of the sandbox, whatever the Unix-socket keys allow.
-The daemon's `server.sock` and tmux's `tmux.sock` live in the server directory (`~/.pi/server`,
-or `$PI_SERVER_DIR`). bluclawd always adds that directory and the default one, by real path, to
-`denyUnixSockets` and to the denied `credentials.files`; no setting turns this off. On macOS a
-command cannot connect to either socket, even with `allowAllUnixSockets` or an `allowUnixSockets`
-entry above the directory (`~`, `~/.pi`), and cannot read the directory, whatever `allowRead`
-names. On Linux one socket path cannot be denied, so hiding the directory is the whole mechanism;
-it is read from `srt`'s code and not yet run there. Sockets bluclawd does not own (your tmux,
-Docker) follow these keys as written. Why: ADR-0012.
+bluclawd's own sockets are never a way out of the sandbox, whatever the Unix-socket keys allow,
+save with `filesystem.disabled` on Linux (below). The daemon's `server.sock` and tmux's
+`tmux.sock` live in the server directory (`~/.pi/server`, or `$PI_SERVER_DIR`). bluclawd always
+adds that directory and the default one, by real path, to `denyUnixSockets` and to the denied
+`credentials.files`; no setting removes them. On macOS a command cannot connect to either socket,
+even with `allowAllUnixSockets` or an `allowUnixSockets` entry above the directory (`~`,
+`~/.pi`), and cannot read the directory, whatever `allowRead` names. On Linux one socket path
+cannot be denied, so hiding the directory is the whole mechanism; it is read from `srt`'s code
+and not yet run there.
+
+One setting lifts the read deny: `filesystem.disabled: true` drops every file rule, the credential
+denies included, so a command can then read the server directory, on macOS too. The socket deny
+is a network rule and still holds on macOS. On Linux nothing is left: with `filesystem.disabled`
+and Unix sockets allowed, a command can reach bluclawd's sockets.
+
+Sockets bluclawd does not own (your tmux, Docker) follow these keys as written. Why: ADR-0012.
 
 ### TLS termination (experimental)
 
@@ -137,8 +145,8 @@ nothing from settings): `allowPlaintextHeaderSet`, `stripResponseHeaders`, `refu
 
 Paths take globs: `*`, `**`, `?`, `[abc]`. On Linux, `allowWrite`/`denyWrite` take literal paths
 only (a trailing `/**` is dropped), and a read glob whose first component is a wildcard
-(`/**/*.pem`) is skipped and hides nothing. bluclawd makes its four lists absolute, which avoids
-that for them.
+(`/**/*.pem`) is skipped and hides nothing. bluclawd makes `denyRead`, `allowWrite` and
+`denyWrite` absolute, which avoids that for them.
 
 Always protected from writes, even inside the project: shell rc files (`.bashrc`, `.zshrc`,
 `.profile`, …), `.gitconfig`, `.gitmodules`, `.ripgreprc`, `.mcp.json`, `.git/hooks`,
@@ -206,8 +214,8 @@ Each of these reopens something the sandbox otherwise closes. Turn one on only f
 
 | Key | What it gives up |
 |---|---|
-| `filesystem.disabled: true` | Every file rule, including the deny rules' paths, `credentials.files` and the always-protected names. `.env` becomes readable |
-| `network.allowAllUnixSockets: true` | All Unix sockets (a Docker socket gives full control of the machine), except [bluclawd's own](#bluclawds-own-sockets). On Linux, VM sockets too |
+| `filesystem.disabled: true` | Every file rule, including the deny rules' paths, `credentials.files`, the read deny on [bluclawd's server directories](#bluclawds-own-sockets) and the always-protected names. `.env` becomes readable |
+| `network.allowAllUnixSockets: true` | All Unix sockets (a Docker socket gives full control of the machine), except [bluclawd's own](#bluclawds-own-sockets) (not yet run on Linux). On Linux, VM sockets too |
 | `allowAppleEvents: true` | macOS: commands can launch other apps with `open` and script them; those apps run outside the sandbox |
 | `enableWeakerNetworkIsolation: true` | macOS: access to `com.apple.trustd.agent`, a possible way to send data out |
 | `enableWeakerNestedSandbox: true` | A weaker sandbox, for running inside Docker |
