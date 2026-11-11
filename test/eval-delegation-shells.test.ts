@@ -77,7 +77,7 @@ async function trial(name: string, steps: (FauxStep | Stop)[], timeoutMs = 2 * r
 		);
 	const running = runTrial({
 		arm: "after",
-		root: ROOT,
+		checkout: ROOT,
 		scenario: SCENARIOS.find((s) => s.name === name)!,
 		model: "faux/faux-1",
 		thinking: "off",
@@ -237,7 +237,7 @@ describe("credentials of a live comparison, on a scripted model", { timeout: 4 *
 		try {
 			const running = runTrial({
 				arm: "after",
-				root: ROOT,
+				checkout: ROOT,
 				scenario: SCENARIOS.find((s) => s.name === "slow")!,
 				model: "faux/faux-1",
 				thinking: "off",

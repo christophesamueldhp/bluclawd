@@ -7,12 +7,8 @@
  * parent wakeups, duplicated work, Integration conflicts, peak processes, and the parent's tool calls, failed calls
  * and `bash` calls ended at their timeout.
  *
- * A live comparison spends real model calls; the budget is this experiment's control, never a production limit:
- *
- *   node scripts/eval-delegation.ts --live --models <provider/id>[,...] --thinking <level> --max-tokens <n>
- *     --max-dollars <n> [--trials 3] [--before <checkout> --after <checkout>] [--arms stock,bluclawd,example]
- *     [--scenarios trivial,investigate,parallel,review,watch,slow] [--auth <auth.json> | --agent-dir <dir>]
- *     [--out <results.json>]
+ * A live comparison spends real model calls; the budget is this experiment's control, never a production limit. Its
+ * flags are in `USAGE` below and in docs/research/delegation-efficiency.md.
  *
  * Credentials come from the environment (a provider's API key variable); from `--auth`, the user's auth.json, linked
  * into each trial's fresh agent dir once one call per provider showed pi writes through the link; or from
@@ -51,13 +47,8 @@ const EXAMPLE = join(PI_CODING_AGENT, "../examples/extensions/subagent");
 export type Arm = "stock" | "bluclawd" | "example" | "before" | "after";
 export const ARMS: readonly Arm[] = ["stock", "bluclawd", "example"];
 
-const loadsBluclawd = (arm: Arm) => arm === "bluclawd" || arm === "before" || arm === "after";
-
-/** The extensions an arm loads; `before` and `after` take theirs from `checkout`. */
-function armExtensions(arm: Arm, checkout: string | undefined): string[] {
-	if (arm === "stock") return [];
-	if (arm === "bluclawd") return [join(root, "ext/subagents/index.ts")];
-	if (arm === "example") return [join(EXAMPLE, "index.ts")];
+/** The tool extensions of the bluclawd `checkout` a `before` or `after` arm loads. */
+function checkoutExtensions(arm: Arm, checkout: string | undefined): string[] {
 	if (!checkout) throw new Error(`The ${arm} arm needs the bluclawd checkout it loads`);
 	const paths = ORCHESTRATOR_EXTENSIONS.map((path) => join(checkout, path));
 	// A fresh worktree has no dependencies until they are installed: said here, rather than by pi failing to start.
@@ -65,6 +56,15 @@ function armExtensions(arm: Arm, checkout: string | undefined): string[] {
 	if (missing.length > 0) throw new Error(`The ${arm} arm's checkout lacks ${missing.join(", ")}`);
 	return paths;
 }
+
+/** Whether each arm loads bluclawd, and the extensions it loads; `before` and `after` take theirs from `checkout`. */
+const ARM_SETUP: Record<Arm, { bluclawd: boolean; extensions: (checkout?: string) => string[] }> = {
+	stock: { bluclawd: false, extensions: () => [] },
+	bluclawd: { bluclawd: true, extensions: () => [join(root, "ext/subagents/index.ts")] },
+	example: { bluclawd: false, extensions: () => [join(EXAMPLE, "index.ts")] },
+	before: { bluclawd: true, extensions: (checkout) => checkoutExtensions("before", checkout) },
+	after: { bluclawd: true, extensions: (checkout) => checkoutExtensions("after", checkout) },
+};
 
 export interface Scenario {
 	name: string;
@@ -277,7 +277,7 @@ export interface TrialResult {
 export interface TrialOptions {
 	arm: Arm;
 	/** The bluclawd checkout a `before` or `after` arm loads its extensions from. */
-	root?: string;
+	checkout?: string;
 	scenario: Scenario;
 	model: string;
 	thinking: string;
@@ -600,8 +600,8 @@ async function trialIn(base: string, agentDir: string, cwd: string, options: Tri
 
 	const env = piEnv({ agentDir, serverDir: join(base, "s"), home: join(base, "home") }, live);
 	const providers = options.providerExtensions ?? [];
-	if (loadsBluclawd(arm) && providers.length > 0) env.BLUCLAWD_RPC_PROVIDER_EXTENSIONS = providers.join(":");
-	const extensions = [...providers, ...armExtensions(arm, options.root)].flatMap((path) => ["-e", path]);
+	if (ARM_SETUP[arm].bluclawd && providers.length > 0) env.BLUCLAWD_RPC_PROVIDER_EXTENSIONS = providers.join(":");
+	const extensions = [...providers, ...ARM_SETUP[arm].extensions(options.checkout)].flatMap((path) => ["-e", path]);
 	const args = [PI_CLI, "--mode", "rpc", "-ne", ...extensions, "--model", options.model];
 	args.push("--thinking", options.thinking);
 
@@ -712,7 +712,7 @@ async function trialIn(base: string, agentDir: string, cwd: string, options: Tri
 	}
 	let parentRequests = 0;
 	let answer = "";
-	let conflicts: number | null = loadsBluclawd(arm) ? 0 : null;
+	let conflicts: number | null = ARM_SETUP[arm].bluclawd ? 0 : null;
 	for (const message of parent?.messages ?? []) {
 		if (message.role === "assistant") {
 			parentRequests++;
@@ -915,10 +915,10 @@ async function main(argv: string[]): Promise<void> {
 	const thinking = flag(argv, "thinking");
 	const maxTokens = Number(flag(argv, "max-tokens"));
 	const maxDollars = Number(flag(argv, "max-dollars"));
-	const roots: Partial<Record<Arm, string>> = {};
+	const checkouts: Partial<Record<Arm, string>> = {};
 	for (const arm of ["before", "after"] as const) {
 		const checkout = flag(argv, arm);
-		if (checkout) roots[arm] = resolve(checkout);
+		if (checkout) checkouts[arm] = resolve(checkout);
 	}
 	const auth = flag(argv, "auth");
 	const agentDir = flag(argv, "agent-dir");
@@ -935,7 +935,8 @@ async function main(argv: string[]): Promise<void> {
 		return;
 	}
 	const trials = Number(flag(argv, "trials") ?? 3);
-	const arms = (flag(argv, "arms")?.split(",") ?? (roots.before || roots.after ? ["before", "after"] : ARMS)) as Arm[];
+	const arms = (flag(argv, "arms")?.split(",") ??
+		(checkouts.before || checkouts.after ? ["before", "after"] : ARMS)) as Arm[];
 	const names = flag(argv, "scenarios")?.split(",");
 	const scenarios = SCENARIOS.filter((s) => !names || names.includes(s.name));
 	const budget = new EvaluationBudget(models.length * trials * arms.length * scenarios.length, maxTokens, maxDollars);
@@ -943,7 +944,7 @@ async function main(argv: string[]): Promise<void> {
 	const results: TrialResult[] = [];
 	try {
 		// A checkout the arm cannot load is said before any call is spent.
-		for (const arm of arms) armExtensions(arm, roots[arm]);
+		for (const arm of arms) ARM_SETUP[arm].extensions(checkouts[arm]);
 		if (auth && !existsSync(auth)) throw new Error(`No auth.json at ${auth}`);
 		if (auth) {
 			for (const check of await checkCredentials({ auth: resolve(auth), models, thinking })) {
@@ -959,7 +960,7 @@ async function main(argv: string[]): Promise<void> {
 						const settle = budget.reserve(perTrial.tokens, perTrial.dollars);
 						const result = await runTrial({
 							arm,
-							root: roots[arm],
+							checkout: checkouts[arm],
 							scenario,
 							model,
 							thinking,
@@ -986,7 +987,7 @@ async function main(argv: string[]): Promise<void> {
 		console.error(`Stopped: ${error instanceof Error ? error.message : String(error)}`);
 	}
 	const out = flag(argv, "out");
-	if (out) writeFileSync(out, JSON.stringify({ models, thinking, trials, roots, results }, null, 2));
+	if (out) writeFileSync(out, JSON.stringify({ models, thinking, trials, checkouts, results }, null, 2));
 	console.log(formatSummary(summarize(results)));
 }
 
