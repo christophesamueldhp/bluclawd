@@ -300,7 +300,7 @@ export async function settleBatch(
 				.filter(({ generation }) => generation === record.generation)
 				.at(-1);
 			const isolated = readRunDefinition(runDefinitionPath(runDir, record.generation))?.workspace;
-			const workspace = isolated && { root: isolated.root, lines: await describeWorkspace(isolated) };
+			const workspace = isolated && { root: isolated.root, lines: await describeWorkspace(isolated, runDir) };
 			return { record, ...(report ? { report } : {}), ...(workspace ? { workspace } : {}) };
 		}),
 	);
