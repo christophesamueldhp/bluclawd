@@ -64,7 +64,7 @@ node scripts/eval-delegation.ts --live --model <provider/id> --thinking <level> 
 
 Recorded on 2026-11-11 with `npx vitest run test/subagents-delegation-eval.test.ts --silent=false`:
 
-- **Revision**: `620da94`, after #311 made RPC runs the default and rewrote the tool descriptions. It replaces the first record, taken on `d6e8cee` behind `BLUCLAWD_RPC_RUNS=1`, where only the token columns moved by more than noise: about 150 more estimated tokens per bluclawd trial.
+- **Revision**: `620da94`, after #311 made RPC runs the default and rewrote the tool descriptions. It replaces the first record, taken on `d6e8cee` behind `BLUCLAWD_RPC_RUNS=1`. Since then each bluclawd trial takes about 100 to 200 more estimated tokens, from #311's tool descriptions. Wall times moved within noise. Peak process counts moved by a few, which sampling explains (see **peak procs**).
 - **Versions**: pi 1.5.2 (all host packages), Node 26.8.1, macOS 27.2 on arm64.
 - **Machine**: shared, with a 1-minute load average between 4 and 10 during the run.
 - **Trials**: 2 per scenario and arm.
