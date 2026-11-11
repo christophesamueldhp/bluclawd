@@ -21,7 +21,7 @@ import { FAUX } from "./helpers/real-pi.ts";
 import { waitFor } from "./helpers/wait-for.ts";
 
 const TRIALS = 2;
-const scenario = (name: string) => SCENARIOS.find((s) => s.name === name)!;
+const scenario = (name: string) => SCENARIOS.find((s) => s.name === (name === "background" ? "investigate" : name))!;
 
 const writer = {
 	name: "writer",
@@ -68,6 +68,28 @@ const scripts: Record<string, Record<"stock" | "bluclawd", Record<string, FauxSt
 			scan: [{ calls: [read("src/percent.js"), read("src/bar.js"), read("src/bytes.js")] }, { text: ANSWER }],
 		},
 	},
+	// The same question, given to a run in the background: only its Report wakes the orchestrator, not its progress.
+	background: {
+		stock: {
+			main: [{ calls: [read("src/percent.js"), read("src/bar.js"), read("src/bytes.js")] }, { text: ANSWER }],
+		},
+		bluclawd: {
+			main: [
+				{
+					tool: "subagent",
+					args: { agent: "explorer", name: "scan", task: "Which functions in src/ call clamp?", background: true },
+				},
+				{ text: "scan is looking; I will wait for its report." },
+				{ text: ANSWER },
+			],
+			scan: [
+				{ calls: [progress("Reading."), read("src/percent.js"), read("src/bar.js"), read("src/bytes.js")] },
+				{ calls: [progress("Read three files."), progress("Answering.")] },
+				// Longer than the quiet a trial waits for before it takes the parent for settled.
+				{ text: ANSWER, stallMs: 2500 },
+			],
+		},
+	},
 	parallel: {
 		stock: {
 			main: [
@@ -91,7 +113,6 @@ const scripts: Record<string, Record<"stock" | "bluclawd", Record<string, FauxSt
 				{ tool: "subagent_integrate", args: { agent: "bar", check: "node --test test/" } },
 				{ text: "Added percent and progressBar." },
 			],
-			// Their progress must not wake the orchestrator.
 			percent: [
 				{ calls: [progress("Writing src/percent.js."), write("src/percent.js", PERCENT)] },
 				{ calls: [progress("Written.")] },
@@ -184,11 +205,15 @@ async function trial(name: string, arm: Arm): Promise<TrialResult> {
 	});
 	if (name === "review" && arm === "bluclawd" && dirs) {
 		const { agentDir } = dirs;
-		const chain = await waitFor(() => chainId(agentDir) ?? false);
-		const main = [...steps.main];
-		main[1] = { tool: "subagent_integrate", args: { agent: chain, check: "node --test test/" } };
-		writeFileSync(join(fauxDir(agentDir), "main.json"), JSON.stringify(main));
-		writeFileSync(gate(agentDir), "");
+		try {
+			const chain = await waitFor(() => chainId(agentDir) ?? false);
+			const main = [...steps.main];
+			main[1] = { tool: "subagent_integrate", args: { agent: chain, check: "node --test test/" } };
+			writeFileSync(join(fauxDir(agentDir), "main.json"), JSON.stringify(main));
+		} finally {
+			// Released even if the chain was never seen, so the trial ends, and with it all its processes.
+			writeFileSync(gate(agentDir), "");
+		}
 	}
 	return running;
 }
@@ -204,14 +229,14 @@ async function trials(name: string): Promise<Record<"stock" | "bluclawd", TrialR
 }
 
 /** What holds for every trial of either arm: correct, settled on its own, nothing left running. */
-function expectSound(results: Record<"stock" | "bluclawd", TrialResult[]>): void {
+function expectSound(results: Record<"stock" | "bluclawd", TrialResult[]>, bluclawdWakeups = 0): void {
 	const all = [...results.stock, ...results.bluclawd];
 	for (const result of all) {
 		expect(result, `${result.scenario} ${result.arm}: ${JSON.stringify(result.grade)}`).toMatchObject({
 			correct: true,
 			cutShort: false,
 			leftover: 0,
-			parentWakeups: 0,
+			parentWakeups: result.arm === "bluclawd" ? bluclawdWakeups : 0,
 		});
 		expect(result.parentUsage.totalTokens).toBeGreaterThan(0);
 	}
@@ -243,7 +268,15 @@ describe("comparing delegation with stock pi on a scripted model", { timeout: 2 
 		}
 	});
 
-	it("makes independent edits side by side, integrates them without conflict, and their progress wakes nobody", async () => {
+	it("wakes the orchestrator once for a background run's Report, and never for its progress", async () => {
+		const results = await trials("background");
+		expectSound(results, 1);
+		for (const result of results.bluclawd) {
+			expect(result).toMatchObject({ childRequests: { scan: 3 }, isolated: [], parentRequests: 3, answer: ANSWER });
+		}
+	});
+
+	it("makes independent edits side by side, and integrates them without conflict", async () => {
 		const results = await trials("parallel");
 		expectSound(results);
 		for (const result of results.bluclawd) {

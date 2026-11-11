@@ -116,7 +116,7 @@ const RPC_DELEGATION = [
 	"",
 	"A run that only reads shares your checkout and needs no worktree. A run that edits works in a worktree of its own, made from your checkout as it was at the call: nothing reaches your checkout until you call `subagent_integrate` on it, or on a completed chain, with a `check` command that validates the combined result.",
 	"",
-	"Keep each task short and self-contained: the goal, the files or area, and what to report. Do not paste the conversation or large file contents; name paths instead.",
+	"Keep each task, and any inline role, short and self-contained: the goal, the files or area, and what to report. Do not paste the conversation or large file contents; name paths instead.",
 	"",
 	"A Report ends with what the runtime saw: its Outcome, its Checks (the commands it ran and their exit codes, or that none ran) and its Changes. The rest is the run's own claim.",
 ];

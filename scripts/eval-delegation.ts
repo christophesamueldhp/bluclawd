@@ -29,6 +29,7 @@ import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { piPackageRoot } from "../daemon/orchestrator-client.ts";
+import { isTerminalSubagentStatus, type SubagentLifecycleStatus } from "../ext/subagents/runs.ts";
 import { createFixture, EvaluationBudget, type FixtureGrade, gradeFixture, passPowerK } from "./eval-subagents.ts";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
@@ -103,7 +104,7 @@ export const SCENARIOS: readonly Scenario[] = [
 		prompt:
 			"Which functions in src/ call clamp, and in which files? Answer with function and file names; change nothing.",
 		functions: ["clamp", "percent", "progressBar"],
-		answer: /^(?![\s\S]*formatBytes)(?=[\s\S]*\bpercent\b)(?=[\s\S]*\bprogressBar\b)/,
+		answer: /^(?=[\s\S]*\bpercent\b)(?=[\s\S]*\bprogressBar\b)(?=[\s\S]*percent\.js)(?=[\s\S]*bar\.js)/,
 	},
 	{
 		name: "parallel",
@@ -174,6 +175,8 @@ export interface TrialResult {
 	leftover: number;
 	/** It ran past its time or its budget. */
 	cutShort: boolean;
+	/** Why pi could not do the task at all, such as a model it could not start with. */
+	failure?: string;
 }
 
 export interface TrialOptions {
@@ -303,14 +306,23 @@ function treeHash(cwd: string): string {
 	return execFileSync("git", ["hash-object", "--stdin"], { input: text.join("\0"), encoding: "utf8" }).trim();
 }
 
-/** The example's sample roles, without the model each pins: every arm runs on the model under evaluation. */
-function writeExampleRoles(agentDir: string): void {
+/**
+ * The example's sample roles, without the model each pins: every arm runs on the model under evaluation. They are
+ * user roles bluclawd would take too, so they are there only for the trial: returns what removes them.
+ */
+function writeExampleRoles(agentDir: string): () => void {
 	const dir = join(agentDir, "agents");
+	const files = readdirSync(join(EXAMPLE, "agents")).map((file) => join(dir, file));
+	const taken = files.filter((path) => existsSync(path));
+	if (taken.length > 0) throw new Error(`The example's roles would replace ${taken.join(", ")}`);
 	mkdirSync(dir, { recursive: true });
-	for (const file of readdirSync(join(EXAMPLE, "agents"))) {
-		const text = readFileSync(join(EXAMPLE, "agents", file), "utf8");
-		writeFileSync(join(dir, file), text.replace(/^model:.*\n/m, ""));
+	for (const path of files) {
+		const text = readFileSync(join(EXAMPLE, "agents", basename(path)), "utf8");
+		writeFileSync(path, text.replace(/^model:.*\n/m, ""));
 	}
+	return () => {
+		for (const path of files) rmSync(path, { force: true });
+	};
 }
 
 /** Runs one trial in directories of its own, and leaves no process of it running. */
@@ -320,26 +332,28 @@ export async function runTrial(options: TrialOptions): Promise<TrialResult> {
 	if (!live && arm === "example")
 		throw new Error("The example's children have no session name, so a scripted model cannot tell them apart");
 	const base = mkdtempSync(join(tmpdir(), "bc-eval-"));
+	const agentDir = options.agentDir ?? join(base, "agent");
+	const cwd = join(base, "work");
+	let removeRoles: (() => void) | undefined;
 	try {
-		return await trialIn(base, options);
+		for (const dir of [agentDir, cwd, join(base, "s"), join(base, "home")]) mkdirSync(dir, { recursive: true });
+		createFixture(options.scenario.files, cwd);
+		if (!options.agentDir) {
+			const scripted = live ? {} : { compaction: { enabled: false }, retry: { enabled: false } };
+			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ quietStartup: true, ...scripted }));
+		}
+		if (arm === "example") removeRoles = writeExampleRoles(agentDir);
+		return await trialIn(base, agentDir, cwd, options);
 	} finally {
+		removeRoles?.();
 		rmSync(base, { recursive: true, force: true, maxRetries: 10 });
 	}
 }
 
-async function trialIn(base: string, options: TrialOptions): Promise<TrialResult> {
+async function trialIn(base: string, agentDir: string, cwd: string, options: TrialOptions): Promise<TrialResult> {
 	const { arm, scenario, live = false } = options;
-	const agentDir = options.agentDir ?? join(base, "agent");
-	const cwd = join(base, "work");
 	const serverDir = join(base, "s");
 	const home = join(base, "home");
-	for (const dir of [agentDir, cwd, serverDir, home]) mkdirSync(dir, { recursive: true });
-	createFixture(scenario.files, cwd);
-	if (!options.agentDir) {
-		const scripted = live ? {} : { compaction: { enabled: false }, retry: { enabled: false } };
-		writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ quietStartup: true, ...scripted }));
-	}
-	if (arm === "example") writeExampleRoles(agentDir);
 	options.prepare?.({ agentDir, cwd });
 	// A given agent dir keeps earlier trials' sessions: only this one's count.
 	const earlier = new Set(sessionFiles(agentDir));
@@ -366,6 +380,7 @@ async function trialIn(base: string, options: TrialOptions): Promise<TrialResult
 	const known = new Set(pi.pid ? [pi.pid] : []);
 	let agentStarts = 0;
 	let idleSince: number | undefined;
+	let busySince = Date.now();
 	let exited = false;
 	pi.on("exit", () => {
 		exited = true;
@@ -397,7 +412,10 @@ async function trialIn(base: string, options: TrialOptions): Promise<TrialResult
 				send({ type: "extension_ui_response", id: event.id, cancelled: true });
 		}
 	});
-	pi.stderr?.resume();
+	let stderr = "";
+	pi.stderr?.on("data", (data) => {
+		stderr = (stderr + data).slice(-2000);
+	});
 	send({ id: "prompt", type: "prompt", message: scenario.prompt });
 
 	const sessions = () => ours(agentDir).flatMap((path) => readSession(path) ?? []);
@@ -420,7 +438,10 @@ async function trialIn(base: string, options: TrialOptions): Promise<TrialResult
 			peakProcesses = Math.max(peakProcesses, processes.length);
 			const working = processes.filter(({ pid, command }) => pid !== pi.pid && !isDaemon(command));
 			// Settled for good: idle for a while with no run left working that could wake it.
-			if (exited || (idleSince !== undefined && Date.now() - idleSince > 1500 && working.length === 0)) break;
+			// A background run's Report wakes the parent only once its host is gone: until its record is final, it works.
+			const open = runRecords(agentDir).some((record) => record.status && !isTerminalSubagentStatus(record.status));
+			if (idleSince === undefined || working.length > 0 || open) busySince = Date.now();
+			if (exited || Date.now() - busySince > 1500) break;
 			if (Date.now() - started > timeoutMs) {
 				cutShort = true;
 				leftover = idleSince === undefined ? 0 : working.length;
@@ -440,6 +461,7 @@ async function trialIn(base: string, options: TrialOptions): Promise<TrialResult
 	}
 	// Until it settled for good, not until the wait that tells so ended.
 	const wallMs = (idleSince ?? Date.now()) - started;
+	const failure = exited && idleSince === undefined ? `pi exited before it settled: ${stderr.trim()}` : undefined;
 
 	const parentFiles = ours(join(agentDir, "sessions"));
 	const parent = parentFiles.flatMap((path) => readSession(path) ?? [])[0];
@@ -510,12 +532,13 @@ async function trialIn(base: string, options: TrialOptions): Promise<TrialResult
 		peakProcesses,
 		leftover,
 		cutShort,
+		...(failure ? { failure } : {}),
 	};
 	return result;
 }
 
-/** Fresh bluclawd runs' records: their names and Admission times. */
-function runRecords(agentDir: string): { name?: string; admittedAt?: number }[] {
+/** Bluclawd runs' records: their names, Admission times and statuses. */
+function runRecords(agentDir: string): { name?: string; admittedAt?: number; status?: SubagentLifecycleStatus }[] {
 	const dir = join(agentDir, "bluclawd", "subagents");
 	if (!existsSync(dir)) return [];
 	return readdirSync(dir).flatMap((session) =>
@@ -673,6 +696,8 @@ async function main(argv: string[]): Promise<void> {
 					);
 					results.push(result);
 					console.error(`${scenario.name} ${arm} #${trial + 1}: ${result.correct ? "correct" : "incorrect"}`);
+					// Not a wrong answer: the setup is wrong, and every later trial would fail the same way.
+					if (result.failure) throw new Error(result.failure);
 				}
 			}
 		}
