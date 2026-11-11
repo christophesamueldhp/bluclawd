@@ -214,10 +214,12 @@ describe("bluclawd's server directories", () => {
 			kind: "invalid",
 			reason: "sandbox.credentials is not an object",
 		});
-		expect(parseSandbox({ enabled: true, credentials: { files: "x" } })).toEqual({
-			kind: "invalid",
-			reason: "sandbox.credentials.files is not a list",
-		});
+		for (const files of ["x", null]) {
+			expect(parseSandbox({ enabled: true, credentials: { files } })).toEqual({
+				kind: "invalid",
+				reason: "sandbox.credentials.files is not a list",
+			});
+		}
 	});
 
 	describe("as this pi resolves them", () => {

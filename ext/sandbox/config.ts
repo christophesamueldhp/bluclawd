@@ -87,7 +87,7 @@ export function parseSandbox(value: unknown): SandboxSetting {
 	if (!isPlainObject(network)) return { kind: "invalid", reason: "sandbox.network is not an object" };
 	if (!isPlainObject(filesystem)) return { kind: "invalid", reason: "sandbox.filesystem is not an object" };
 	if (!isPlainObject(credentials)) return { kind: "invalid", reason: "sandbox.credentials is not an object" };
-	const credentialFiles = credentials.files ?? [];
+	const credentialFiles = credentials.files === undefined ? [] : credentials.files;
 	if (!Array.isArray(credentialFiles)) return { kind: "invalid", reason: "sandbox.credentials.files is not a list" };
 	const lists = {
 		allowedDomains: strings(network.allowedDomains, "sandbox.network.allowedDomains"),
