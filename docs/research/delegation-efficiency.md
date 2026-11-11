@@ -9,7 +9,7 @@ This compares bluclawd's delegation with stock pi 1.5.2 on the same tasks, model
 Every arm runs the parent as `pi --mode rpc -ne`, with the same `--model` and `--thinking`. Only the extensions differ.
 
 - **stock**: no extensions (`-ne` also turns off pi's built-in `mcp`, `codemode` and `tool-search`).
-- **bluclawd**: only bluclawd's `subagents` extension, measured with `BLUCLAWD_RPC_RUNS=1` while RPC runs were behind that switch; they are the default since #311. This is the RPC-run path and its delegation guidance. The rest of the package (permissions, sandbox, agent view and the others) is not loaded. Those extensions add their own tools and prompt text, so whole-package figures would be higher than these.
+- **bluclawd**: only bluclawd's `subagents` extension. Runs go through pi's RPC, the default since #311, under its delegation guidance. The rest of the package (permissions, sandbox, agent view and the others) is not loaded. Those extensions add their own tools and prompt text, so whole-package figures would be higher than these.
 - **example** (live only): pi's example extension `examples/extensions/subagent`. pi ships it as an example; it is not built-in behavior. Its sample roles are installed with their pinned `model:` lines removed, so its children run on the model under evaluation. Its children are unnamed and share one faux script, so it cannot run on the scripted model.
 
 On the faux model, each arm also loads the faux provider extension (`test/fixtures/real-pi/faux.ts`). It only registers the model.
@@ -64,8 +64,9 @@ node scripts/eval-delegation.ts --live --model <provider/id> --thinking <level> 
 
 Recorded on 2026-11-11 with `npx vitest run test/subagents-delegation-eval.test.ts --silent=false`:
 
+- **Revision**: `620da94`, after #311 made RPC runs the default and rewrote the tool descriptions. It replaces the first record, taken on `d6e8cee` behind `BLUCLAWD_RPC_RUNS=1`, where only the token columns moved by more than noise: about 150 more estimated tokens per bluclawd trial.
 - **Versions**: pi 1.5.2 (all host packages), Node 26.8.1, macOS 27.2 on arm64.
-- **Machine**: shared and loaded, with a 1-minute load average between 5 and 15 during the run.
+- **Machine**: shared, with a 1-minute load average between 4 and 10 during the run.
 - **Trials**: 2 per scenario and arm.
 
 The model's choices are scripted:
@@ -79,16 +80,16 @@ The model's choices are scripted:
 
 | scenario | arm | pass@1 | pass^k | wall ms | tokens | parent requests | wakeups | run startup ms | overlap | conflicts | peak procs | leftover |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
-| trivial | stock | 1.00 | 1.00 | 245 | 4390 | 3 | 0 | n/a | 0 | n/a | 1 | 0 |
-| trivial | bluclawd | 1.00 | 1.00 | 293 | 15025 | 3 | 0 | n/a | 0 | 0 | 3 | 0 |
-| investigate | stock | 1.00 | 1.00 | 163 | 2954 | 2 | 0 | n/a | 0 | n/a | 1 | 0 |
-| investigate | bluclawd | 1.00 | 1.00 | 933 | 13233 | 2 | 0 | 436 | 0 | 0 | 4 | 0 |
-| investigate, background | stock | 1.00 | 1.00 | 161 | 2954 | 2 | 0 | n/a | 0 | n/a | 1 | 0 |
-| investigate, background | bluclawd | 1.00 | 1.00 | 3499 | 20336 | 3 | 1 | 439 | 0 | 0 | 4 | 0 |
-| parallel | stock | 1.00 | 1.00 | 243 | 4746 | 3 | 0 | n/a | 0 | n/a | 1 | 0 |
-| parallel | bluclawd | 1.00 | 1.00 | 1498 | 33972 | 4 | 0 | 499 | 0 | 0 | 6 | 0 |
-| review | stock | 1.00 | 1.00 | 328 | 8478 | 5 | 0 | n/a | 0 | n/a | 2 | 0 |
-| review | bluclawd | 1.00 | 1.00 | 2505 | 28628 | 3 | 0 | 435 | 0 | 0 | 4 | 0 |
+| trivial | stock | 1.00 | 1.00 | 278 | 4390 | 3 | 0 | n/a | 0 | n/a | 3 | 0 |
+| trivial | bluclawd | 1.00 | 1.00 | 280 | 15172 | 3 | 0 | n/a | 0 | 0 | 3 | 0 |
+| investigate | stock | 1.00 | 1.00 | 160 | 2954 | 2 | 0 | n/a | 0 | n/a | 1 | 0 |
+| investigate | bluclawd | 1.00 | 1.00 | 936 | 13329 | 2 | 0 | 434 | 0 | 0 | 4 | 0 |
+| investigate, background | stock | 1.00 | 1.00 | 162 | 2954 | 2 | 0 | n/a | 0 | n/a | 1 | 0 |
+| investigate, background | bluclawd | 1.00 | 1.00 | 3495 | 20484 | 3 | 1 | 439 | 0 | 0 | 4 | 0 |
+| parallel | stock | 1.00 | 1.00 | 279 | 4747 | 3 | 0 | n/a | 0 | n/a | 5 | 0 |
+| parallel | bluclawd | 1.00 | 1.00 | 1475 | 34165 | 4 | 0 | 504 | 0 | 0 | 7 | 0 |
+| review | stock | 1.00 | 1.00 | 326 | 8480 | 5 | 0 | n/a | 0 | n/a | 2 | 0 |
+| review | bluclawd | 1.00 | 1.00 | 2446 | 28793 | 3 | 0 | 443 | 0 | 0 | 4 | 0 |
 
 The review scenario's bluclawd wall time includes the test's own wait while it names the chain for the next step.
 
@@ -98,7 +99,7 @@ The review scenario's bluclawd wall time includes the test's own wait while it n
 - **Isolation**: the read-only Run worked in the checkout, with no worktree. The writers each worked in a worktree of their own.
 - **No waste**: the parent never touched a file a Run had worked on, and no process was left running.
 - **Wakeups**: a background Run sent three progress messages. The parent woke once, for its Report, and never for its progress. The background row's wall time includes the Run's scripted 2.5 s answer.
-- **Cost of the tools, even unused**: the `subagents` extension's tools add about 3,500 estimated tokens to every parent request, through their definitions and this guidance. That is the trivial row's difference, where nothing was delegated.
+- **Cost of the tools, even unused**: the `subagents` extension's tools add about 3,600 estimated tokens to every parent request, through their definitions and this guidance. That is the trivial row's difference, where nothing was delegated.
 - **Cost of each Run**: each Run then has a context of its own, and on this machine about 0.4 to 0.5 s of startup.
 - **On a scripted model, delegating cost more and took longer**: in every scenario here it used more tokens and more time than doing the work directly. The scripts give the children no less to do than the parent, so the context a Run keeps out of the parent never pays off here.
 - **Fewer parent requests**: in the review scenario the parent made 3 requests instead of 5, because the chain did the work.
