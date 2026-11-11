@@ -84,8 +84,10 @@ export interface RpcLaunch {
 	sessionFile?: string;
 	/** Set when a Resume's instruction is the user's own; otherwise the task is its orchestrator's. */
 	taskFrom?: "user";
-	/** The worktree of a run that edits, made at its launch; its `cwd` is in it. */
+	/** The worktree of a run that edits, made at its launch, or of its chain; its `cwd` is in it. */
 	workspace?: IsolatedWorkspace;
+	/** Set when an earlier step of its chain made its worktree, handed on to it as it is. */
+	worktreeMade?: boolean;
 	/**
 	 * Why the run may no longer start, asked once its turn comes: it may have waited in the queue since Admission. It
 	 * narrows what the run is held to, never widens it.
@@ -374,7 +376,13 @@ export async function executeRpcRun(
 	const { workspace } = launch;
 	writeFileSync(
 		instructions,
-		launch.definition.instructions + (workspace ? `\n${workspaceInstructions(workspace)}` : ""),
+		launch.definition.instructions +
+			(workspace
+				? `\n${workspaceInstructions(
+						workspace,
+						launch.tools.some((tool) => WRITE_TOOLS.includes(tool)),
+					)}`
+				: ""),
 	);
 	// Open before anything is awaited: the run takes messages from its Admission on, queued or working.
 	openRunInbox(launch.runDir, record.generation);
@@ -406,7 +414,7 @@ export async function executeRpcRun(
 		...(launch.sessionFile ? { sessionFile: launch.sessionFile } : {}),
 	});
 	// A run that edits gets its worktree as its Admission recorded it, before it waits for its turn.
-	if (workspace && !launch.sessionFile) {
+	if (workspace && !launch.sessionFile && !launch.worktreeMade) {
 		try {
 			await materializeWorktree(workspace);
 		} catch (error) {

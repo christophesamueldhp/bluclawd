@@ -29,6 +29,7 @@ import {
 	subagentInvocation,
 } from "./admission.ts";
 import { runTaskBatch } from "./batches.ts";
+import { runChain } from "./chains.ts";
 import { collaborateAsParent } from "./collaboration.ts";
 import {
 	type AgentDefinitionCatalog,
@@ -105,6 +106,11 @@ function buildBaseSubagentDescription(catalog?: AgentDefinitionCatalog, oneShot 
 		rpcRunsEnabled()
 			? "- Independent pieces of work that can run in parallel: give them together as `tasks` in one call, which runs them side by side and returns one combined report once all have finished."
 			: "- Independent pieces of work that can run in parallel: put their subagent calls together in one message, since calls in separate messages run one after another.",
+		...(rpcRunsEnabled()
+			? [
+					"- Dependent steps, such as edit, then an independent review, then a repair: give them as `chain` in one call, which runs them one after another in one worktree and returns one combined report.",
+				]
+			: []),
 		"- Exploration or review whose intermediate output does not belong in the main conversation.",
 		"",
 		"When NOT to delegate:",
@@ -137,6 +143,8 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			if (pane) messageAsRun(pi, parent, pane, run.closed);
 		}
 		const reports = new RunReports();
+		/** The chains under way, by ID, which subagent_stop stops before their next step. */
+		const chains = new Map<string, AbortController>();
 		/** Aborted on a reload, which hands this instance's open runs to the next one. */
 		const handOff = new AbortController();
 		// What the daemon held for this session meanwhile may be lost: its runs' Reports are read from disk.
@@ -840,13 +848,23 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 					};
 				}
 				const run = views.findOpen(target)?.record;
-				const members = run ? [] : views.open().filter(({ record }) => record.batch === target);
-				if (members.length > 0) {
-					const cancelled = await Promise.all(
-						members.map(({ record }) => stopRpcRun(record, signal, `Its batch ${target} was stopped`)),
+				const members = run
+					? []
+					: views.open().filter(({ record }) => record.batch === target || record.chain === target);
+				const chain = run ? undefined : chains.get(target);
+				if (members.length > 0 || chain) {
+					const kind = chain ? "chain" : "batch";
+					// Each member's stop is asked first, for its reason; then a chain starts no further step.
+					const stopping = members.map(({ record }) =>
+						stopRpcRun(record, signal, `Its ${kind} ${target} was stopped`),
 					);
+					chain?.abort();
+					const cancelled = await Promise.all(stopping);
+					const text = cancelled.length
+						? cancelled.map((result) => result.text).join("\n")
+						: `Stopped chain ${target}: no further step of it starts.`;
 					return {
-						content: [{ type: "text", text: cancelled.map((result) => result.text).join("\n") }],
+						content: [{ type: "text", text }],
 						details: undefined,
 						isError: cancelled.some((result) => !result.stopped),
 					};
@@ -979,6 +997,38 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 					return { content: [{ type: "text", text: invocation.error }], details: undefined, isError: true };
 				}
 				const parentTurnId = `turn_${activeTurnIndex}`;
+				if ("chain" in invocation) {
+					if (!rpcRunsEnabled()) {
+						return {
+							content: [
+								{
+									type: "text",
+									text: "A `chain` needs runs on pi's RPC; give each subagent call one agent and task instead.",
+								},
+							],
+							details: undefined,
+							isError: true,
+						};
+					}
+					const scope = parentScope.current();
+					return runChain(
+						{
+							admission,
+							nameHolder: (name) => (scope ? directory.nameHolder(scope, name)?.record : undefined),
+							agentDir: resolveAgentDir,
+							reports,
+							getRun: (runId) => scheduler.getRun(runId),
+							cancel: (runId, reason) => scheduler.cancelRun(runId, "caller", reason),
+							scope: parentScope,
+							context: () => parentScope.context(),
+							live: chains,
+							notify: (first, notice) => parentScope.notify(first, notice),
+						},
+						invocation.chain,
+						{ toolCallId, parentTurnId, signal },
+						ctx,
+					);
+				}
 				if ("tasks" in invocation) {
 					if (!rpcRunsEnabled()) {
 						return {

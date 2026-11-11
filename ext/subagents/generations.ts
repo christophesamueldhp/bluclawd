@@ -4,6 +4,7 @@ import type { SessionMessage, SessionUsage } from "../../daemon/ipc/protocol.ts"
 import { createRunAddressing } from "./addressing.ts";
 import { formatRunLabel, type RunExecutionContext } from "./admission.ts";
 import type { BatchResultDetails } from "./batches.ts";
+import type { ChainResultDetails } from "./chains.ts";
 import { createRunDirectory } from "./directory.ts";
 import {
 	capReport,
@@ -37,7 +38,7 @@ const GIVE_WAIT_MS = 5000;
 /** A Report no foreground launch took, as the orchestrator is told about it. */
 export interface ParentNotice {
 	parentText: string;
-	details: SubagentResultDetails | BatchResultDetails;
+	details: SubagentResultDetails | BatchResultDetails | ChainResultDetails;
 }
 
 export interface GenerationDeps {

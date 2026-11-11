@@ -26,6 +26,10 @@ _Avoid_: rollback, deletion, stopping the wait
 Independent runs launched together by one orchestrator call, admitted all together or not at all. One member's failure leaves the others working. The batch settles once every member has, with one bounded account of every member's outcome and a reference to each full report; cancelling it cancels every member, working or queued.
 _Avoid_: chain (for runs that depend on each other), group
 
+**Chain**:
+Dependent runs launched by one orchestrator call as ordered steps: each starts only once the step before it completed, given that step's report, never its transcript. When a step edits, every step works in one isolated workspace, one at a time; a later step continues an earlier one's context only by explicit resume. A failed, cancelled or blocked step halts the chain, and the steps after it never run; a review that reports defects has completed. Its output is integrated, if at all, after the whole sequence completes.
+_Avoid_: pipeline, batch (for independent runs)
+
 **Report**:
 A run's account of its work, given to its orchestrator when that work settles. Further work in the same run can produce another report, including after resume.
 _Avoid_: result (as if it came once), final answer

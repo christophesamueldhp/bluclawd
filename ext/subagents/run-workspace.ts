@@ -65,7 +65,8 @@ export function resolveRunWorkspace(
 	};
 }
 
-function within(base: string, dir: string): boolean {
+/** Whether `dir` is `base` or under it. */
+export function within(base: string, dir: string): boolean {
 	const rel = relative(base, dir);
 	return rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel);
 }
