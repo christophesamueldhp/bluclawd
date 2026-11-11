@@ -57,7 +57,7 @@ export const ORCHESTRATOR_EXTENSIONS = [
 ];
 
 /** The one bluclawd extension a run's pi loads. */
-export const RUN_EXTENSIONS = ["ext/subagents/rpc-child.ts"];
+const RUN_EXTENSIONS = ["ext/subagents/rpc-child.ts"];
 
 /** pi's built-in extensions left out: a run's pi has none (`-ne`), and the orchestrator is measured as in #337. */
 const DISABLED_BUILTINS = ["mcp", "codemode", "tool_search"];
@@ -198,6 +198,7 @@ async function firstRequest(scratch: Scratch, spec: SessionSpec): Promise<{ cont
 }
 
 interface Prompt {
+	system: SystemMessage;
 	sections: Record<string, string>;
 	tools: Tool[];
 	/** What the request carries besides the system messages and the user's prompt. */
@@ -209,6 +210,7 @@ function promptOf(context: Context): Prompt {
 	if (typeof system?.content !== "string" || system.content) throw new Error("Expected a sectioned system prompt.");
 	const conversation = context.messages.filter((message) => message.role !== "system");
 	return {
+		system,
 		sections: Object.fromEntries(
 			Object.entries(system.sections ?? {}).filter((entry): entry is [string, string] => entry[1] !== null),
 		),
@@ -245,11 +247,11 @@ const clip = (text: string) => (text.length > 60 ? `${text.slice(0, 57)}...` : t
 function contributions(measured: Prompt, baseline: Prompt): Contribution[] {
 	const rows: Contribution[] = [];
 	for (const tool of measured.tools) {
-		const pis = baseline.tools.find((candidate) => candidate.name === tool.name);
+		const piTool = baseline.tools.find((candidate) => candidate.name === tool.name);
 		const parts = `description ${tool.description.length}, schema ${JSON.stringify(tool.parameters).length}`;
-		if (!pis) rows.push({ name: `tool ${tool.name} (${parts})`, chars: toolChars(tool) });
-		else if (JSON.stringify(pis) !== JSON.stringify(tool)) {
-			rows.push({ name: `tool ${tool.name}, changed from pi's`, chars: toolChars(tool) - toolChars(pis) });
+		if (!piTool) rows.push({ name: `tool ${tool.name} (${parts})`, chars: toolChars(tool) });
+		else if (JSON.stringify(piTool) !== JSON.stringify(tool)) {
+			rows.push({ name: `tool ${tool.name}, changed from pi's`, chars: toolChars(tool) - toolChars(piTool) });
 		}
 	}
 	for (const tool of baseline.tools) {
@@ -260,15 +262,15 @@ function contributions(measured: Prompt, baseline: Prompt): Contribution[] {
 	// pi's snippet per tool and its guidelines are lines of its `tools` and `rules` sections.
 	const kinds: Record<string, string> = { tools: "snippet", rules: "guideline" };
 	for (const [name, text] of Object.entries(measured.sections)) {
-		const pis = baseline.sections[name];
-		if (pis === undefined) rows.push({ name: `section <${name}>`, chars: text.length });
-		else if (pis !== text && kinds[name]) {
-			for (const line of extraLines(text, pis))
+		const piText = baseline.sections[name];
+		if (piText === undefined) rows.push({ name: `section <${name}>`, chars: text.length });
+		else if (piText !== text && kinds[name]) {
+			for (const line of extraLines(text, piText))
 				rows.push({ name: `${kinds[name]} ${clip(line)}`, chars: line.length + 1 });
-			for (const line of extraLines(pis, text)) {
+			for (const line of extraLines(piText, text)) {
 				rows.push({ name: `${kinds[name]} removed: ${clip(line)}`, chars: -(line.length + 1) });
 			}
-		} else if (pis !== text) rows.push({ name: `section <${name}>, changed`, chars: text.length - pis.length });
+		} else if (piText !== text) rows.push({ name: `section <${name}>, changed`, chars: text.length - piText.length });
 	}
 	for (const [name, text] of Object.entries(baseline.sections)) {
 		if (measured.sections[name] === undefined) rows.push({ name: `section <${name}>, removed`, chars: -text.length });
@@ -338,7 +340,7 @@ export async function capturePrompt(
 	const { role } = options;
 	const extensions = await loadExtensions(options.extensions ?? (role ? RUN_EXTENSIONS : ORCHESTRATOR_EXTENSIONS));
 	return inScratch(async (scratch) => {
-		const pis = await firstRequest(scratch, { mode: "tui" });
+		const piDefault = await firstRequest(scratch, { mode: "tui" });
 		let measuredSpec: SessionSpec = { extensions, mode: "tui" };
 		let baselineSpec: SessionSpec | undefined;
 		let runTools: string[] | undefined;
@@ -348,8 +350,8 @@ export async function capturePrompt(
 			);
 			if (!definition) throw new Error(`No bundled role ${role}.`);
 			const available = rpcGrantableTools(
-				pis.session.getActiveToolNames(),
-				pis.session.getAllTools().map((tool) => tool.name),
+				piDefault.session.getActiveToolNames(),
+				piDefault.session.getAllTools().map((tool) => tool.name),
 			);
 			const shell =
 				process.platform === "darwin"
@@ -366,13 +368,12 @@ export async function capturePrompt(
 				mode: "rpc",
 			};
 		}
-		const baseline = promptOf(baselineSpec ? (await firstRequest(scratch, baselineSpec)).context : pis.context);
+		const baseline = promptOf(baselineSpec ? (await firstRequest(scratch, baselineSpec)).context : piDefault.context);
 		const { context } = await firstRequest(scratch, measuredSpec);
 		const measured = promptOf(context);
-		const system = getCurrentSystemMessage(context.messages) as SystemMessage;
 		const total = promptChars(measured);
 		return {
-			system,
+			system: measured.system,
 			tools: measured.tools,
 			...(runTools ? { runTools } : {}),
 			total,
