@@ -62,6 +62,8 @@ export interface SubagentRunRecord {
 	deliveryMode: SubagentDeliveryMode;
 	/** The ID of the `tasks` batch the run was launched in; absent on a run launched alone. */
 	batch?: string;
+	/** The ID of the `chain` the run is a step of; absent on a run launched alone. */
+	chain?: string;
 	status: SubagentLifecycleStatus;
 	stopReason?: string;
 	stopSource?: SubagentStopSource;
@@ -129,6 +131,7 @@ export interface AdmitSubagentRunRequest<C = unknown> {
 	startSnapshot?: WorkspaceSnapshot;
 	deliveryMode: SubagentDeliveryMode;
 	batch?: string;
+	chain?: string;
 	signal?: AbortSignal;
 	context?: C;
 }
@@ -262,6 +265,7 @@ export class SubagentRunScheduler<C = unknown> {
 			admittedAt,
 			deliveryMode: request.deliveryMode,
 			...(request.batch ? { batch: request.batch } : {}),
+			...(request.chain ? { chain: request.chain } : {}),
 			status: "starting",
 			usage: createEmptySubagentUsage(),
 			backgroundDeliveryAttempted: false,

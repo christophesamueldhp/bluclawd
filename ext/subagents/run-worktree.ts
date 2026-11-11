@@ -449,8 +449,15 @@ export async function describeWorkspace(workspace: IsolatedWorkspace, runDir: st
 	];
 }
 
-/** What a run that edits is told of its workspace, besides its role's instructions. */
-export function workspaceInstructions({ root, baseline }: IsolatedWorkspace, shell: boolean): string {
+/** What a run in a worktree is told of it, besides its role's instructions: one that only reads works in its chain's. */
+export function workspaceInstructions({ root, baseline }: IsolatedWorkspace, writes = true, shell = false): string {
+	if (!writes) {
+		return [
+			"",
+			"## Your workspace",
+			`You read an isolated Git worktree, ${root}: a copy of your orchestrator's checkout ${baseline.source} as it was when your chain was admitted, its uncommitted changes included and its ignored files left out, with the changes of the steps before you. You cannot change files. Later changes in its checkout do not reach you.`,
+		].join("\n");
+	}
 	return [
 		"",
 		"## Your workspace",

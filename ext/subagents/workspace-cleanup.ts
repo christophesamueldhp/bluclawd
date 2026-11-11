@@ -10,6 +10,7 @@ import type { RunDirectory } from "./directory.ts";
 import type { ParentScope } from "./parent-scope.ts";
 import { processAlive, readRpcHostState } from "./rpc-host.ts";
 import { readRunDefinition, runDefinitionPath } from "./rpc-runs.ts";
+import { within } from "./run-workspace.ts";
 import { cleanWorktree, listChanges, UNLISTED } from "./run-worktree.ts";
 import { subagentRunDir } from "./storage.ts";
 
@@ -20,7 +21,7 @@ export function registerWorkspaceCleanup(
 	deps: {
 		agentDir(): string;
 		scope(): ParentScope | undefined;
-		directory: Pick<RunDirectory, "find">;
+		directory: Pick<RunDirectory, "find" | "list">;
 	},
 ): void {
 	pi.registerCommand("clean-workspace", {
@@ -49,9 +50,25 @@ export function registerWorkspaceCleanup(
 			if (!workspace) {
 				return tell(`${label} has no worktree of its own: it worked in ${record.cwd}, which stays.`, "warning");
 			}
+			/** A later step of the run's chain may work in its worktree. */
+			const inUse = () => {
+				const occupant = deps.directory
+					.list(scope)
+					.find(({ record: run }) => within(workspace.root, run.cwd))?.record;
+				return (
+					occupant &&
+					`${workspace.root} is in use by ${formatRunLabel(occupant)}: let it finish, or stop it, first.`
+				);
+			};
+			const occupied = inUse();
+			if (occupied) return tell(occupied, "warning");
 			const gone = !existsSync(workspace.root);
 			try {
-				const removal = await cleanWorktree(workspace, { agentDir, runId: record.runId, runDir }, busy);
+				const removal = await cleanWorktree(
+					workspace,
+					{ agentDir, runId: record.runId, runDir },
+					() => busy() ?? inUse(),
+				);
 				if (gone) {
 					return tell(
 						`${workspace.root} was removed already; ${label} ${removal.restorable ? "can still be resumed, its worktree made again" : "can no longer be resumed"}.`,

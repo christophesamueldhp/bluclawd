@@ -1,7 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import {
 	type ExtensionContext,
 	parseSessionEntries,
@@ -45,7 +45,7 @@ import {
 	runDefinitionPath,
 	WORKTREE_TOOLS,
 } from "./rpc-runs.ts";
-import { type RunWorkspace, resolveRunWorkspace } from "./run-workspace.ts";
+import { type RunWorkspace, resolveRunWorkspace, within } from "./run-workspace.ts";
 import {
 	captureRunBaseline,
 	dropRunBaseline,
@@ -209,6 +209,32 @@ export const SUBAGENT_TOOL_PARAMETERS = Type.Object({
 			},
 		),
 	),
+	chain: Type.Optional(
+		Type.Array(
+			Type.Object(
+				{
+					agent: Type.Optional(run.agent),
+					resume: Type.Optional(
+						Type.String({
+							description:
+								"In place of agent, name and cwd: the name of an earlier step of this chain, which goes on in its own session, with its context, role and workspace.",
+						}),
+					),
+					task: run.task,
+					name: run.name,
+					cwd: run.cwd,
+					model: run.model,
+					thinkingLevel: run.thinkingLevel,
+				},
+				{ additionalProperties: false },
+			),
+			{
+				minItems: 1,
+				description:
+					"Dependent steps to run one after another, in place of agent and task: each starts once the one before it completed, given that step's Report. When a step edits, every step works in one isolated worktree, one at a time. A failed, cancelled or blocked step halts the chain; a review that finds defects has completed. The call waits for the whole chain (unless background) and returns one combined report.",
+			},
+		),
+	),
 });
 
 /** One Run's parameters: a single assignment's, or a `tasks` entry's with the call's own. */
@@ -217,16 +243,37 @@ export type SubagentCallParams = Static<typeof SUBAGENT_TOOL_PARAMETERS>;
 
 /** Prefix of a batch's ID, which no run's name may take. */
 export const BATCH_ID_PREFIX = "batch_";
+/** Prefix of a chain's ID, which no run's name may take. */
+export const CHAIN_ID_PREFIX = "chain_";
 
-/** What a subagent call asks for: one Run, or a batch of independent ones. Alternative shapes are never combined. */
+/**
+ * A step of a `chain`: a Run of its own, or the Resume of an earlier step's Run, by that step's index, with its next
+ * instruction and any change of model or level.
+ */
+export type ChainStep =
+	| { readonly run: LaunchParams }
+	| { readonly resume: number; readonly task: string; readonly model?: string; readonly thinkingLevel?: string };
+
+/**
+ * What a subagent call asks for: one Run, a batch of independent ones, or a chain of dependent steps. Alternative
+ * shapes are never combined.
+ */
 export type SubagentInvocation =
 	| { readonly ok: true; readonly run: LaunchParams }
 	| { readonly ok: true; readonly tasks: LaunchParams[] }
+	| { readonly ok: true; readonly chain: ChainStep[] }
 	| { readonly ok: false; readonly error: string };
 
 export function subagentInvocation(params: SubagentCallParams): SubagentInvocation {
-	const { tasks, ...call } = params;
-	if (tasks === undefined) {
+	const { tasks, chain, ...call } = params;
+	if (tasks !== undefined && chain !== undefined) {
+		return {
+			ok: false,
+			error: "`tasks` and `chain` are alternative shapes: give independent assignments as `tasks`, dependent steps as `chain`.",
+		};
+	}
+	const shape = tasks !== undefined ? "tasks" : chain !== undefined ? "chain" : undefined;
+	if (shape === undefined) {
 		if (call.agent === undefined) return { ok: false, error: "Missing required parameter: agent" };
 		if (call.task === undefined) return { ok: false, error: "Missing required parameter: task" };
 		return { ok: true, run: { ...call, agent: call.agent, task: call.task } };
@@ -235,11 +282,42 @@ export function subagentInvocation(params: SubagentCallParams): SubagentInvocati
 	if (conflicting.length > 0) {
 		return {
 			ok: false,
-			error: `\`tasks\` and ${conflicting.join(", ")} are alternative shapes: set ${conflicting.join(", ")} in each entry of \`tasks\` instead, or leave \`tasks\` out.`,
+			error: `\`${shape}\` and ${conflicting.join(", ")} are alternative shapes: set ${conflicting.join(", ")} in each entry of \`${shape}\` instead, or leave \`${shape}\` out.`,
 		};
 	}
 	const { agentScope, confirmProjectAgents, background } = call;
-	return { ok: true, tasks: tasks.map((entry) => ({ ...entry, agentScope, confirmProjectAgents, background })) };
+	if (tasks !== undefined) {
+		return { ok: true, tasks: tasks.map((entry) => ({ ...entry, agentScope, confirmProjectAgents, background })) };
+	}
+	const steps: ChainStep[] = [];
+	for (const [i, { resume, ...step }] of (chain ?? []).entries()) {
+		if (resume === undefined) {
+			if (step.agent === undefined) {
+				return { ok: false, error: `chain[${i}]: give a step either \`agent\` or \`resume\`.` };
+			}
+			steps.push({ run: { ...step, agent: step.agent, agentScope, confirmProjectAgents, background } });
+			continue;
+		}
+		const extra = (["agent", "name", "cwd"] as const).filter((key) => step[key] !== undefined);
+		if (extra.length > 0) {
+			return {
+				ok: false,
+				error: `chain[${i}]: a step that resumes an earlier one goes on with its role, name and cwd: leave out ${extra.map((key) => `\`${key}\``).join(", ")}.`,
+			};
+		}
+		const target = (chain ?? []).findIndex(
+			(earlier, j) => j < i && earlier.resume === undefined && earlier.name?.trim() === resume.trim(),
+		);
+		if (target < 0) {
+			return {
+				ok: false,
+				error: `chain[${i}]: \`resume\` names an earlier step of this chain by the name it was given, and no earlier step is named "${resume}".`,
+			};
+		}
+		const { task, model, thinkingLevel } = step;
+		steps.push({ resume: target, task, ...(model ? { model } : {}), ...(thinkingLevel ? { thinkingLevel } : {}) });
+	}
+	return { ok: true, chain: steps };
 }
 
 /** How a run is named in replies: its quoted name and run ID, or its quoted run ID when unnamed. */
@@ -254,11 +332,26 @@ export interface LaunchRequest {
 	signal?: AbortSignal;
 	/** The ID of the `tasks` batch the run is a member of. */
 	batch?: string;
+	/** The chain the run is a step of. */
+	chain?: ChainPlacement;
 	/**
-	 * Awaited once the run passed every check, just before it is admitted: a batch's members are admitted together,
-	 * or none is. False when a sibling was refused, and this run is not admitted either.
+	 * Awaited once the run passed every check, just before it is admitted, with where it would work and whether it
+	 * edits: a batch's members are admitted together, or none is. False when a sibling was refused, and this run is not
+	 * admitted either.
 	 */
-	ready?: () => Promise<boolean>;
+	ready?: (run: { cwd: string; root: string; writes: boolean }) => Promise<boolean>;
+}
+
+/** Where a step of a chain works, and the branch it is held to. */
+export interface ChainPlacement {
+	id: string;
+	/**
+	 * The worktree the chain's steps share, when one of them edits: "record" for the first step, whose Admission
+	 * records it from the checkout as it is now; the worktree recorded, for each later step.
+	 */
+	workspace?: "record" | IsolatedWorkspace;
+	/** The entry the chain was launched from, which a later step is held to; the current leaf when absent. */
+	origin?: string;
 }
 
 /** The parts of the calling tool's context admission reads. */
@@ -306,6 +399,8 @@ export interface ResumeChanges {
 	thinkingLevel?: string;
 	/** Set when the instruction is the user's own, given to the run directly, rather than its orchestrator's. */
 	from?: "user";
+	/** Set when the Resume is a step of the run's chain, which releases the worktree once the chain settles. */
+	chainStep?: true;
 }
 
 export interface RunAdmission {
@@ -373,7 +468,7 @@ export function delegationDenied(
 }
 
 /** Why a run cannot be given `task`, a launch's or a Resume's instruction. */
-function invalidTaskText(task: string): string | undefined {
+export function invalidTaskText(task: string): string | undefined {
 	if (!task.trim()) return "Missing required parameter: task";
 	const bytes = Buffer.byteLength(task, "utf8");
 	if (bytes <= MAX_TASK_INPUT_BYTES) return undefined;
@@ -386,15 +481,16 @@ function invalidRunName(name: string): string | undefined {
 		AGENT_NAME_RE.test(name) &&
 		name !== PARENT_MESSAGE_ADDRESS &&
 		!name.startsWith("sub_") &&
-		!name.startsWith(BATCH_ID_PREFIX)
+		!name.startsWith(BATCH_ID_PREFIX) &&
+		!name.startsWith(CHAIN_ID_PREFIX)
 	) {
 		return undefined;
 	}
-	return `Invalid subagent name "${name}": use lowercase letters, digits, "-" or "_", and not "${PARENT_MESSAGE_ADDRESS}" or a "sub_" or "${BATCH_ID_PREFIX}" prefix.`;
+	return `Invalid subagent name "${name}": use lowercase letters, digits, "-" or "_", and not "${PARENT_MESSAGE_ADDRESS}" or a "sub_", "${BATCH_ID_PREFIX}" or "${CHAIN_ID_PREFIX}" prefix.`;
 }
 
 /** Why a call's model or thinking level cannot be what it names, before either is resolved. */
-function invalidModelChoice({ model, thinkingLevel }: ResumeChanges): string | undefined {
+export function invalidModelChoice({ model, thinkingLevel }: ResumeChanges): string | undefined {
 	if (model !== undefined && !parseSubagentModelSpec(model)) {
 		return `Invalid subagent "model" value "${model}": must be "inherit" or explicit "provider/model".`;
 	}
@@ -572,6 +668,13 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 		}
 		const holder = current.name ? deps.directory.nameHolder(scope, current.name)?.record : undefined;
 		if (holder) return refuse.unavailable(`${label} cannot resume: its name is now used by ${holder.runId}.`);
+		const root = admitted.workspace?.root;
+		const occupant = root && deps.directory.list(scope).find(({ record }) => within(root, record.cwd))?.record;
+		if (occupant) {
+			return cannot(
+				`its worktree ${root} is in use by ${formatRunLabel(occupant)}: no two runs work in one worktree at once.`,
+			);
+		}
 		const task = buildPrompt();
 		const invalidTask = invalidTaskText(task);
 		if (invalidTask) return refuse.unavailable(invalidTask);
@@ -607,6 +710,7 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 					projectTrusted: definition.projectTrusted,
 					sessionFile,
 					...(changes.from ? { taskFrom: changes.from } : {}),
+					...(changes.chainStep ? { keepWorktree: true } : {}),
 					...(definition.workspace ? { workspace: definition.workspace } : {}),
 					recheck: recheckRpc(current.runId, runDir, generation, { cwd: ctx.cwd, trusted: projectTrusted }),
 				},
@@ -700,7 +804,7 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 	};
 
 	return {
-		async launch({ toolCallId, parentTurnId, params, signal, batch, ready }, ctx) {
+		async launch({ toolCallId, parentTurnId, params, signal, batch, chain, ready }, ctx) {
 			// A run is a pi of its own in tmux (ADR-0006), unless runs on pi's RPC are switched on.
 			const rpc = rpcRunsEnabled();
 			const parentPane = deps.pane();
@@ -708,7 +812,7 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 			const dispatched = deps.scope.current();
 			if (!dispatched) return reject("Subagent runtime is not initialized for this session.");
 			const parentSessionId = ctx.sessionManager.getSessionId();
-			const originEntryId = ctx.sessionManager.getLeafId() ?? undefined;
+			const originEntryId = chain?.origin ?? ctx.sessionManager.getLeafId() ?? undefined;
 			const agentDir = deps.agentDir();
 			const projectTrusted = ctx.isProjectTrusted();
 			const inlineRole = typeof params.agent === "string" ? undefined : params.agent;
@@ -792,9 +896,16 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 				reject(
 					`Subagent role "${definition.name}" may edit files or run commands, so it works in an isolated Git worktree, and none can be made: ${why}. Such a run never works in a shared checkout: give it a cwd in a Git repository with a commit, or a role that only reads.`,
 				);
+			// A step of a chain whose steps share a worktree works in it, whether it edits or not.
+			const shared = chain?.workspace;
 			// Known before a batch's members are admitted together, unlike what recording the checkout may still find.
-			const unisolated = writes ? worktreeUnavailable(cwd) : undefined;
+			const unisolated = writes || shared === "record" ? worktreeUnavailable(cwd) : undefined;
 			if (unisolated) return cannotIsolate(unisolated);
+			if (typeof shared === "object" && !within(shared.baseline.source, cwd)) {
+				return reject(
+					`Subagent cwd ${cwd} is outside ${shared.baseline.source}, the repository the worktree of its chain was made from: the steps of a chain work in that one worktree.`,
+				);
+			}
 
 			// Spawn > role > parent for the model and thinking level, verified before admission.
 			const invalid = invalidModelChoice(params);
@@ -813,7 +924,9 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 			const childModel = await resolveChildModel(requestedModel, requestedThinkingLevel, ctx);
 			if (!childModel.ok) return reject(childModel.error);
 			if (rpc && !(await deps.ensureQueue())) return reject(`Cannot launch subagent: ${QUEUE_DOWN}`);
-			if (ready && !(await ready())) return reject("Not admitted: another task of its batch was refused.");
+			if (ready && !(await ready({ cwd, root: workspace?.root ?? cwd, writes }))) {
+				return reject("Not admitted: another task of its batch was refused.");
+			}
 
 			// Everything from here to admit runs without awaiting, so the session cannot change in between.
 			if (
@@ -845,6 +958,15 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 			}
 
 			if (signal?.aborted) return reject("Subagent request was aborted before admission.");
+			// A worktree has one run in it at a time: the step before hands it on by ending.
+			const occupant =
+				typeof shared === "object" &&
+				deps.directory.list(dispatched).find(({ record }) => within(shared.root, record.cwd))?.record;
+			if (occupant) {
+				return reject(
+					`The worktree of its chain, ${shared.root}, is in use by ${formatRunLabel(occupant)}: no two runs work in one worktree at once.`,
+				);
+			}
 
 			// Prepared before admission, so a run that cannot store anything is never listed.
 			const runId = createRunId();
@@ -857,14 +979,23 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 			// checkout. It keeps the checkout's trust and deny rules: its files are the checkout's.
 			let isolated: IsolatedWorkspace | undefined;
 			let runCwd = cwd;
-			if (writes) {
+			if (typeof shared === "object") {
+				isolated = shared;
+				runCwd = join(shared.root, relative(shared.baseline.source, cwd));
+				if (!existsSync(runCwd)) {
+					return reject(
+						`Subagent cwd ${cwd} is not in the worktree of its chain, ${shared.root}: the worktree was removed, or the directory is ignored or held no file when the chain began.`,
+					);
+				}
+			} else if (writes || shared === "record") {
 				const captured = captureRunBaseline(cwd, runId);
 				if (!captured.ok) return cannotIsolate(captured.error);
 				isolated = { root: worktreePath(agentDir, runId), baseline: captured.baseline };
 				runCwd = join(isolated.root, captured.cwd);
 			}
 			const refuseIsolated = (error: string): AdmissionResult => {
-				if (isolated) dropRunBaseline(isolated.baseline);
+				// A chain's worktree recorded by an earlier step stays its chain's.
+				if (isolated && typeof shared !== "object") dropRunBaseline(isolated.baseline);
 				return reject(error);
 			};
 			if (rpcTools) {
@@ -919,6 +1050,7 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 				startSnapshot,
 				deliveryMode: isBackground ? "background" : "foreground",
 				...(batch ? { batch } : {}),
+				...(chain ? { chain: chain.id } : {}),
 				// Cancelling a foreground call on pi's RPC cancels its run's work; one in tmux only stops waiting for its
 				// Report. A run in the background goes on whatever becomes of the call.
 				...(rpcTools && !isBackground && signal ? { signal } : {}),
@@ -937,6 +1069,8 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 								agentDir,
 								projectTrusted: childTrusted,
 								...(isolated ? { workspace: isolated } : {}),
+								...(typeof shared === "object" ? { worktreeMade: true } : {}),
+								...(chain ? { keepWorktree: true } : {}),
 								recheck: recheckRpc(runId, storage.runDir, 0, { cwd: ctx.cwd, trusted: projectTrusted }),
 							},
 						}

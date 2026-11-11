@@ -98,8 +98,12 @@ export interface RpcLaunch {
 	sessionFile?: string;
 	/** Set when a Resume's instruction is the user's own; otherwise the task is its orchestrator's. */
 	taskFrom?: "user";
-	/** The worktree of a run that edits, made at its launch; its `cwd` is in it. */
+	/** The worktree of a run that edits, made at its launch, or of its chain; its `cwd` is in it. */
 	workspace?: IsolatedWorkspace;
+	/** Set when an earlier step of its chain made its worktree, handed on to it as it is. */
+	worktreeMade?: boolean;
+	/** Set on a step of a chain: its worktree is kept, even unchanged, for the steps after it; the chain releases it. */
+	keepWorktree?: boolean;
 	/**
 	 * Why the run may no longer start, asked once its turn comes: it may have waited in the queue since Admission. It
 	 * narrows what the run is held to, never widens it.
@@ -406,7 +410,13 @@ export async function executeRpcRun(
 	writeFileSync(
 		instructions,
 		launch.definition.instructions +
-			(workspace ? `\n${workspaceInstructions(workspace, launch.tools.includes("bash"))}` : ""),
+			(workspace
+				? `\n${workspaceInstructions(
+						workspace,
+						launch.tools.some((tool) => WORKTREE_TOOLS.includes(tool)),
+						launch.tools.includes("bash"),
+					)}`
+				: ""),
 	);
 	// Open before anything is awaited: the run takes messages from its Admission on, queued or working.
 	openRunInbox(launch.runDir, record.generation);
@@ -424,7 +434,7 @@ export async function executeRpcRun(
 	 * leaves no worktree or baseline behind either: there is nothing of it to resume.
 	 */
 	const untakenNote = () => {
-		if (workspace && !launch.sessionFile) {
+		if (workspace && !launch.sessionFile && !launch.worktreeMade) {
 			discardWorktree(workspace, { agentDir: launch.agentDir, runId: record.runId, runDir: launch.runDir });
 		}
 		const untaken = sealRunInbox(launch.runDir, record.generation).length;
@@ -460,7 +470,7 @@ export async function executeRpcRun(
 		contained = { helper: ready.helper, marker: runMarker(record.runId) };
 	}
 	// A run that edits gets its worktree as its Admission recorded it, before it waits for its turn.
-	if (workspace && !launch.sessionFile) {
+	if (workspace && !launch.sessionFile && !launch.worktreeMade) {
 		try {
 			await materializeWorktree(workspace);
 		} catch (error) {
@@ -547,7 +557,7 @@ export async function executeRpcRun(
 	const terminated = await endHostGroup(hostPid, contained);
 	if (terminated && contained) rmSync(runShellTmp(launch.agentDir, record.runId), { recursive: true, force: true });
 	// Once nothing of it runs, a worktree it left as it was made goes, a Resume making it again; any other stays.
-	if (workspace && terminated) {
+	if (workspace && terminated && !launch.keepWorktree) {
 		await releaseUnchangedWorktree(workspace, {
 			agentDir: launch.agentDir,
 			runId: record.runId,
