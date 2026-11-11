@@ -364,7 +364,7 @@ function resolveTarget(deps: IntegrationDeps, scope: ParentScope, name: string):
 		workspace,
 		ownerDir: runDir,
 		runs: [run],
-		outcome: `Run: completed: its pi settled its work without an error. What it claims to have checked is its own claim.`,
+		outcome: `Run: completed: its pi settled its work without an error. What it says it checked is its own claim; its Report's Checks line lists the commands its transcript shows.`,
 	};
 }
 

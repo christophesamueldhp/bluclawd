@@ -1,6 +1,7 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { conversation, FAUX, type FauxRequest, hasTmux, type RealPi, startRealPi } from "./helpers/real-pi.ts";
 import { waitFor } from "./helpers/wait-for.ts";
@@ -58,12 +59,32 @@ const writer = {
 	tools: ["read", "edit", "write"],
 };
 
-/** An orchestrator pane whose runs are RPC children. */
-async function startOrchestrator(): Promise<RealPi> {
+/** A run's pi that leaves a process behind in its process group, which ignores SIGTERM. */
+const LINGERER = fileURLToPath(new URL("./fixtures/real-pi/lingerer.ts", import.meta.url));
+
+/** An orchestrator pane whose runs are RPC children, which load the faux provider, and `extensions`, as the pane does. */
+async function startOrchestrator(extensions: string[] = []): Promise<RealPi> {
 	vi.stubEnv("BLUCLAWD_RPC_RUNS", "1");
-	vi.stubEnv("BLUCLAWD_RPC_PROVIDER_EXTENSIONS", FAUX);
+	vi.stubEnv("BLUCLAWD_RPC_PROVIDER_EXTENSIONS", [FAUX, ...extensions].join(":"));
 	return startRealPi();
 }
+
+/** The directory and stored record of the run named `name`. */
+function runOf(real: RealPi, name: string): { dir: string; status: string } | undefined {
+	const root = join(real.agentDir, "bluclawd", "subagents");
+	for (const session of existsSync(root) ? readdirSync(root) : []) {
+		for (const run of readdirSync(join(root, session))) {
+			const path = join(root, session, run, "record.json");
+			const record = existsSync(path) ? JSON.parse(read(join(root, session, run), "record.json")) : undefined;
+			if (record?.name === name) return { dir: join(root, session, run), status: record.status };
+		}
+	}
+	return undefined;
+}
+
+/** The chain IDs the orchestrator's tool results name, in order. */
+const chainIds = (request: FauxRequest) =>
+	toolResults(request).flatMap((text) => /^Chain (chain_\w+):/m.exec(text)?.[1] ?? []);
 
 describe.skipIf(!hasTmux)("integrating an RPC run's changes", () => {
 	let pi: RealPi | undefined;
@@ -225,5 +246,153 @@ describe.skipIf(!hasTmux)("integrating an RPC run's changes", () => {
 		expect(read(repo, "a.txt")).toBe(resolved);
 		expect(read(repo, "n.txt")).toBe("new\n");
 		expect(gitState(repo)).toBe(before);
+	});
+
+	it("refuses a run that reported while its processes still run, one stopping, and one stopped, then takes the first once it settled", async () => {
+		const real = await startOrchestrator([LINGERER]);
+		pi = real;
+		const repo = real.cwd;
+		repository(repo, { ".gitignore": "lingerer.pid\n", "a.txt": SEVEN });
+		const reported = join(repo, "..", "reported");
+		const settled = join(repo, "..", "settled");
+		const launch = (name: string) => ({
+			tool: "subagent",
+			args: { agent: writer, name, task: "Write.", background: true },
+		});
+		real.script("main", [
+			{ calls: [launch("w1"), launch("w2")] },
+			{ tool: "subagent_integrate", args: { agent: "w1" }, until: reported },
+			{
+				calls: [
+					{ tool: "subagent_stop", args: { agent: "w2" } },
+					{ tool: "subagent_integrate", args: { agent: "w2" } },
+				],
+			},
+			{ tool: "subagent_integrate", args: { agent: "w2" } },
+			{ tool: "subagent_integrate", args: { agent: "w1" }, until: settled },
+			{ text: "done" },
+			{ text: "done" },
+		]);
+		real.script("w1", [{ tool: "write", args: { path: "one.txt", content: "one\n" } }, { text: "Wrote." }]);
+		real.script("w2", [
+			{ tool: "write", args: { path: "two.txt", content: "two\n" } },
+			{ text: "Never.", until: join(repo, "..", "never") },
+		]);
+		real.start(["--", "delegate"]);
+		await waitFor(() => expect(real.requests("w1").length).toBeGreaterThan(0));
+		await waitFor(() => expect(real.requests("w2").length).toBeGreaterThan(1));
+		// Its Report is stored, but what its pi started still runs: its work has not settled.
+		await waitFor(() => {
+			const dir = runOf(real, "w1")?.dir;
+			return dir !== undefined && existsSync(join(dir, "reports")) && readdirSync(join(dir, "reports")).length > 0;
+		});
+		expect(runOf(real, "w1")?.status).toBe("running");
+		writeFileSync(reported, "");
+
+		await real.waitForRequests("main", 5);
+		await waitFor(() => expect(runOf(real, "w1")?.status).toBe("closed"));
+		writeFileSync(settled, "");
+		await waitFor(() => expect(real.requests("main").length).toBeGreaterThanOrEqual(6));
+		const results = toolResults(real.requests("main")[5]);
+		const [early, stopped, stopping, cancelled, late] = results.slice(2);
+		expect(early).toMatch(/^Not integrated: "w1" \(sub_[\w-]+\) is still running/);
+		expect(stopped).toMatch(/^Stopped "w2"/);
+		expect(stopping).toMatch(/^Not integrated: "w2" \(sub_[\w-]+\) is still stopping/);
+		expect(cancelled).toMatch(/^Not integrated: "w2" \(sub_[\w-]+\) ended cancelled .*not ready to integrate/s);
+		expect(late).toMatch(/^Integration: applied A one\.txt to /m);
+		expect(read(repo, "one.txt")).toBe("one\n");
+		expect(existsSync(join(repo, "two.txt"))).toBe(false);
+	});
+
+	it("integrates a chain once every step completed, never a halted one or a step on its own", async () => {
+		const real = await startOrchestrator();
+		pi = real;
+		const repo = real.cwd;
+		repository(repo, { "a.txt": SEVEN });
+		const chain = (worker: string, reviewer: string) => ({
+			tool: "subagent",
+			args: {
+				chain: [
+					{ agent: writer, name: worker, task: "Write." },
+					{ agent: "reviewer", name: reviewer, task: "Review." },
+				],
+			},
+		});
+		real.script("main", [chain("hw", "hrev"), chain("cw", "crev"), { text: "two chains" }]);
+		real.script("hw", [{ tool: "write", args: { path: "halted.txt", content: "halted\n" } }, { text: "Wrote." }]);
+		real.script("hrev", [{ text: "Half a review.", error: "the faux provider broke" }]);
+		real.script("cw", [{ tool: "write", args: { path: "done.txt", content: "done\n" } }, { text: "Wrote." }]);
+		real.script("crev", [{ text: "Looks right." }]);
+		const pane = real.start(["--", "delegate"]);
+		const first = await real.waitForRequests("main", 3);
+		const [halted, completed] = chainIds(first[2]);
+		expect([halted, completed].every(Boolean)).toBe(true);
+
+		real.script("main", [
+			chain("hw", "hrev"),
+			chain("cw", "crev"),
+			{ text: "two chains" },
+			{
+				calls: [
+					{ tool: "subagent_integrate", args: { agent: halted } },
+					{ tool: "subagent_integrate", args: { agent: "cw" } },
+				],
+			},
+			{ tool: "subagent_integrate", args: { agent: completed } },
+			{ text: "done" },
+		]);
+		real.tmux.sendKeys(pane, ["integrate", "Enter"]);
+		const main = await real.waitForRequests("main", 6);
+		const [refusedHalted, refusedStep, applied] = toolResults(main[5]).slice(2);
+		expect(refusedHalted).toMatch(new RegExp(`^Not integrated: chain ${halted} halted \\(chain\\[1\\] failed\\)`));
+		expect(refusedStep).toMatch(new RegExp(`is a step of chain ${completed}: integrate the chain`));
+		expect(applied).toMatch(/^Integration: applied A done\.txt to /m);
+		expect(applied).toMatch(new RegExp(`^Run: chain ${completed}, 2 steps, every one completed`, "m"));
+		expect(read(repo, "done.txt")).toBe("done\n");
+		expect(existsSync(join(repo, "halted.txt"))).toBe(false);
+	});
+
+	it("writes nothing the orchestrator's deny rules forbid now, or through a link in its checkout", async () => {
+		const real = await startOrchestrator();
+		pi = real;
+		const repo = real.cwd;
+		repository(repo, { "a.txt": SEVEN });
+		const outside = join(repo, "..", "outside");
+		mkdirSync(outside);
+		const gate = join(repo, "..", "changed");
+		real.script("main", [
+			{ tool: "subagent", args: { agent: writer, name: "w", task: "Write." } },
+			{ tool: "subagent_integrate", args: { agent: "w" }, until: gate },
+			{ text: "done" },
+		]);
+		real.script("w", [
+			{
+				calls: [
+					{ tool: "write", args: { path: "locked.txt", content: "locked\n" } },
+					{ tool: "write", args: { path: "lib/x.txt", content: "x\n" } },
+					{ tool: "write", args: { path: "free.txt", content: "free\n" } },
+				],
+			},
+			{ text: "Wrote." },
+		]);
+		real.start(["--", "delegate"]);
+		await real.waitForRequests("main", 2);
+		// Since the run was admitted: a rule against one of its files, and a link where it made a directory.
+		const settings = join(real.agentDir, "settings.json");
+		writeFileSync(
+			settings,
+			JSON.stringify({ ...JSON.parse(readFileSync(settings, "utf8")), permissions: { deny: ["Edit(locked.txt)"] } }),
+		);
+		symlinkSync(outside, join(repo, "lib"));
+		writeFileSync(gate, "");
+
+		const main = await real.waitForRequests("main", 3);
+		const refused = toolResults(main[2])[1];
+		expect(refused).toMatch(/^Not integrated: nothing of .* was applied/);
+		expect(refused).toMatch(/^- locked\.txt: Blocked by permission rule \(deny\): Edit\(locked\.txt\)/m);
+		expect(refused).toMatch(/^- lib\/x\.txt: .*lib is a link in your checkout/m);
+		expect(readdirSync(outside)).toEqual([]);
+		expect(existsSync(join(repo, "locked.txt"))).toBe(false);
+		expect(existsSync(join(repo, "free.txt"))).toBe(false);
 	});
 });
