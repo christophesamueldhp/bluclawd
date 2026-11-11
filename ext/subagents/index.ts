@@ -96,12 +96,12 @@ const RPC_DELEGATION = [
 	`${SUBAGENT_DESCRIPTION_LEAD}: a pi of its own with a fresh context window and only the tools its role is granted. Children cannot delegate further.`,
 	"",
 	"Do small work yourself: a lookup, a one-file edit, or anything quicker to do than to describe. Delegate only when it helps:",
-	"- Independent pieces that can run side by side: give them together as `tasks` in one call, which returns one combined report once all have finished; its manifest lists every member's status meanwhile.",
-	"- Dependent steps, such as an edit, then an independent review, then a repair: give them as `chain` in one call, which runs them one after another in one worktree.",
+	"- Independent pieces that can run side by side: give them together as `tasks` in one call, which returns one combined report once all have finished.",
+	"- Dependent steps, such as an edit, then an independent review, then a repair: give them as `chain` in one call.",
 	"- A specialized investigation or review whose intermediate output does not belong in your context.",
 	"No sequence of roles is required and there is no quota: use as many runs as the work needs. Runs past the active limit wait in a queue; that limit is not a target, so there is no need to fill every slot.",
 	"",
-	"A run that only reads shares your checkout and needs no worktree. A run that edits works in a worktree of its own, made from your checkout as it was at the call: nothing reaches your checkout until you call `subagent_integrate` on it, or on a completed chain, with a `check` command that validates the combined result.",
+	"A run that only reads shares your checkout and needs no worktree. A run that edits works in a worktree of its own, made from your checkout as it was at the call: nothing reaches your checkout until you call `subagent_integrate` on it, or on a completed chain, with a `check` that validates the combined result.",
 	"",
 	"Keep each task, and any inline role, short and self-contained: the goal, the files or area, and what to report. Do not paste the conversation or large file contents; name paths instead.",
 	"",
@@ -137,7 +137,7 @@ function buildBaseSubagentDescription(catalog?: AgentDefinitionCatalog, oneShot 
 					...RPC_RUNS_END,
 					"",
 				]),
-		"Available subagent roles, as found from your directory (a run given a `cwd` of its own finds roles from there):",
+		"Available subagent roles, as found from your directory:",
 		rolesSection,
 	].join("\n");
 }
@@ -730,7 +730,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 				openWorldHint: false,
 			},
 			description:
-				"Send a message to a working subagent by name or run ID (sub_…): it gets it at its next safe point, as information for its work. A message continues no finished subagent: subagent_resume does. The receipt says accepted, unavailable, or invalidated, never handled.",
+				"Send a message to a working subagent: it gets it at its next safe point, as information for its work. The receipt says accepted, unavailable, or invalidated, never handled.",
 			parameters: SUBAGENT_MESSAGE_PARAMETERS,
 			execute: async (_toolCallId, params) => {
 				const scope = parentScope.current();
@@ -766,7 +766,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			exposure: "model-only",
 			annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
 			description:
-				"Resume a finished subagent by name or run ID with your next instruction: it continues in the background in its own saved session, with its earlier context, the role and permissions it was launched with (never more than you have now) and its own workspace. It keeps its model and thinking level unless you set them. Its report is delivered when it finishes. A message does not resume a finished subagent; for fresh context, launch a new one.",
+				"Resume a finished subagent with your next instruction: it continues in the background in its own saved session, with its earlier context, the role and permissions it was launched with (never more than you have now) and its own workspace. It keeps its model and thinking level unless you set them. Its report is delivered when it finishes. For fresh context, launch a new one.",
 			parameters: Type.Object(
 				{
 					agent: Type.String({ description: "The finished subagent's name or run ID (sub_…)." }),
@@ -804,8 +804,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			label: "Subagent status",
 			exposure: "model-only",
 			annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-			description:
-				"Show your open subagents: status (queued, running or stopping), task and elapsed time. Use it to judge whether a child is stuck; stop it with subagent_stop.",
+			description: "Show your open subagents: status, task and elapsed time. Stop a stuck one with subagent_stop.",
 			parameters: Type.Object(
 				{ agent: Type.Optional(Type.String({ description: "A subagent name or run ID; omit for all." })) },
 				{ additionalProperties: false },
@@ -882,7 +881,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			exposure: "model-only",
 			annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
 			description:
-				'Stop a subagent by name or run ID, every member of a batch or chain by its ID (batch_… or chain_…), or every one with "all": its work is cancelled, queued or under way, and the call returns once none of its processes runs. Its session, Reports and files are kept; only subagent_resume continues it.',
+				"Stop a subagent, every member of a batch or chain, or all of them: its work is cancelled, queued or under way, and the call returns once none of its processes runs. Its session, Reports and files are kept.",
 			parameters: Type.Object(
 				{ agent: Type.String({ description: 'A subagent name or run ID, a batch or chain ID, or "all".' }) },
 				{ additionalProperties: false },
@@ -939,7 +938,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 				openWorldHint: false,
 			},
 			description:
-				"List models a subagent can run with: provider/model identity, auth status, supported thinking levels, and execution support. Pass the result's provider/id as the subagent `model`.",
+				"List models a subagent can run with: provider/model identity, auth status, supported thinking levels, and execution support.",
 			parameters: Type.Object({
 				provider: Type.Optional(Type.String({ description: "Only list models from this provider." })),
 			}),

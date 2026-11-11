@@ -8,7 +8,7 @@ import {
 	SettingsManager,
 	type ToolLoadout,
 } from "@earendil-works/pi-coding-agent";
-import { type Static, Type } from "typebox";
+import { type Static, type TSchema, Type } from "typebox";
 import { processAlive } from "../../daemon/processes.ts";
 import * as forkSettings from "../_shared/settings.ts";
 import { evaluateSubagentDelegationDeny } from "../permissions/policy.ts";
@@ -113,7 +113,7 @@ export function captureWorkspaceSnapshot(cwd: string): WorkspaceSnapshot {
 const RUN_PARAMETERS = Type.Object({
 	agent: Type.Union([
 		Type.String({
-			description: "Saved subagent role name (for example 'explorer' or 'reviewer').",
+			description: "Saved role name.",
 		}),
 		Type.Object(
 			{
@@ -130,7 +130,7 @@ const RUN_PARAMETERS = Type.Object({
 	name: Type.Optional(
 		Type.String({
 			description:
-				'Unique name for this child among running agents, used to address it (lowercase letters, digits, "-", "_"). Defaults to "<role>-<n>".',
+				'Unique name among running agents, to address it (lowercase letters, digits, "-", "_"). Defaults to "<role>-<n>".',
 		}),
 	),
 	task: Type.String({
@@ -150,8 +150,7 @@ const RUN_PARAMETERS = Type.Object({
 	),
 	model: Type.Optional(
 		Type.String({
-			description:
-				'Model for this run: "provider/model" from subagent_models, or "inherit" for the parent model. Overrides the role.',
+			description: '"provider/model" from subagent_models, or "inherit" for the parent model. Overrides the role.',
 		}),
 	),
 	thinkingLevel: Type.Optional(
@@ -161,8 +160,7 @@ const RUN_PARAMETERS = Type.Object({
 	),
 	background: Type.Optional(
 		Type.Boolean({
-			description:
-				"When true, launch in the background and deliver the completed report back to this session branch. Only when you have independent work to do meanwhile.",
+			description: "Launch in the background; the report is delivered to this session when it finishes.",
 		}),
 	),
 });
@@ -170,6 +168,32 @@ const RUN_PARAMETERS = Type.Object({
 /** What each entry of a `tasks` batch chooses for itself; the call's other parameters apply to every entry. */
 const TASK_ENTRY_KEYS = ["agent", "task", "name", "cwd", "model", "thinkingLevel"] as const;
 const run = RUN_PARAMETERS.properties;
+/** `schema` named and typed only: a `tasks` or `chain` entry's properties are described once, at the top level. */
+const typeOnly = <T extends TSchema>(schema: T): T =>
+	JSON.parse(
+		JSON.stringify(schema, (key, value) => (key === "description" && typeof value === "string" ? undefined : value)),
+	);
+/** A `chain` step's own: described here alone. */
+const RESUME = Type.Optional(
+	Type.String({
+		description:
+			"In place of agent, name and cwd: the name of an earlier step of this chain, which goes on in its own session, with its context, role and workspace.",
+	}),
+);
+const chainStep = typeOnly(
+	Type.Object(
+		{
+			agent: Type.Optional(run.agent),
+			resume: RESUME,
+			task: run.task,
+			name: run.name,
+			cwd: run.cwd,
+			model: run.model,
+			thinkingLevel: run.thinkingLevel,
+		},
+		{ additionalProperties: false },
+	),
+);
 
 export const SUBAGENT_TOOL_PARAMETERS = Type.Object({
 	...run,
@@ -177,47 +201,33 @@ export const SUBAGENT_TOOL_PARAMETERS = Type.Object({
 	task: Type.Optional(run.task),
 	tasks: Type.Optional(
 		Type.Array(
-			Type.Object(
-				{
-					agent: run.agent,
-					task: run.task,
-					name: run.name,
-					cwd: run.cwd,
-					model: run.model,
-					thinkingLevel: run.thinkingLevel,
-				},
-				{ additionalProperties: false },
+			typeOnly(
+				Type.Object(
+					{
+						agent: run.agent,
+						task: run.task,
+						name: run.name,
+						cwd: run.cwd,
+						model: run.model,
+						thinkingLevel: run.thinkingLevel,
+					},
+					{ additionalProperties: false },
+				),
 			),
 			{
 				minItems: 1,
 				description:
-					"Independent assignments to run side by side, in place of agent and task: each entry is a subagent of its own, with its own role, task, name, cwd, model and thinking level. The call waits for every one (unless background) and returns one combined report.",
+					"Independent assignments to run side by side, in place of agent and task: each entry is a subagent of its own, and its fields are a single run's, described above.",
 			},
 		),
 	),
 	chain: Type.Optional(
 		Type.Array(
-			Type.Object(
-				{
-					agent: Type.Optional(run.agent),
-					resume: Type.Optional(
-						Type.String({
-							description:
-								"In place of agent, name and cwd: the name of an earlier step of this chain, which goes on in its own session, with its context, role and workspace.",
-						}),
-					),
-					task: run.task,
-					name: run.name,
-					cwd: run.cwd,
-					model: run.model,
-					thinkingLevel: run.thinkingLevel,
-				},
-				{ additionalProperties: false },
-			),
+			{ ...chainStep, properties: { ...chainStep.properties, resume: RESUME } },
 			{
 				minItems: 1,
 				description:
-					"Dependent steps to run one after another, in place of agent and task: each starts once the one before it completed, given that step's Report. When a step edits, every step works in one isolated worktree, one at a time. A failed, cancelled or blocked step halts the chain; a review that finds defects has completed. The call waits for the whole chain (unless background) and returns one combined report.",
+					"Dependent steps to run one after another, in place of agent and task: a step's fields are a single run's, described above. Each starts once the one before it completed, given that step's Report. When a step edits, every step works in one isolated worktree, one at a time. A failed, cancelled or blocked step halts the chain; a review that finds defects has completed.",
 			},
 		),
 	),
