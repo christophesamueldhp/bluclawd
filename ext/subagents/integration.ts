@@ -336,8 +336,8 @@ function resolveTarget(deps: IntegrationDeps, scope: ParentScope, name: string):
 		const runs = chain.runs.flatMap((run) => (run.runId ? [runOf(run.runId)] : []));
 		const owner = runs[0];
 		if (!chain.workspace || !owner) return `Chain ${name} has no worktree: none of its steps edits.`;
-		if (runs.some((run) => !run)) return `Not integrated: a step of chain ${name} is unknown in this session.`;
-		const known = runs as NonNullable<(typeof runs)[number]>[];
+		const known = runs.filter((run): run is NonNullable<typeof run> => run !== undefined);
+		if (known.length < runs.length) return `Not integrated: a step of chain ${name} is unknown in this session.`;
 		if (!deps.onBranch(known[0].record.originEntryId)) {
 			return `Not integrated: chain ${name} was launched from another branch of this session.`;
 		}
