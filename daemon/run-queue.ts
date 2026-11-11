@@ -38,6 +38,19 @@ export interface RunQueueDeps {
 	 * those are ended then, since nothing of the run is left to own them.
 	 */
 	running: (pid: number, contained: RunHostLaunch["contained"]) => boolean;
+	/**
+	 * Where the launched runs are kept for the daemon started next: their hosts outlive this one, and hold their slots
+	 * until they end there too.
+	 */
+	store?: { load(): ActiveRun[]; save(runs: ActiveRun[]): void };
+}
+
+/** A launched run, as kept across daemons. */
+export interface ActiveRun {
+	run: string;
+	parent: string;
+	pid: number;
+	contained?: RunHostLaunch["contained"];
 }
 
 interface Entry {
@@ -64,6 +77,24 @@ export class RunQueue {
 
 	constructor(deps: RunQueueDeps) {
 		this.deps = deps;
+		// Those still running when an earlier daemon ended hold their slots here, until their processes are gone.
+		for (const { run, parent, pid, contained } of deps.store?.load() ?? []) {
+			if (!deps.running(pid, contained)) continue;
+			this.entries.set(run, { parent, state: "active", claimedAt: deps.now(), pid, contained });
+		}
+		if (this.entries.size > 0) this.schedule();
+		this.save();
+	}
+
+	private save(): void {
+		const active = [...this.entries].flatMap(([run, { parent, state, pid, contained }]) =>
+			state === "active" && pid !== undefined ? [{ run, parent, pid, ...(contained ? { contained } : {}) }] : [],
+		);
+		try {
+			this.deps.store?.save(active);
+		} catch {
+			// Kept in memory: only a daemon started after this one would not count them.
+		}
 	}
 
 	/**
@@ -109,6 +140,7 @@ export class RunQueue {
 		}
 		entry.state = "active";
 		entry.contained = host.contained;
+		this.save();
 		return entry.pid;
 	}
 
@@ -124,6 +156,7 @@ export class RunQueue {
 	/** Frees the slots of runs that ended, or were granted and never launched, then grants those freed. */
 	check(): void {
 		const now = this.deps.now();
+		let freed = false;
 		for (const [run, entry] of this.entries) {
 			const ended =
 				entry.state === "active"
@@ -131,8 +164,11 @@ export class RunQueue {
 					: entry.state === "granted"
 						? now - (entry.grantedAt ?? now) > LAUNCH_LEASE_MS
 						: !entry.answer && now - entry.claimedAt > UNCLAIMED_MS;
-			if (ended) this.entries.delete(run);
+			if (!ended) continue;
+			this.entries.delete(run);
+			freed ||= entry.state === "active";
 		}
+		if (freed) this.save();
 		this.schedule();
 	}
 

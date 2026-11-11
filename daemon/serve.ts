@@ -19,6 +19,7 @@ import { pistatusline } from "./remote/pistatusline.ts";
 import { launchUsable, startSession } from "./remote/spawn.ts";
 import { statusLine } from "./remote/statusline.ts";
 import { RunQueue } from "./run-queue.ts";
+import { loadActiveRuns, saveActiveRuns } from "./storage.ts";
 import { ServerSupervisor } from "./supervisor.ts";
 import { Tmux } from "./tmux.ts";
 import { type HeldWakeups, processAlive, readPendingWakeups, WakeupKeeper } from "./wakeups.ts";
@@ -61,6 +62,7 @@ export async function serve(): Promise<void> {
 	setRunQueue(
 		new RunQueue({
 			now: Date.now,
+			store: { load: () => loadActiveRuns(getServerDir()), save: (runs) => saveActiveRuns(getServerDir(), runs) },
 			// Detached, so a run's host leads a process group of its own and outlives the daemon.
 			spawn: ({ command, env, cwd }) => {
 				const host = spawn(command[0], command.slice(1), { cwd, env, detached: true, stdio: "ignore" });

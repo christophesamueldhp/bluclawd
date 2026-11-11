@@ -1,6 +1,8 @@
 import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { getDeletedPath, getInstancesPath, getWakeupsPath } from "./config.ts";
 import { ensureServerDir } from "./paths.ts";
+import type { ActiveRun } from "./run-queue.ts";
 import type { InstanceRecord } from "./types.ts";
 import type { HeldWakeups } from "./wakeups.ts";
 
@@ -92,4 +94,21 @@ export function upsertInstance(dir: string, instance: InstanceRecord): void {
 export function removeInstance(dir: string, instanceId: string): void {
 	const instances = loadInstances(dir).filter((instance) => instance.id !== instanceId);
 	saveInstances(dir, instances);
+}
+
+const activeRunsPath = (dir: string) => join(dir, "run-slots.json");
+
+/** The runs a daemon launched whose slots it held as it last stored them: hosts outlive their daemon. */
+export function loadActiveRuns(dir: string): ActiveRun[] {
+	try {
+		const parsed = JSON.parse(readFileSync(activeRunsPath(dir), "utf-8")) as ActiveRun[];
+		return Array.isArray(parsed) ? parsed.filter((run) => typeof run?.run === "string" && run.pid > 0) : [];
+	} catch {
+		return [];
+	}
+}
+
+export function saveActiveRuns(dir: string, runs: ActiveRun[]): void {
+	ensureServerDir();
+	writeJson(activeRunsPath(dir), runs);
 }
