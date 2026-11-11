@@ -1,3 +1,4 @@
+import { validateToolArguments } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it } from "vitest";
 import { type BackgroundExec, backgroundBashJobs, shellTaskStop } from "../ext/background-bash/background-bash.ts";
 import backgroundBash from "../ext/background-bash/index.ts";
@@ -93,6 +94,26 @@ describe("the task_stop tool (registered by background-bash)", () => {
 		await stop({ task_id: "", shell_id: b.id });
 		expect(backgroundBashJobs.get(a.id)?.killed).toBe(true);
 		expect(backgroundBashJobs.get(b.id)?.killed).toBe(true);
+	});
+
+	it("declares task_id alone, and still accepts a call that sends the deprecated shell_id", async () => {
+		let tool: any;
+		const noop = () => {};
+		backgroundBash({
+			on: noop,
+			registerEntryRenderer: noop,
+			registerCommand: noop,
+			registerMessageRenderer: noop,
+			registerTool: (t: any) => {
+				if (t.name === "task_stop") tool = t;
+			},
+		} as any);
+		expect(Object.keys(tool.parameters.properties)).toEqual(["task_id"]);
+		const job = backgroundBashJobs.start({ command: "a", cwd: "/", owner: "main", exec: forever });
+		const call = { type: "toolCall", id: "c1", name: "task_stop", arguments: { shell_id: job.id } } as const;
+		const args = validateToolArguments(tool, call);
+		await tool.execute("c1", args, undefined, undefined, { sessionManager: { getSessionId: () => "main" } });
+		expect(backgroundBashJobs.get(job.id)?.killed).toBe(true);
 	});
 
 	it("rejects a missing id and one that names no shell", async () => {

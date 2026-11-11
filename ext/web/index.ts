@@ -168,7 +168,7 @@ export default function web(pi: ExtensionAPI) {
 		parameters: Type.Object(
 			{
 				urls: Type.Array(Type.String(), { minItems: 1, maxItems: 10, description: "The pages to read." }),
-				query: Type.Optional(Type.String({ description: "Return only the passages relevant to this." })),
+				query: Type.Optional(Type.String()),
 			},
 			{ additionalProperties: false },
 		),

@@ -26,12 +26,7 @@ const PARAMETERS = Type.Object(
 		action: Type.Union([Type.Literal("save"), Type.Literal("read"), Type.Literal("delete")]),
 		name: Type.String({ description: "Kebab-case slug naming the Memory; saving an existing name replaces it." }),
 		description: Type.Optional(Type.String({ description: "save: one line for the Memory index." })),
-		type: Type.Optional(
-			Type.Union(
-				MEMORY_TYPES.map((type) => Type.Literal(type)),
-				{ description: `save: one of ${MEMORY_TYPES.join(", ")}.` },
-			),
-		),
+		type: Type.Optional(Type.Union(MEMORY_TYPES.map((type) => Type.Literal(type)))),
 		body: Type.Optional(Type.String({ description: "save: the fact." })),
 	},
 	{ additionalProperties: false },
@@ -100,8 +95,7 @@ export function createMemoryExtension(options: { agentDir?: string } = {}): Exte
 			name: "memory",
 			label: "Memory",
 			exposure: "model-only",
-			description:
-				"Save, read or delete a Memory of this Project. save needs description, type and body, and replaces a Memory of the same name.",
+			description: "Save, read or delete a Memory of this Project. save needs description, type and body.",
 			parameters: PARAMETERS,
 			execute: async (_toolCallId, params: Static<typeof PARAMETERS>) => {
 				if (!dir)
