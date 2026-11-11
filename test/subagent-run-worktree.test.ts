@@ -7,10 +7,12 @@ import {
 	captureRunBaseline,
 	cleanWorktree,
 	describeWorkspace,
+	discardWorktree,
 	type IsolatedWorkspace,
 	materializeWorktree,
 	releaseUnchangedWorktree,
 	restoreWorktree,
+	worktreeInPlace,
 	worktreePath,
 } from "../ext/subagents/run-worktree.ts";
 
@@ -119,6 +121,30 @@ describe("a run's worktree once the run ended", () => {
 
 	const worktrees = () => git(repo, "worktree", "list", "--porcelain").match(/^worktree /gm)?.length ?? 0;
 
+	it("is kept holding a file its baseline left out, which never reaches the repository", async () => {
+		const { workspace, owner } = made;
+		writeFileSync(join(workspace.root, "out.log"), "only-in-the-worktree\n");
+		const blob = git(repo, "hash-object", join(workspace.root, "out.log")).trim();
+		await releaseUnchangedWorktree(workspace, owner);
+		expect(existsSync(join(workspace.root, "out.log"))).toBe(true);
+		const stored = spawnSync("git", ["cat-file", "-e", blob], { cwd: repo });
+		expect(stored.status).not.toBe(0);
+	});
+
+	it("is not cleaned up once its run started again, and a run that never started says so", async () => {
+		const { workspace, owner } = made;
+		await expect(cleanWorktree(workspace, owner, () => "it runs again")).rejects.toThrow("it runs again");
+		expect(existsSync(workspace.root)).toBe(true);
+		expect(worktreeInPlace(workspace, owner.runDir)).toBe(true);
+
+		discardWorktree(workspace, owner);
+		expect(worktrees()).toBe(1);
+		expect(git(repo, "for-each-ref", "refs/bluclawd")).toBe("");
+		expect((await describeWorkspace(workspace, owner.runDir))[0]).toBe(
+			`Workspace: ${workspace.root}, removed: the run never started in it.`,
+		);
+	});
+
 	it("is kept when what changed is its index or HEAD, not its files", async () => {
 		const { workspace, owner } = made;
 		git(workspace.root, "add", "a.txt");
@@ -160,7 +186,7 @@ describe("a run's worktree once the run ended", () => {
 		);
 
 		// Cleaning up what is already gone still lets go of Git's entry for it, and of its baseline.
-		expect(await cleanWorktree(workspace, owner)).toEqual({ restorable: false, changes: [] });
+		expect(await cleanWorktree(workspace, owner, () => undefined)).toEqual({ restorable: false, changes: [] });
 		expect(worktrees()).toBe(1);
 		expect(git(repo, "for-each-ref", "refs/bluclawd")).toBe("");
 		expect(await restoreWorktree(workspace, owner)).toMatch(/removed at the user's request/);

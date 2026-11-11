@@ -49,6 +49,7 @@ import {
 	dropRunBaseline,
 	type IsolatedWorkspace,
 	restoreWorktree,
+	worktreeInPlace,
 	worktreePath,
 	worktreeUnavailable,
 } from "./run-worktree.ts";
@@ -574,6 +575,9 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 			projectTrusted: admitted.projectTrusted && workspace.workspace.trusted(cwd),
 			admitted: model,
 		};
+		if (admitted.workspace && !worktreeInPlace(admitted.workspace, runDir)) {
+			return cannot("its worktree was cleaned up meanwhile.");
+		}
 		const generation = current.generation + 1;
 		try {
 			if (!claimRunGeneration(runDir, generation, definition)) {

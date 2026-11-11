@@ -237,7 +237,7 @@ function assertOwned(root: string, owner: WorktreeOwner): void {
 /** Lets go of the worktree of a run that never started, and of its baseline: nothing of it is left to resume. */
 export function discardWorktree(workspace: IsolatedWorkspace, owner: WorktreeOwner): void {
 	try {
-		removeWorktree(workspace, owner);
+		removeRecorded(workspace, owner, { restorable: false, changes: [], neverStarted: true });
 	} catch {
 		// Kept, like any worktree of a run: only its user removes it then.
 		return;
@@ -287,11 +287,15 @@ async function worktreeUnchanged({ root, baseline }: IsolatedWorkspace): Promise
 		const env = (index: string) => gitEnv({ GIT_DIR: baseline.gitDir, GIT_WORK_TREE: root, GIT_INDEX_FILE: index });
 		const index = await withScratchIndex(join(entry, "index"), (scratch) => git(root, ["write-tree"], env(scratch)));
 		if (index.trim() !== baseline.index) return false;
-		const files = await withScratchIndex(undefined, async (scratch) => {
-			await git(root, ["add", "-A", "--force"], env(scratch));
-			return git(root, ["write-tree"], env(scratch));
+		// Compared without storing anything: a file the baseline left out, ignored or not, never reaches the repository.
+		const filesUnchanged = await withScratchIndex(undefined, async (scratch) => {
+			await git(root, ["read-tree", baseline.tree], env(scratch));
+			if ((await git(root, ["ls-files", "--others", "--directory", "-z"], env(scratch))) !== "") return false;
+			await git(root, ["update-index", "-q", "--refresh"], env(scratch)).catch(() => undefined);
+			await git(root, ["diff-files", "--quiet"], env(scratch));
+			return true;
 		});
-		return files.trim() === baseline.tree && baselineKept(baseline);
+		return filesUnchanged && baselineKept(baseline);
 	} catch {
 		return false;
 	}
@@ -315,6 +319,8 @@ export interface WorktreeRemoval {
 	restorable: boolean;
 	/** What it had changed since its baseline, as Git saw it. */
 	changes: string[];
+	/** Set when its run never started in it. */
+	neverStarted?: true;
 }
 
 /** The changes of a worktree Git lists none of: files it ignores, its index or HEAD, or a worktree gone already. */
@@ -328,6 +334,11 @@ function readWorktreeRemoval(runDir: string): WorktreeRemoval | undefined {
 	} catch {
 		return undefined;
 	}
+}
+
+/** Whether the run's own worktree is there, no removal of it recorded. */
+export function worktreeInPlace(workspace: IsolatedWorkspace, runDir: string): boolean {
+	return existsSync(workspace.root) && !readWorktreeRemoval(runDir);
 }
 
 /** Removes the worktree, its removal recorded first. */
@@ -352,14 +363,22 @@ export async function releaseUnchangedWorktree(workspace: IsolatedWorkspace, own
 
 /**
  * Removes a run's worktree at its user's request. One that held changes cannot be made again, so its baseline goes
- * with it; one that held none can, from its baseline, which is kept. The run's sessions and Reports stay.
+ * with it; one that held none can, from its baseline, which is kept. The run's sessions and Reports stay. `busy` says
+ * why the run may not lose its worktree now, if it may not.
  */
-export async function cleanWorktree(workspace: IsolatedWorkspace, owner: WorktreeOwner): Promise<WorktreeRemoval> {
+export async function cleanWorktree(
+	workspace: IsolatedWorkspace,
+	owner: WorktreeOwner,
+	busy: () => string | undefined,
+): Promise<WorktreeRemoval> {
 	const recorded = readWorktreeRemoval(owner.runDir);
 	const removal = recorded ?? {
 		restorable: await worktreeUnchanged(workspace),
 		changes: await worktreeChanges(workspace).catch(() => []),
 	};
+	// Asked again with nothing awaited before the removal: a Resume may have started meanwhile.
+	const why = busy();
+	if (why) throw new Error(why);
 	removeRecorded(workspace, owner, removal);
 	if (!removal.restorable) dropRunBaseline(workspace.baseline);
 	return removal;
@@ -404,7 +423,10 @@ export async function describeWorkspace(workspace: IsolatedWorkspace, runDir: st
 	const removal = readWorktreeRemoval(runDir);
 	let where: string;
 	let changes: string;
-	if (removal) {
+	if (removal?.neverStarted) {
+		where = "removed: the run never started in it.";
+		changes = "none";
+	} else if (removal) {
 		where = removal.restorable
 			? "removed: it held no change since its baseline, from which a Resume makes it again."
 			: "removed at the user's request with the changes below, which are lost: the run cannot be resumed.";

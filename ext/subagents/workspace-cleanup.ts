@@ -36,20 +36,22 @@ export function registerWorkspaceCleanup(
 			const label = formatRunLabel(record);
 			const agentDir = deps.agentDir();
 			const runDir = subagentRunDir(agentDir, record.parentSessionId, record.runId);
-			const host = readRpcHostState(runDir);
-			if (entry.state !== "finished" || (host && host.exit === undefined && processAlive(host.hostPid))) {
-				return tell(
-					`${label} is still ${record.status}: stop it, or let it finish, before cleaning up its workspace.`,
-					"warning",
-				);
-			}
+			/** Why the run may not lose its worktree now: it, or a Resume of it, still runs. */
+			const busy = () => {
+				const now = deps.directory.find(scope, record.runId);
+				const host = readRpcHostState(runDir);
+				if (now?.state === "finished" && !(host && host.exit === undefined && processAlive(host.hostPid))) return;
+				return `${label} is still ${now?.record.status ?? record.status}: stop it, or let it finish, before cleaning up its workspace.`;
+			};
+			const running = busy();
+			if (running) return tell(running, "warning");
 			const workspace = readRunDefinition(runDefinitionPath(runDir, 0))?.workspace;
 			if (!workspace) {
 				return tell(`${label} has no worktree of its own: it worked in ${record.cwd}, which stays.`, "warning");
 			}
 			const gone = !existsSync(workspace.root);
 			try {
-				const removal = await cleanWorktree(workspace, { agentDir, runId: record.runId, runDir });
+				const removal = await cleanWorktree(workspace, { agentDir, runId: record.runId, runDir }, busy);
 				if (gone) {
 					return tell(
 						`${workspace.root} was removed already; ${label} ${removal.restorable ? "can still be resumed, its worktree made again" : "can no longer be resumed"}.`,
