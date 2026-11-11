@@ -337,7 +337,7 @@ const backgroundBash: InlineExtension = {
 				label: "ScheduleWakeup",
 				description: [
 					"- Schedules a turn of your own: once it is due, you get a notice with the prompt you give here and start a turn",
-					"- Give exactly one of delay or at (its next occurrence)",
+					"- Give exactly one of delay (seconds from now) or at (a local 24-hour clock time, HH:MM; its next occurrence)",
 					"- It must fall due between 1 minute and 24 hours from now; one due while you are working waits for your next turn",
 					"- Returns the wake-up's task id; cancel it with task_stop",
 					"- One-shot: to check again later, schedule the next one when you wake",

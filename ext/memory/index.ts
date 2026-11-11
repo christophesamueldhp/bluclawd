@@ -95,7 +95,8 @@ export function createMemoryExtension(options: { agentDir?: string } = {}): Exte
 			name: "memory",
 			label: "Memory",
 			exposure: "model-only",
-			description: "Save, read or delete a Memory of this Project. save needs description, type and body.",
+			description:
+				"Save, read or delete a Memory of this Project. save needs description, type and body, and replaces a Memory of the same name.",
 			parameters: PARAMETERS,
 			execute: async (_toolCallId, params: Static<typeof PARAMETERS>) => {
 				if (!dir)
