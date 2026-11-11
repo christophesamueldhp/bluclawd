@@ -16,6 +16,7 @@ import { fileURLToPath } from "node:url";
 import { parseSessionEntries, type SessionEntry, SettingsManager } from "@earendil-works/pi-coding-agent";
 import type { SessionMessage, SessionUsage } from "../../daemon/ipc/protocol.ts";
 import { OrchestratorClient } from "../../daemon/orchestrator-client.ts";
+import { processAlive, processGroupAlive } from "../../daemon/processes.ts";
 import { runMarker } from "../../daemon/run-members.ts";
 import type { RunHostLaunch } from "../../daemon/run-queue.ts";
 import * as forkSettings from "../_shared/settings.ts";
@@ -32,8 +33,6 @@ import { type RpcDenyRules, RUN_DEFINITION_FLAG } from "./rpc-child.ts";
 import {
 	generationHost,
 	prepareRpcHost,
-	processAlive,
-	processGroupAlive,
 	type RpcHostSpec,
 	readRpcHostState,
 	runGroupAlive,

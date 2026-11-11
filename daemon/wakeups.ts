@@ -11,6 +11,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node
 import { join } from "node:path";
 import type { PaneLaunch } from "./ipc/protocol.ts";
 import { getServerDir } from "./paths.ts";
+import { processAlive as pidAlive } from "./processes.ts";
 import { loadWakeups, saveWakeups } from "./storage.ts";
 
 /** Session-log entries: a wake-up scheduled, and its end. */
@@ -107,12 +108,7 @@ export function processStart(pid: number): number | undefined {
 
 /** Whether that process still runs. `ps` gives seconds, so a start within one of it is the same. */
 export function processAlive({ pid, startedAt }: ProcessId): boolean {
-	try {
-		process.kill(pid, 0);
-	} catch (error) {
-		// EPERM: there is one, of another user, which is never a pi of this one's.
-		if ((error as NodeJS.ErrnoException).code === "ESRCH") return false;
-	}
+	if (!pidAlive(pid)) return false;
 	const at = processStart(pid);
 	return at !== undefined && Math.abs(at - startedAt) < 1500;
 }

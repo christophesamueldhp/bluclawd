@@ -25,6 +25,7 @@ import {
 import { dirname, join } from "node:path";
 import { createLocalBashOperations, type ExtensionAPI, SettingsManager } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import { processAlive, processGroupAlive } from "../../daemon/processes.ts";
 import { runMarker } from "../../daemon/run-members.ts";
 import { evaluateToolCallDeny } from "../permissions/policy.ts";
 import { prepareRunContainment, runProcesses } from "../sandbox/run-containment.ts";
@@ -35,7 +36,7 @@ import type { RunDirectory } from "./directory.ts";
 import type { ParentScope } from "./parent-scope.ts";
 import { sanitizeReportText, truncateUtf8Safe } from "./results.ts";
 import type { RpcDenyRules } from "./rpc-child.ts";
-import { processAlive, processGroupAlive, readRpcHostState } from "./rpc-host.ts";
+import { readRpcHostState } from "./rpc-host.ts";
 import { readRunDefinition, rpcDenyRules, runDefinitionPath } from "./rpc-runs.ts";
 import { within } from "./run-workspace.ts";
 import {

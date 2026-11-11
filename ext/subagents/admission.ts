@@ -9,6 +9,7 @@ import {
 	type ToolLoadout,
 } from "@earendil-works/pi-coding-agent";
 import { type Static, Type } from "typebox";
+import { processAlive } from "../../daemon/processes.ts";
 import * as forkSettings from "../_shared/settings.ts";
 import { evaluateSubagentDelegationDeny } from "../permissions/policy.ts";
 import { prepareRunContainment } from "../sandbox/run-containment.ts";
@@ -26,7 +27,7 @@ import type { RunDirectory } from "./directory.ts";
 import { PARENT_MESSAGE_ADDRESS } from "./messages.ts";
 import { resolveChildModelAndRuntime } from "./models.ts";
 import type { ParentScopeChecks } from "./parent-scope.ts";
-import { processAlive, readRpcHostSpec, readRpcHostState } from "./rpc-host.ts";
+import { readRpcHostSpec, readRpcHostState } from "./rpc-host.ts";
 import {
 	claimRunGeneration,
 	narrowRunDefinition,

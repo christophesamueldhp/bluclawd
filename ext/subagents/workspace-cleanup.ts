@@ -5,10 +5,11 @@
  */
 import { existsSync } from "node:fs";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { processAlive } from "../../daemon/processes.ts";
 import { formatRunLabel } from "./admission.ts";
 import type { RunDirectory } from "./directory.ts";
 import type { ParentScope } from "./parent-scope.ts";
-import { processAlive, readRpcHostState } from "./rpc-host.ts";
+import { readRpcHostState } from "./rpc-host.ts";
 import { readRunDefinition, runDefinitionPath } from "./rpc-runs.ts";
 import { within } from "./run-workspace.ts";
 import { cleanWorktree, listChanges, UNLISTED } from "./run-worktree.ts";

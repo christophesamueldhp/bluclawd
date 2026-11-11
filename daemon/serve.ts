@@ -15,6 +15,7 @@ import {
 import { startIpcServer } from "./ipc/server.ts";
 import { resumePane } from "./pane-start.ts";
 import { daemonAgentDir, ensureServerDir } from "./paths.ts";
+import { processGroupAlive } from "./processes.ts";
 import { RemoteControl, TMUX_TIMEOUT_MS } from "./remote/control.ts";
 import { pistatusline } from "./remote/pistatusline.ts";
 import { launchUsable, startSession } from "./remote/spawn.ts";
@@ -88,12 +89,7 @@ export async function serve(): Promise<void> {
 				return host.pid;
 			},
 			running: (pid, marker) => {
-				try {
-					process.kill(-pid, 0);
-					return true;
-				} catch (error) {
-					if ((error as NodeJS.ErrnoException).code !== "ESRCH") return true;
-				}
+				if (processGroupAlive(pid)) return true;
 				// Its host and pi are gone, maybe killed: whatever its commands left running is ended, and counted until it is.
 				if (!marker) return false;
 				const sweep = sweeps.get(pid);

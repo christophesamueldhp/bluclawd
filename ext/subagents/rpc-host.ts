@@ -13,6 +13,7 @@ import { appendFileSync, mkdirSync, openSync, readFileSync, realpathSync, writeF
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { piPackageRoot } from "../../daemon/orchestrator-client.ts";
+import { processAlive, processGroupAlive } from "../../daemon/processes.ts";
 import type { RunHostLaunch } from "../../daemon/run-queue.ts";
 import { SUBAGENT_MESSAGE_TOOL } from "./messages.ts";
 import {
@@ -168,28 +169,6 @@ export function generationHost(runDir: string, generation: number): number | und
 export function runGroupAlive(pid: number, runDir: string): boolean {
 	if (!processAlive(pid)) return processGroupAlive(pid);
 	return spawnSync("ps", ["-o", "command=", "-p", String(pid)], { encoding: "utf8" }).stdout.includes(runDir);
-}
-
-export function processAlive(pid: number): boolean {
-	try {
-		process.kill(pid, 0);
-		return true;
-	} catch {
-		return false;
-	}
-}
-
-/**
- * Whether any process of the group `pid` leads still runs. The daemon starts a run's host leading a group of its own,
- * which its pi and what the pi starts join.
- */
-export function processGroupAlive(pid: number): boolean {
-	try {
-		process.kill(-pid, 0);
-		return true;
-	} catch (error) {
-		return (error as NodeJS.ErrnoException).code !== "ESRCH";
-	}
 }
 
 /** Asks the host to stop the run: its pi ends its work as on a SIGTERM, and the host stores how it ended. */

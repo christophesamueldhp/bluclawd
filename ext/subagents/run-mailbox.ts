@@ -9,6 +9,7 @@
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { processAlive } from "../../daemon/processes.ts";
 import { writeAtomicPrivateFile } from "./storage.ts";
 
 export interface RunInboxMessage {
@@ -98,15 +99,6 @@ function readMessages(dir: string): RunInboxMessage[] {
 export const readRunInbox = (runDir: string, generation: number): RunInboxMessage[] =>
 	readMessages(inboxPath(runDir, generation));
 
-const alive = (pid: number) => {
-	try {
-		process.kill(pid, 0);
-		return true;
-	} catch (error) {
-		return (error as NodeJS.ErrnoException).code === "EPERM";
-	}
-};
-
 const pause = new Int32Array(new SharedArrayBuffer(4));
 
 /** Waits until every post another live process had in flight landed or was refused. */
@@ -121,7 +113,7 @@ function settlePosts(runDir: string): void {
 		const pid = Number(/^\.(\d+)-.*\.inbox$/.exec(file)?.[1]);
 		// This process posts synchronously, so none of its own is in flight; a dead poster's draft never lands.
 		if (!pid || pid === process.pid) continue;
-		while (existsSync(join(runDir, file)) && alive(pid)) Atomics.wait(pause, 0, 0, 1);
+		while (existsSync(join(runDir, file)) && processAlive(pid)) Atomics.wait(pause, 0, 0, 1);
 	}
 }
 
