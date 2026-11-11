@@ -234,7 +234,7 @@ Each ticket block of the implementation notes was checked item by item. An item 
 | R | limitation | source |
 |---|---|---|
 | R1 | **Platforms**: a run's shell is contained, and its processes confirmed ended, only on macOS. Linux and WSL are unsupported for shell: refused, not passed. Nothing ran on Linux. macOS containment relies on private SPI (`sandbox_check`, `proc_pidinfo` flavor 17) and a Command Line Tools helper. `launchctl submit`, `at` and `crontab` escapes are unprobed. No process outlives a command, so no dev server spans commands. | #302 |
-| R2 | **No live real-provider check.** No paid call was made. A run's pi on the user's real provider is unverified (auth and `models.json` reach it through the agent dir and env, by code reading only). The user can run the command under [Commands for the user](#commands-for-the-user). | #311, #310 |
+| R2 | **Live real-provider check: partial.** One live `investigate` trial on `openai-codex/gpt-6.1-sol` (delegation-efficiency.md, "First live run"): both arms correct, but the model started no Run, so a Run's pi on a real provider is still unverified. Next: a live `parallel` or `review` trial. | #311, #310 |
 | R3 | **Provider-extensions stopgap**: a provider an extension registers is refused at Admission. `BLUCLAWD_RPC_PROVIDER_EXTENSIONS` loads extra `-e` extensions into each run, and 20 test files plus `test/helpers/fake-run-hosts.ts` depend on it for faux. It is not a supported configuration. | #292, ADR-0010 |
 | R4 | A key given only at runtime (`--api-key`) passes Admission, but the run's pi lacks it and fails late. Untested. Virtual routers are refused; there is no per-message model check. | #294 |
 | R5 | **ADR-0001 conflict: resolved by ADR-0011.** ADR-0001 now scopes the VM-only claim to arbitrary commands; run shells confirm termination by sandbox identity (ADR-0011), and the orchestrator shell keeps the best-effort reaper. | #302 |
@@ -295,7 +295,7 @@ The parent contracts are **met on macOS with the faux provider, with exceptions*
 
 Release still depends on:
 
-- a live real-provider run (R2);
+- a live trial in which a Run actually starts on a real provider (R2);
 - accepting the macOS-only shell (R1) and the provider-extensions stopgap (R3).
 
 This gate does not close #290, push, or authorize deployment.

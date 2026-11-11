@@ -104,3 +104,15 @@ The review scenario's bluclawd wall time includes the test's own wait while it n
 - **On a scripted model, delegating cost more and took longer**: in every scenario here it used more tokens and more time than doing the work directly. The scripts give the children no less to do than the parent, so the context a Run keeps out of the parent never pays off here.
 - **Fewer parent requests**: in the review scenario the parent made 3 requests instead of 5, because the chain did the work.
 - **What only live runs can show**: these figures support no claim of a cost or speed improvement, and no threshold was set. Whether context isolation, parallel work and independent review pay for their overhead with a real model depends on the model and the task. Only the live comparison above can show that.
+
+## First live run (2026-11-11)
+
+One trial of `investigate`, stock vs bluclawd, on `openai-codex/gpt-6.1-sol` with thinking `low`, revision 75b0136, pi 1.5.2. The command was the one above with `--trials 1 --arms stock,bluclawd --scenarios investigate --max-tokens 200000 --max-dollars 2`.
+
+| arm | correct | wall ms | tokens | cost $ | parent requests | Runs started |
+|---|---|---|---|---|---|---|
+| stock | yes | 10997 | 10740 | 0.0081 | 4 | — |
+| bluclawd | yes | 10797 | 21517 | 0.0143 | 4 | 0 |
+
+- **The model did not delegate**, so no Run's pi ran on the real provider. The bluclawd orchestrator worked on the real provider; the extra tokens are the tools' cost even when unused (see above).
+- **This is one trial of one scenario.** It shows no delegation quality and supports no cost or speed claim. A `parallel` or `review` trial is needed to see a Run on a real provider.
