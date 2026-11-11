@@ -23,6 +23,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
 	type AdmissionContext,
 	type AdmissionResult,
+	type ChainPlacement,
 	createRunAdmission,
 	type LaunchParams,
 	MAX_TASK_INPUT_BYTES,
@@ -147,9 +148,14 @@ async function setup(
 	};
 	const admission = createRunAdmission(deps);
 	let calls = 0;
-	const launch = (params: LaunchParams, overrides: Partial<AdmissionContext> = {}, signal?: AbortSignal) =>
+	const launch = (
+		params: LaunchParams,
+		overrides: Partial<AdmissionContext> = {},
+		signal?: AbortSignal,
+		chain?: ChainPlacement,
+	) =>
 		admission.launch(
-			{ toolCallId: `call_${++calls}`, parentTurnId: "turn_0", params, signal },
+			{ toolCallId: `call_${++calls}`, parentTurnId: "turn_0", params, signal, chain },
 			{ ...ctx, ...overrides },
 		);
 	const resume = (
@@ -544,6 +550,27 @@ describe("Run admission of a run's own directory, and of its Resume", () => {
 		);
 		const run = handleOf(await launch({ agent: "explorer", cwd: "link", task: "x" }, trusted)).record;
 		expect(run.cwd).toBe(realpathSync(other));
+	});
+
+	it("refuses a chain step whose directory leads out of its chain's worktree through a link a step before made", async () => {
+		const { launch, cwd } = await setup();
+		const source = realpathSync(cwd);
+		mkdirSync(join(source, "sub"));
+		// The worktree, where an earlier step that edits replaced the directory with a link to elsewhere.
+		const root = realpathSync(makeTempDir("worktree"));
+		const outside = realpathSync(makeTempDir("outside"));
+		symlinkSync(outside, join(root, "sub"));
+		const baseline = { source, gitDir: join(source, ".git"), head: "", index: "", tree: "", commit: "", ref: "" };
+		const step = (dir: string) =>
+			launch({ agent: "explorer", cwd: dir, task: "Look." }, {}, undefined, {
+				id: "chain_x",
+				workspace: { root, baseline },
+			});
+		expect(errorOf(await step("sub"))).toMatch(/is not in the worktree of its chain/);
+		// A directory of the worktree itself is the step's.
+		mkdirSync(join(source, "real"));
+		mkdirSync(join(root, "real"));
+		expect(handleOf(await step("real")).record.cwd).toBe(join(root, "real"));
 	});
 
 	it("trusts a directory under the orchestrator's only by the user's own saved decision, not by the session's", async () => {

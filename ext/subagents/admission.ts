@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
+import { readFileSync, realpathSync } from "node:fs";
 import { basename, join, relative } from "node:path";
 import {
 	type ExtensionContext,
@@ -868,12 +868,21 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 			let runCwd = cwd;
 			if (typeof shared === "object") {
 				isolated = shared;
-				runCwd = join(shared.root, relative(shared.baseline.source, cwd));
-				if (!existsSync(runCwd)) {
+				// As it resolves now: a step before may have made a link of it, which leads out of the worktree.
+				let step: string;
+				try {
+					step = realpathSync(join(shared.root, relative(shared.baseline.source, cwd)));
+				} catch {
 					return reject(
 						`Subagent cwd ${cwd} is not in the worktree of its chain, ${shared.root}: the worktree was removed, or the directory is ignored or held no file when the chain began.`,
 					);
 				}
+				if (!within(realpathSync(shared.root), step)) {
+					return reject(
+						`Subagent cwd ${cwd} is not in the worktree of its chain, ${shared.root}: there, it leads to ${step}. A step works only in its chain's worktree.`,
+					);
+				}
+				runCwd = step;
 			} else if (writes || shared === "record") {
 				const captured = captureRunBaseline(cwd, runId);
 				if (!captured.ok) return cannotIsolate(captured.error);
