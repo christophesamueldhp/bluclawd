@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -97,6 +98,41 @@ describe.skipIf(!hasTmux)("an RPC run's Report", () => {
 		expect(toolResults(main[2]).at(-1)).toContain("CLAIM ENDS.");
 		expect(JSON.stringify(main)).not.toContain("ran dry");
 	});
+
+	// Commands run only where a backend can confirm their processes ended.
+	it.skipIf(process.platform !== "darwin")(
+		"lists the checks its transcript shows it ran, with how each ended, whatever its text claims",
+		async () => {
+			const real = await startOrchestrator();
+			pi = real;
+			writeFileSync(join(real.cwd, "a.txt"), "one\n");
+			for (const args of [
+				["init", "-q"],
+				["add", "."],
+				["-c", "user.name=F", "-c", "user.email=f@example.com", "commit", "-q", "-m", "start"],
+			]) {
+				expect(spawnSync("git", args, { cwd: real.cwd }).status).toBe(0);
+			}
+			real.script("main", [
+				{ tool: "subagent", args: { agent: "general-purpose", name: "gp", task: "Check it." } },
+				{ text: "done" },
+			]);
+			real.script("gp", [
+				{ tool: "bash", args: { command: "grep -q one a.txt" } },
+				{ tool: "bash", args: { command: "test -f missing.txt" } },
+				{ text: "All tests pass." },
+			]);
+			real.start(["--", "delegate"]);
+			await real.waitForRequests("main", 1);
+			await started(real, "gp");
+			const [report] = toolResults((await real.waitForRequests("main", 2))[1]);
+
+			expect(report).toContain("All tests pass.");
+			expect(report).toMatch(/^Checks: the commands its transcript shows it ran, 2:$/m);
+			expect(report).toMatch(/^- `grep -q one a\.txt`: exit 0$/m);
+			expect(report).toMatch(/^- `test -f missing\.txt`: exit 1$/m);
+		},
+	);
 
 	it("keeps every batch member's status reachable while it works, and a cancelled call gives the Reports stored", async () => {
 		const real = await startOrchestrator();

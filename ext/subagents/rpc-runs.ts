@@ -39,6 +39,7 @@ import {
 	type RunApprovalRequest,
 	runApprovalWithdrawn,
 } from "./run-approvals.ts";
+import { checksLines, commandsRun } from "./run-evidence.ts";
 import { openRunInbox, type RunOutboxMessage, readRunOutbox, sealedRunInbox, sealRunInbox } from "./run-mailbox.ts";
 import { rpcRunMessageText, runTaskText } from "./run-messages.ts";
 import { runShellTmp } from "./run-shell.ts";
@@ -492,6 +493,8 @@ export async function executeRpcRun(
 			return { status: "failed", summaryText: "", errorMessage: `It did not start: ${reason}${untakenNote()}` };
 		}
 	}
+	// Its session's entries from here on are this generation's: an earlier one ended before it was claimed.
+	const queuedAt = Date.now();
 	const turn = await startInTurn(
 		`${record.runId}/${record.generation}`,
 		record.parentSessionId,
@@ -584,8 +587,9 @@ export async function executeRpcRun(
 	// Whatever it sent before it ended reaches its recipients before its Report.
 	relay();
 	const state = ownState();
-	// Counted however the generation ended: what its session holds was spent, Report or not.
-	const usage = state?.sessionFile ? sessionFileUsage(state.sessionFile) : undefined;
+	const entries = state?.sessionFile ? sessionFileEntries(state.sessionFile) : undefined;
+	// Counted however the generation ended: what pi counted in its session was spent, Report or not, each entry once.
+	const usage = entries && sessionUsage(entries);
 	if (usage) {
 		controller.updateUsage(usage);
 		deps.usage(state?.sessionId ?? record.runId, usage);
@@ -630,7 +634,7 @@ export async function executeRpcRun(
 		"---",
 		`Outcome: ${outcome.status}${outcome.status === "completed" ? ": its pi settled its work without an error. What the run says above is its own claim; the runtime verified none of it." : `: ${cutReason(outcome.error)}.`}`,
 		`Process: exited with ${state.exit.signal ? `signal ${state.exit.signal}` : `code ${state.exit.code}`}, after its Report was stored.`,
-		checksLine(launch.tools),
+		...checksLines(launch.tools, commandsRun(entries ?? [], queuedAt)),
 		...(workspace ? workspaceLines : ["Changes: none: it had no tool that changes files."]),
 		`Transcript: ${state.sessionFile ?? "none"}`,
 		`Report: ${fullReport}`,
@@ -672,13 +676,6 @@ function cutReason(error: string): string {
 	return truncated ? `${text} […]` : text;
 }
 
-/** Which checks the run ran, as its tools allow: never what its text claims of them. */
-function checksLine(tools: readonly string[]): string {
-	return tools.includes("bash")
-		? "Checks: not tallied by the runtime: the commands it ran, and how each ended, are in its transcript. What its text says of them is its own claim."
-		: "Checks: none ran: it had no tool that runs commands. Any check its text claims is its own claim.";
-}
-
 /** Resolves true once `done` holds, checked every {@link HOST_CHECK_MS}; false once `signal` aborts first. */
 function until(done: () => boolean, signal: AbortSignal): Promise<boolean> {
 	return new Promise((resolve) => {
@@ -715,11 +712,11 @@ async function endHostGroup(hostPid: number, contained: RunContainment | undefin
 	return contained ? endRunProcesses(contained) : true;
 }
 
-/** The usage of the run's session, from its file: what pi counted, once per entry. */
-function sessionFileUsage(sessionFile: string): SessionUsage | undefined {
+/** The entries of the run's session, from its file; none before its pi wrote one. */
+function sessionFileEntries(sessionFile: string): SessionEntry[] | undefined {
 	try {
 		const entries = parseSessionEntries(readFileSync(sessionFile, "utf8"));
-		return sessionUsage(entries.filter((entry): entry is SessionEntry => entry.type !== "session"));
+		return entries.filter((entry): entry is SessionEntry => entry.type !== "session");
 	} catch {
 		return undefined;
 	}
