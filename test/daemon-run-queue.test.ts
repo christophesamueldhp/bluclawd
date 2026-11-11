@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -17,7 +17,7 @@ afterEach(() => {
 const host = (run: string): RunHostLaunch => ({ runDir: `/runs/${run}`, env: { PATH: "/bin", RUN: run } });
 
 /** A queue whose launched hosts run until `end(run)`; what it spawned is listed. */
-function fixture(capacity = () => 4) {
+function fixture(capacity: () => number | undefined = () => 4) {
 	let nextPid = 100;
 	const live = new Map<string, number>();
 	const spawned: RunHostLaunch[] = [];
@@ -127,6 +127,14 @@ describe("the daemon's queue of runs", () => {
 		expect([alpha[2].state.granted, alpha[3].state.granted]).toEqual([true, undefined]);
 	});
 
+	it("keeps the bound it last read while the user's settings cannot be read (#321)", async () => {
+		const reads: (number | undefined)[] = [2, 2, undefined, undefined];
+		const f = fixture(() => reads.shift());
+		const [a1, a2, a3] = ["a1", "a2", "a3"].map((run) => f.claim(run, "alpha"));
+		await settle();
+		expect([a1, a2, a3].map(({ state }) => state.granted)).toEqual([true, true, undefined]);
+	});
+
 	it("grants no run whose orchestrator stopped claiming it", async () => {
 		const f = fixture(() => 1);
 		f.claim("a1", "alpha");
@@ -214,8 +222,21 @@ describe("maxActiveRuns: the user's bound on active runs", () => {
 			expect(bound({ subagents: { maxActive: 2 } })).toBe(2);
 			for (const maxActive of [0, -1, 2.5, "6"]) expect(bound({ subagents: { maxActive } })).toBe(4);
 			expect(bound({})).toBe(4);
-			writeFileSync(join(agentDir, "settings.json"), "{ not json");
+			rmSync(join(agentDir, "settings.json"));
 			expect(maxActiveRuns(agentDir)).toBe(4);
+		} finally {
+			rmSync(agentDir, { recursive: true, force: true });
+		}
+	});
+
+	it("is unknown while the settings cannot be read, as when another writer has written half of them (#321)", () => {
+		const agentDir = mkdtempSync(join(tmpdir(), "bluclawd-max-active-"));
+		try {
+			writeFileSync(join(agentDir, "settings.json"), '{"subagents":{"maxAct');
+			expect(maxActiveRuns(agentDir)).toBeUndefined();
+			rmSync(join(agentDir, "settings.json"));
+			mkdirSync(join(agentDir, "settings.json"));
+			expect(maxActiveRuns(agentDir)).toBeUndefined();
 		} finally {
 			rmSync(agentDir, { recursive: true, force: true });
 		}
