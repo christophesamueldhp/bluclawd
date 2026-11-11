@@ -419,4 +419,92 @@ describe.skipIf(!hasTmux)("a chain of RPC runs", () => {
 		await new Promise((resolve) => setTimeout(resolve, 500));
 		expect(real.requests("main")).toHaveLength(7);
 	});
+
+	it("hands the worktree to a fresh writer after the worker, which starts without the worker's context", async () => {
+		const real = await startOrchestrator();
+		pi = real;
+		const repo = real.cwd;
+		repository(repo, { "pkg/a.txt": "one\n" });
+		real.script("main", [
+			{
+				tool: "subagent",
+				args: {
+					chain: [
+						{ agent: writer, name: "w", task: "WORKER-TASK: write new.txt." },
+						{ agent: writer, name: "fix", cwd: "pkg", task: "Make new.txt say v2." },
+					],
+				},
+			},
+			{ text: "read the chain" },
+		]);
+		real.script("w", [{ tool: "write", args: { path: "pkg/new.txt", content: "v1\n" } }, { text: "Wrote v1." }]);
+		real.script("fix", [
+			{ tool: "edit", args: { path: "new.txt", edits: [{ oldText: "v1", newText: "v2" }] } },
+			{ text: "Made it v2." },
+		]);
+		real.start(["--", "delegate"]);
+		await started(real, "w");
+		await started(real, "fix");
+		const main = await real.waitForRequests("main", 2);
+		const fix = real.requests("fix");
+		expect(fix).toHaveLength(2);
+		expect(toolNames(fix[0])).toEqual(expect.arrayContaining(["edit", "write"]));
+		const first = conversation(fix[0]);
+		expect(first).toHaveLength(1);
+		expect(first[0].text).toContain("Wrote v1.");
+		expect(first[0].text).not.toContain("WORKER-TASK");
+		// Its edit of the worker's file succeeded, in the one worktree of the chain.
+		expect(toolResults(fix[1])).toEqual([expect.stringMatching(/Successfully replaced/)]);
+
+		const [aggregate] = toolResults(main[1]);
+		expect(aggregate).toMatch(/Chain chain_\w+: 2 steps, all completed\./);
+		const workspace = /^Workspace: (.+?), an isolated Git worktree/m.exec(aggregate)?.[1] ?? "";
+		expect(readFileSync(join(workspace, "pkg", "new.txt"), "utf8")).toBe("v2\n");
+		expect(recordOf(real, "fix")?.cwd).toBe(join(workspace, "pkg"));
+		expect(git(repo, "for-each-ref", "--format=%(refname)", "refs/bluclawd").trim().split("\n")).toEqual([
+			`refs/bluclawd/runs/${recordOf(real, "w")?.runId}/baseline`,
+		]);
+		expect(git(repo, "worktree", "list", "--porcelain").match(/^worktree /gm)).toHaveLength(2);
+	});
+
+	it("halts at a step its Admission refuses once its turn comes, and names it blocked", async () => {
+		const real = await startOrchestrator();
+		pi = real;
+		const gate = join(real.cwd, "..", "a.go");
+		real.script("main", [
+			{
+				tool: "subagent",
+				args: {
+					chain: [
+						{ agent: "explorer", name: "a", task: "Look first." },
+						{ agent: "reviewer", name: "b", task: "Review next." },
+						{ agent: "explorer", name: "c", task: "Look last." },
+					],
+				},
+			},
+			{ text: "read the chain" },
+		]);
+		real.script("a", [{ text: "Looked.", until: gate }]);
+		for (const name of ["b", "c"]) real.script(name, [{ text: "Never started." }]);
+		real.start(["--", "delegate"]);
+		await started(real, "a");
+		// Denied after the chain was admitted: the next step is checked again when its turn comes.
+		const settings = join(real.agentDir, "settings.json");
+		writeFileSync(
+			settings,
+			JSON.stringify({
+				...JSON.parse(readFileSync(settings, "utf8")),
+				permissions: { deny: ["Subagent(reviewer)"] },
+			}),
+		);
+		writeFileSync(gate, "");
+		const main = await real.waitForRequests("main", 2);
+		const [aggregate] = toolResults(main[1]);
+		expect(aggregate).toMatch(/3 steps, halted at chain\[1\] \("b"\), blocked; 1 step did not run\./);
+		expect(aggregate).toMatch(/- chain\[0\] "a" \(sub_[\w-]+\): completed/);
+		expect(aggregate).toMatch(/- chain\[1\] \("b"\): blocked: .*Subagent\(reviewer\)/);
+		expect(aggregate).toMatch(/- chain\[2\] \("c"\): not run, since chain\[1\] \("b"\) blocked/);
+		expect(recordOf(real, "b")).toBeUndefined();
+		expect(real.requests("b")).toEqual([]);
+	});
 });

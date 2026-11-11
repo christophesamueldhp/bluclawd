@@ -356,8 +356,12 @@ function handoffText(agentDir: string, before: { index: number; member: BatchMem
 	const cut = `\n[Cut short; its full Report: ${full}]`;
 	const text = sanitizeReportText(report?.text ?? "").trim();
 	const fits = Math.min(MAX_HANDOFF_REPORT_BYTES, room - bytes(head));
-	if (bytes(text) <= fits) return `${head}${text}`;
-	return `${head}${truncateUtf8Safe(text, Math.max(0, fits - bytes(cut))).text}${cut}`;
+	const handoff =
+		bytes(text) <= fits
+			? `${head}${text}`
+			: `${head}${truncateUtf8Safe(text, Math.max(0, fits - bytes(cut))).text}${cut}`;
+	// A long list of changes may leave no room even for the head: the step's own task always fits.
+	return truncateUtf8Safe(handoff, Math.max(0, room)).text;
 }
 
 function statusOf(result: StepResult): string {

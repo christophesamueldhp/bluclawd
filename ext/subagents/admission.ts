@@ -957,6 +957,11 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 			if (typeof shared === "object") {
 				isolated = shared;
 				runCwd = join(shared.root, relative(shared.baseline.source, cwd));
+				if (!existsSync(runCwd)) {
+					return reject(
+						`Subagent cwd ${cwd} has no counterpart in the worktree of its chain, ${shared.root}: it is ignored, or held no file when the chain began.`,
+					);
+				}
 			} else if (writes || shared === "record") {
 				const captured = captureRunBaseline(cwd, runId);
 				if (!captured.ok) return cannotIsolate(captured.error);
