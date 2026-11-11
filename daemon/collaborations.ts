@@ -143,7 +143,8 @@ export class Collaborations {
 			);
 		}
 		if (text.length > MAX_TEXT) throw new Error(`The message is longer than ${MAX_TEXT} characters.`);
-		const sender = collaboration.members.find((m) => m.sessionId === from) as CollaborationMember;
+		const sender = collaboration.members.find((m) => m.sessionId === from);
+		if (!sender) throw new Error("This session is in no collaboration: only the user opens one, with /collaborate.");
 		const recipient = collaboration.members.find(
 			(m) => m.sessionId !== from && (m.name === to || m.sessionId === to),
 		);
