@@ -138,9 +138,8 @@ export function createBackgroundBashTool(options: BackgroundBashOptions): ToolDe
 		...(disabled
 			? {}
 			: {
-					run_in_background: Type.Optional(
-						Type.Boolean({ description: "Set to true to run this command in the background." }),
-					),
+					// Described once, in the guideline below.
+					run_in_background: Type.Optional(Type.Boolean()),
 				}),
 	});
 	type Params = Static<typeof parameters> & { run_in_background?: boolean };

@@ -49,7 +49,7 @@ describe("schema and prompt", () => {
 		const props = (tool.parameters as { properties: Record<string, { description?: string }> }).properties;
 		expect(Object.keys(props)).toEqual(["command", "timeout", "description", "run_in_background"]);
 		expect(props.timeout.description).toBe("Optional timeout in milliseconds (max 600000)");
-		expect(props.run_in_background.description).toBe("Set to true to run this command in the background.");
+		expect(props.run_in_background.description).toBeUndefined();
 		expect(props.description.description).toMatch(/^Clear, concise description of what this command does/);
 		expect(tool.promptGuidelines).toContain("`timeout` is in milliseconds: default 120000, max 600000.");
 		expect(tool.promptGuidelines).toContain(
