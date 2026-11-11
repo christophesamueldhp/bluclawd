@@ -5,6 +5,7 @@ This audits the final integrated revision against #290's 84 user stories and its
 ## Revision, host and platform
 
 - **Revision**: `620da94` (branch `290-rpc-subagents`, #292–#311 merged), audited on branch `312-acceptance`. The only code change after it is one added test, `4745131`, for story 40.
+- **Code review fixes**: the review of the integrated branch found six spec gaps and some standards issues, fixed on branch `290-review-fixes` from `5e443ae`. The rows below cite those fixes' tests, and [After the code review](#after-the-code-review) gives their check.
 - **Host packages**: pi 1.5.2 for every `@earendil-works` package, with no nested copies: `pi-coding-agent`, `pi-ai`, `pi-tui`, `pi-agent-core`, `pi-codemode`, `pi-mcp`, `pi-schema` and `pi-telemetry`. `test/subagent-rpc-runs` asserts `piVersion: "1.5.2"` on the run's own model request.
 - **Runtime**: Node 26.8.1, tmux 3.6b, Command Line Tools present.
 - **Platform**: macOS 27.2 (26B123), arm64. This is the only platform run.
@@ -43,11 +44,11 @@ No real-pi or OS test was skipped. Every `skipIf` guard was false here: tmux pre
 | 3 | one Run, clear interface | S | rpc-runs › "takes its task in a fresh session…" | R | |
 | 4 | `tasks` in parallel | S | rpc-batches › "runs a foreground batch side by side…" | R | full-suite-only flake (F3) |
 | 5 | `chain` order enforced | S | rpc-chains › "edits, reviews in a fresh context and repairs…" | R | |
-| 6 | explicit `cwd` per Run/step | S | rpc-roles › "works in the directory it was given…"; rpc-worktrees › "edits a worktree…" (`cwd: "pkg"`); rpc-batches › "runs a foreground batch…" | R | |
-| 7 | Admission errors before execution | S | rpc-batches › "refuses a contradictory, empty or invalid batch…"; rpc-chains › "refuses a contradictory, malformed or cross-repository chain…"; subagents-admission (27 cases) | R/U | |
+| 6 | explicit `cwd` per Run/step | S | rpc-roles › "works in the directory it was given…"; rpc-worktrees › "edits a worktree…" (`cwd: "pkg"`); rpc-batches › "runs a foreground batch…"; subagents-admission › "refuses a chain step whose directory leads out of its chain's worktree through a link…" | R/U | a step's escape through a link is refused only at the unit seam |
+| 7 | Admission errors before execution | S | rpc-batches › "refuses a contradictory, empty or invalid batch…"; rpc-chains › "refuses a contradictory, malformed or cross-repository chain…"; subagents-admission (28 cases) | R/U | |
 | 8 | no fixed total quota | S | rpc-queue › "runs four children at once…" (9 runs launched in one turn, all complete) | R | |
 | 9 | 4 active by default across parents | S | rpc-queue › "runs four children at once…"; daemon-run-queue › "grants as many runs as its capacity across orchestrators…" | R/U | |
-| 10 | user configures limit; model cannot raise | P | permissions-deny › "is four unless the user's own settings…; a project's never count"; daemon-run-queue › "bounds active runs by the capacity the latest claim gives"; rpc-queue › "gives a freed slot…" (`maxActive: 2`) | R/U | no tool or project setting raises it. By code reading, not run: the orchestrator's own `write`/`edit` tools could edit the global `settings.json` unless an `Edit` deny rule covers it (R10) |
+| 10 | user configures limit; model cannot raise | P | daemon-run-queue › "bounds active runs by the user's own setting as it is at each claim, which no orchestrator gives"; › "is four unless the user's own settings give a positive whole number"; rpc-queue › "gives a freed slot…" (`maxActive: 2`) | R/U | the daemon reads the bound itself; no claim, tool or project setting sets it. The orchestrator's own `bash`, `write` and `edit` could still edit the user's `settings.json` (R10) |
 | 11 | fair across parents | S | rpc-queue › "gives a freed slot to the orchestrator served least recently…"; daemon-run-queue › "serves the orchestrator served least recently first…" | R/U | |
 | 12 | queued/stored use no slot or turn | S | rpc-queue › "runs four children at once, and holds the rest back with no process and no model call…"; rpc-stop › "cancels a queued run before it starts…" | R | |
 | 13 | idle child exits after Report and drain | S | rpc-runs › "takes its task…" (host and pi dead); rpc-messages › "takes a message that races its settling…" | R | |
@@ -61,7 +62,7 @@ No real-pi or OS test was skipped. Every `skipIf` guard was false here: tmux pre
 | 21 | parents talk only after user links them | S | subagent-collaboration › "reaches no other parent until the user links named sessions…" | R | |
 | 22 | in-group messages without per-message approval | S | subagent-collaboration › "takes a finding at a working parent's next safe point…" | R | |
 | 23 | no discovery, broadcast, ack loops | S | subagent-collaboration › "reaches no other parent until…"; daemon-collaborations › "opens none when a named session is ambiguous or unknown…" | R/U | |
-| 24 | origin and authority preserved | S | rpc-messages › "gains no capability from a peer's message that claims the user's authority"; subagent-collaboration › "starts nothing and grants nothing with a message that claims the user's authority…"; subagents-messages › "keeps a claim of user approval inside the content…" | R/U | |
+| 24 | origin and authority preserved | S | rpc-messages › "gains no capability from a peer's message that claims the user's authority"; subagent-collaboration › "starts nothing and grants nothing with a message that claims the user's authority…"; subagents-messages › "keeps a claim of user approval inside the content…" | R/U | the frame is the only guard: a real peer may act on a message with its own authority (R26) |
 | 25 | explorer, reviewer, general-purpose bundled | S | subagents-definitions › "loads bundled general-purpose, explorer and reviewer roles…" | U | |
 | 26 | explorer/reviewer: read + codemode, no shell or mutation | S | rpc-capabilities › "gives an explorer no write, shell, subagent or extension tool…"; rpc-roles › "gives a role only read tools and codemode…" | R | |
 | 27 | tests need an execution role | S | rpc-roles › "gives a role only read tools…and refuses one it cannot isolate"; rpc-shell › "runs commands in its own worktree's sandbox…" | R/OS | macOS only (R1) |
@@ -97,9 +98,9 @@ No real-pi or OS test was skipped. Every `skipIf` guard was false here: tmux pre
 | 57 | explicit background | S | rpc-stop › "…leaves one launched in the background working"; rpc-batches › "stops a background batch whole…"; rpc-chains › "runs a background chain…" | R | |
 | 58 | foreground batch stays parallel | S | rpc-batches › "runs a foreground batch side by side within the shared capacity…"; subagents-delegation-eval › "makes independent edits side by side…" | R | F3 |
 | 59 | progress does not wake parent | S | rpc-messages › "wakes its orchestrator once for a blocker while it works, and for none of its progress"; subagents-delegation-eval › "wakes the orchestrator once for a background run's Report…" | R | |
-| 60 | findings, blockers, approvals delivered during work | S | rpc-messages › same; rpc-approvals › "asks the user in its orchestrator, naming the run, action and target…" | R | |
+| 60 | findings, blockers, approvals delivered during work | S | rpc-messages › same; rpc-approvals › "asks the user in its orchestrator, naming the run, action and target…"; rpc-recovery › "tells the reopened orchestrator once of a blocker its crashed instance held and never took" | R | |
 | 61 | inspect and integrate within scope | S | rpc-integration › "applies only the run's changes onto the checkout as it is now…" | R | |
-| 62 | serialized, preserves edits, validates combined | P | rpc-integration › "applies only the run's changes…keeps every edit made meanwhile, and runs the check given"; › "integrates two runs…reports a check the combined result fails…" | R | validation runs only when the orchestrator passes `check`. Without one, the result says nothing validated it |
+| 62 | serialized, preserves edits, validates combined | P | rpc-integration › "applies only the run's changes…keeps every edit made meanwhile, and runs the check given"; › "integrates two runs…reports a check the combined result fails…" | R | validation runs only when the orchestrator passes `check`, and only while its own `bash` is active (rpc-integration › "runs no check for an orchestrator that may not run bash itself…"). Without one, the result says nothing validated it |
 | 63 | intent changes escalated; commits/pushes separate | S | rpc-integration › "applies nothing when a change conflicts…" (all or nothing; asserts the refusal says "ask them, and do not choose"). That case and › "applies only the run's changes…" assert the index, HEAD, branches, tags and stash unchanged | R | escalation is guidance to the orchestrator; the runtime refuses the conflict |
 | 64 | Stop cancels descendants, keeps context and files | S | rpc-stop › "is cancelled only once nothing of it runs…"; rpc-shell › "is stopped only once every process its command started has ended…"; rpc-workspace-retention › "keeps a workspace holding changes after it completed, failed or was stopped" | R/OS | escape routes not probed (R1) |
 | 65 | whole batch/chain cancel includes queued | S | rpc-batches › "cancels every member, working or queued…a queued one never starts"; rpc-chains › "runs a background chain…stops whole by its ID" | R | |
@@ -121,7 +122,7 @@ No real-pi or OS test was skipped. Every `skipIf` guard was false here: tmux pre
 | 81 | runtime owns lifetime, no `subagent_close` | S | rpc-stop › "cancels a foreground run…" (tools lack `subagent_close`); subagents-waiting › "tells the model…" ("nothing to close"); rpc-runs › "takes its task…" (process exits) | R/U | |
 | 82 | child usage once, apart from parent | S | rpc-reports › "counts its session once, apart from the orchestrator's own usage, however many generations and Reports"; session-usage › "counts every reply, compaction and helper call…" | R/U | retries are assumed counted, untested; an unreadable session file is silently left out (R14) |
 | 83 | realistic comparison with stock pi | P | subagents-delegation-eval (5); `delegation-efficiency.md` refreshed on this revision | R | faux only: no live model ran (R2) |
-| 84 | public-seam tests + real OS checks | S | the 16 `rpc-*` files (91 tests with the one added); subagent-run-shell (19), subagents-writer-backend (5), subagents-writer-sandbox (2), sandbox-reaper (4) | R/OS | macOS only; Linux/WSL unsupported for shell, not run (R1) |
+| 84 | public-seam tests + real OS checks | S | the 16 `rpc-*` files (93 tests with those added); subagent-run-shell (19), subagents-writer-backend (5), subagents-writer-sandbox (2), sandbox-reaper (4) | R/OS | macOS only; Linux/WSL unsupported for shell, not run (R1) |
 
 **Totals**: 79 S, 4 P (2, 10, 62, 83), 1 U (48).
 
@@ -136,7 +137,7 @@ The Q1–Q23 decisions are not numbered individually anywhere in the repository,
 | D2 | writers in worktrees; readers share; reviewer after writer; stable snapshot | P | stories 46, 47, 52 | no reader snapshot (story 48) |
 | D3 | baseline at Admission, uncommitted included, no commit; ignored not copied | S | stories 49–51 | |
 | D4 | 4 active across orchestrators, fair, no total quota, user-set, orchestrator cannot raise | P | stories 8–12 | story 10 |
-| D5 | user-opened collaboration only | S | stories 21–24 | collaborations end on a daemon restart (R9) |
+| D5 | user-opened collaboration only | S | stories 21–24 | collaborations end on a daemon restart (R9); a peer acts with its own authority (R26) |
 | D6 | Integration: serialized, preserves edits, combined validation, no commit | P | stories 61–63 | validation needs `check` (story 62) |
 | D7 | worker/reviewer/repair share one worktree; halt on failure | S | stories 52–54 | |
 | D8 | cancel foreground/batch/chain incl. queued; retain; background distinct; explicit Resume | S | stories 56, 57, 64–66 | |
@@ -175,9 +176,9 @@ The Q1–Q23 decisions are not numbered individually anywhere in the repository,
 | 3: writer escapes | subagent-run-shell › "writes nothing outside its worktree…", › "changes no Git state…", › "cannot approve itself…", › "reaches neither a daemon's nor tmux's socket…"; rpc-shell › "takes turns between its commands and its file tools…" |
 | 3: process lifetime | rpc-stop › "is cancelled only once nothing of it runs…"; rpc-shell › "runs commands in its own worktree's sandbox…nothing it started outlives a command" |
 | 3: unsupported platform refuses | subagent-run-shell › "is refused off macOS, saying so"; subagents-definitions › "refuses a role that names bash, with the reason" (both pass `"linux"` on macOS; R1) |
-| 4: Integration preserving user edits | rpc-integration (7) |
+| 4: Integration preserving user edits | rpc-integration (8) |
 | 4: cleanup/exact-state Resume | rpc-workspace-retention › "removes a workspace it left unchanged, and Resume makes it again exactly as admitted…", › "removes a workspace holding changes only at the user's request…" |
-| 4: parent/daemon recovery | rpc-recovery (10), incl. › "holds a working run's slot in the daemon started after its daemon ended…" |
+| 4: parent/daemon recovery | rpc-recovery (11), incl. › "holds a working run's slot in the daemon started after its daemon ended…" |
 | 4: legacy cutover | subagent-legacy-runs (2) |
 | 4: approvals | rpc-approvals (4) |
 | 4: bounded evidence retrieval | rpc-reports (4); rpc-batches › "bounds the aggregate…" |
@@ -199,6 +200,33 @@ The Q1–Q23 decisions are not numbered individually anywhere in the repository,
 - **Flakes**: none of F1–F6 failed. No failure was re-run.
 - **Leftovers**: no test daemon, run host, run pi or tmux server was left running. This was checked with `ps`, and with `lsof -d cwd` for processes in temp directories, since pi renames its process. The only bluclawd daemon left is the user's own, from `~/Projects/bluclawd`, started at boot.
 
+## After the code review
+
+The fixes on `290-review-fixes`, one commit each:
+
+| finding | fix | test |
+|---|---|---|
+| the daemon spawned any argv, env and cwd a client sent, and ran a client-named helper | it starts its own `rpc-host.ts` in the run's directory. The host checks the spec there and starts its own pi; the daemon ends leftovers with its own helper (R27) | daemon-run-host-launch (2); daemon-run-queue › "starts no host whose directory, environment or run is not one a run's host has" |
+| the last claim set the queue's capacity | the daemon reads `subagents.maxActive` itself (R10) | daemon-run-queue › "bounds active runs by the user's own setting…" |
+| `subagent_integrate check` ran for an orchestrator without `bash` | refused unless its own `bash` is active | rpc-integration › "runs no check for an orchestrator that may not run bash itself…" |
+| a chain step's `cwd` could leave the worktree through a link | resolved, and refused outside the worktree's real root | subagents-admission › "refuses a chain step whose directory leads out…" |
+| the relay position was stored before relaying, so a crash lost a held message | at-least-once by message ID, taken once by the session and by a sibling's inbox | rpc-recovery › "tells the reopened orchestrator once of a blocker…"; subagent-run-mailbox › "takes a message relayed again, by its key, once…" |
+| the collaboration test's "notes.md untouched" proved nothing after the scripted turn | that assertion dropped (R26) | subagent-collaboration |
+
+The review's larger structural smells are left as they are: the size of `admission.ts`, the `(runDir, generation)` pair passed everywhere, and the `backend === "rpc"` switches.
+
+Their check, on the review fixes (`5e443ae` plus the fix commits), at load 5 → 35:
+
+| run | result |
+|---|---|
+| `npm run check` | lint: 393 files, no errors, the same 1 warning; knip clean; typecheck clean; **181 files, 2500 passed, 0 failed, 0 skipped** |
+| earlier `npm run check` runs, same code | 1 and 3 failures, all known flakes: F1 (wakeups-signal, both of its daemon-down tests) and F3 (rpc-batches). wakeups-signal fails 3/16 at 8 wide on `5e443ae` too; F3 was 0/16 alone |
+| `scripts/stress-test.sh test/daemon-run-host-launch.test.ts` | **0/48 failed** |
+| `scripts/stress-test.sh test/subagent-rpc-recovery.test.ts -t "blocker its crashed instance"` | **0/48 failed** |
+| `scripts/stress-test.sh test/subagent-rpc-integration.test.ts -t "may not run bash"` | **0/48 failed** |
+
+No test daemon, host or pi was left running afterwards (`ps`).
+
 ## Residual limitations
 
 Each ticket block of the implementation notes was checked item by item. An item closed by a later ticket, by its test or by its code, is left out. Examples: thinking verification (#294), Resume from `definition.json` (#296), the run-shell environment scrub and approval-dir protection (#302), daemon slots across a restart (#308), and the tool descriptions and transcript rendering (#311).
@@ -212,13 +240,13 @@ Each ticket block of the implementation notes was checked item by item. An item 
 | R5 | **ADR-0001 conflict (the user's decision)**: ADR-0001 says only a VM can contain process lifetime on macOS, and calls the reaper best-effort. #302 confirms termination of run shells with a sandbox-identity scan. Either ADR-0001 is revised to scope its claim to the orchestrator's own shell, or #302's confirmation is downgraded. | #302 |
 | R6 | Known pre-existing flakes: F1–F6 below. | ledger |
 | R7 | No stable snapshot for a lone reader (story 48). | #301 |
-| R8 | **Recovery**: a kill between `claimRunGeneration` and the record write leaves a generation claimed forever, so the run cannot be resumed. A batch's aggregate and manifest are not rebuilt after takeover. A chain has no live manifest after takeover, and its handoff lacks an earlier step's workspace lines. A reload inside a step's Admission await could admit it twice. Two live pis on one session both deliver a Report. A parent that never returns leaves its record `running`, plus its worktree and `run-tmp`. A partly made worktree is not repaired. | #308 |
+| R8 | **Recovery**: a kill between `claimRunGeneration` and the record write leaves a generation claimed forever, so the run cannot be resumed. A batch's aggregate and manifest are not rebuilt after takeover. A chain has no live manifest after takeover, and its handoff lacks an earlier step's workspace lines. A reload inside a step's Admission await could admit it twice. Two live pis on one session both deliver a Report. A run's message relayed again after a crash is taken once by the orchestrator and by a sibling's inbox, but a sibling resumed since gets it in its new generation, and the audit log (`messages.jsonl`) records each relay. A message still in the crashed orchestrator's memory when its run ended is not relayed again: only open runs are taken over. A parent that never returns leaves its record `running`, plus its worktree and `run-tmp`. A partly made worktree is not repaired. | #308 |
 | R9 | **Memory only**: collaborations (gone on a daemon restart), remembered approval "yes" (lost on reload), and the queue's waiting runs. Open approvals after a reload are picked up only within the host's 5 s window, untested. A parent crash mid-claim holds a slot for up to 60 s. | #307, #300, #308 |
-| R10 | The active limit cannot be raised through any tool or project setting. By code reading, not run: the orchestrator's `write`/`edit` tools are held only by deny rules, so they could edit the global `settings.json` unless an `Edit` rule covers it. Its `bash` writes only its cwd and temp under the default sandbox. | audit |
+| R10 | The daemon reads `subagents.maxActive` from the user's own settings, in its agent dir, at each claim: no claim, tool or project setting sets it. The orchestrator's own `bash`, `write` and `edit` act with the user's authority over their files, though. The sandbox is off by default, and deny rules are all that hold them, so unless a rule covers it they could edit that `settings.json`, and the next claim reads the new bound. No guard is added: that authority is the user's to give. | audit, review |
 | R11 | **Mailbox seal**: a killed poster whose pid is reused could make a seal wait as long as that process lives; no draft-age deadline. | mailbox fix |
 | R12 | **Pre-existing permissions gap**: a rule starting with `*` (e.g. `Read(*.env)`) never matches folder-grep lines. | #295 |
 | R13 | Approvals have one real trigger: a shell's network host. bluclawd permissions are deny-only. Another pi dialog replacing an open approval dialog never settles it. | #300 |
-| R14 | **Untested branches**: termination unconfirmed → `failed` (#299, #303); approval with no UI (`pi -p` with a foreground RPC subagent exits mid-tool, pre-existing); hook's "not given this tool" and unreadable-policy branches; host wrong-session branch; preview Read-deny filter, Bash-denied check, lock-wait timeout and stale-lock takeover race in Integration; per-step model/thinking and the 32 KiB cap in chains; a background member refused at its turn; Resume of a shell run; a shell step in a chain; codemode-nested bash in a shell run; retries in usage; legacy child messaging, typed-in-run note and needs-input notice. Also: a user instruction leaves no `messages.jsonl` line; a child is not told when its sibling message is refused; an unreadable session file is left out of usage silently. | #295–#311 |
+| R14 | **Untested branches**: termination unconfirmed → `failed` (#299, #303); approval with no UI (`pi -p` with a foreground RPC subagent exits mid-tool, pre-existing); hook's "not given this tool" and unreadable-policy branches; host wrong-session branch; preview Read-deny filter, Bash-denied check (an inactive `bash` is tested), lock-wait timeout and stale-lock takeover race in Integration; per-step model/thinking and the 32 KiB cap in chains; a background member refused at its turn; Resume of a shell run; a shell step in a chain; codemode-nested bash in a shell run; retries in usage; legacy child messaging, typed-in-run note and needs-input notice. Also: a user instruction leaves no `messages.jsonl` line; a child is not told when its sibling message is refused; an unreadable session file is left out of usage silently. | #295–#311 |
 | R15 | **Disk and leftovers**: the baseline ref of an unchanged workspace is kept; `~/.pi/agent/bluclawd/reaper` is an empty directory left by a #302 probe. A resume that restores a worktree and then does not start leaves an unchanged worktree. | #304, #302 |
 | R16 | **Evaluation**: faux only, 2 trials; the example arm, the budget stop and the live main loop are unexercised. It supports no cost or speed claim. Investigate grading does not catch a wrong extra name. The bundled role `.md` files were not tuned. | #310 |
 | R17 | **Roles and trust**: a linked worktree is its own repository root, so a main checkout's trust does not reach a worktree outside it. A resumed writer runs `--no-approve` unless the user saved trust for its worktree path (untested). Workspace trust is not rechecked at slot grant. pi's `--append-system-prompt` suppresses a project's `.pi/APPEND_SYSTEM.md` in a run (`.pi/SYSTEM.md` still loads). | #293, #297, #301 |
@@ -230,12 +258,14 @@ Each ticket block of the implementation notes was checked item by item. An item 
 | R23 | **Reports and usage**: runtime lines are bounded one by one, with no total cap. Aggregates are capped at 16 KiB. `details.truncated` reflects only pi's 50 KB cap. Re-delivery and recovery duplicates in usage are covered only by a unit test. | #309 |
 | R24 | **Shell, continued**: an "allow" approval and the reuse of the orchestrator's `networkAsker` answers are unprobed. So are a long-lived setuid member, and a member that survives a sweep (→ `failed`). The daemon holds a slot while a member cannot be ended. A general-purpose or `bash` role costs about 1 s of Admission the first time per agent dir, for the helper compile and self-test. | #302 |
 | R25 | **Legacy**: the warning when a session reopens outside tmux with a live legacy pane is tested only with a fake host (`subagents-tool`). | #311 |
+| R26 | **Collaboration between parents**: the frame is the only guard. A message tells its recipient who sent it and that it carries no user authority, but a real peer may still act on it with its own tools and rules. The test shows only that nothing runs before the recipient's turn; its scripted model does nothing with the message after. | #307, review |
+| R27 | **Daemon launch**: the daemon starts only its own run host, in the run directory a client names, with its own node, resolve hook and pi. That directory may be any absolute path. The host checks the shape of the spec it reads there, then starts its install's pi with the spec's arguments, which a client still chooses. Those arguments include the `-e` extensions of the provider stopgap (R3). The client's environment still reaches the run's pi, except `NODE_OPTIONS`, `DYLD_INSERT_LIBRARIES` and `LD_PRELOAD`, so a user's own `NODE_OPTIONS` no longer reaches a run. The daemon ends a run's leftover processes with the helper built in its own agent dir, and sizes the queue from that dir's settings: an orchestrator with another agent dir shares neither. | review |
 
 ### Known flakes
 
 | F | test | where it shows |
 |---|---|---|
-| F1 | wakeups-signal › "reopens the session of a pi a signal ended…" | main too (1/48) |
+| F1 | wakeups-signal › "reopens the session of a pi a signal ended…", › "fires one that fell due while the daemon was down…" | main too (1/48); 3/16 at 8 wide on `5e443ae` |
 | F2 | agent-view-panes › "ctrl+x stops a pane…" | under load |
 | F3 | rpc-batches › "runs a foreground batch side by side…" | full suite only; 0/48 alone |
 | F4 | rpc-roles › "takes its role from an inline…" | load above ~60 (readiness timeout) |
