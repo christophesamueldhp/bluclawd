@@ -8,6 +8,7 @@
 import { readFileSync } from "node:fs";
 import { parseSessionEntries } from "@earendil-works/pi-coding-agent";
 import { type AdmissionContext, formatRunLabel, type RunAdmission, type RunExecutionContext } from "./admission.ts";
+import { textOf } from "./results.ts";
 import { readRpcHostState } from "./rpc-host.ts";
 import { postToRun, whenGiven } from "./run-mailbox.ts";
 import { rpcRunMessageText } from "./run-messages.ts";
@@ -30,13 +31,6 @@ const oneLine = (text: string, max = SHOWN_CHARS) => {
 };
 
 type Block = { type?: string; text?: string; name?: string; arguments?: unknown };
-const textOf = (content: unknown) =>
-	typeof content === "string"
-		? content
-		: Array.isArray(content)
-			? (content as Block[]).map((block) => (block.type === "text" ? (block.text ?? "") : "")).join("")
-			: "";
-
 /** One message as the user reads it; the runtime's frame of a message to the run is left out. */
 function describe(message: { role?: string; content?: unknown; toolName?: string }): string[] {
 	if (message.role === "user") return [`user: ${oneLine(textOf(message.content).replace(/^\[[^\n]*\]\n\n/, ""))}`];

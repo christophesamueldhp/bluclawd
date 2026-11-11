@@ -16,6 +16,7 @@ import { piPackageRoot } from "../../daemon/orchestrator-client.ts";
 import { processAlive, processGroupAlive } from "../../daemon/processes.ts";
 import type { RunHostLaunch } from "../../daemon/run-queue.ts";
 import { SUBAGENT_MESSAGE_TOOL } from "./messages.ts";
+import { textOf } from "./results.ts";
 import {
 	dialogAnswer,
 	type RunApprovalAnswer,
@@ -233,15 +234,6 @@ function connect(child: ChildProcess, onEvent: (event: RpcRecord) => void) {
 			child.stdin?.write(`${JSON.stringify({ ...command, id })}\n`);
 		});
 }
-
-const textOf = (content: unknown): string =>
-	Array.isArray(content)
-		? content
-				.map((part: { type?: string; text?: string }) => (part.type === "text" ? (part.text ?? "") : ""))
-				.join("")
-		: typeof content === "string"
-			? content
-			: "";
 
 async function host(runDir: string): Promise<void> {
 	const spec: unknown = JSON.parse(readFileSync(specPath(runDir), "utf8"));

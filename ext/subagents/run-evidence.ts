@@ -4,7 +4,7 @@
  */
 
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
-import { sanitizeReportText, truncateUtf8Safe } from "./results.ts";
+import { sanitizeReportText, textOf, truncateUtf8Safe } from "./results.ts";
 
 /** A command the run's shell ran, and how it ended. */
 export interface RunCommand {
@@ -79,13 +79,6 @@ export function checksSummary(tools: readonly string[], commands: readonly RunCo
 	const failed = commands.filter(({ ended }) => !ended.startsWith("exit 0")).length;
 	return `Checks: its transcript shows ${commands.length} command${commands.length === 1 ? "" : "s"}, ${failed} not ending with exit 0.`;
 }
-
-const textOf = (content: unknown): string =>
-	Array.isArray(content)
-		? content
-				.map((part: { type?: string; text?: string }) => (part.type === "text" ? (part.text ?? "") : ""))
-				.join("")
-		: "";
 
 /** One line, bounded. */
 function line(text: string): string {
