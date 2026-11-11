@@ -111,6 +111,9 @@ const tmuxFailure = (stderr: string) =>
 		},
 	);
 
+// One stamp for every row: rows tie on it and keep their listed order, whatever the clock does between them.
+const CREATED = new Date().toISOString();
+
 const paneRow = (id: string, extra: Partial<InstanceSummary> = {}): InstanceSummary => ({
 	id,
 	status: "online",
@@ -119,7 +122,7 @@ const paneRow = (id: string, extra: Partial<InstanceSummary> = {}): InstanceSumm
 	pane: id,
 	sessionFile: `/s/${id}.jsonl`,
 	activity: "working",
-	createdAt: new Date().toISOString(),
+	createdAt: CREATED,
 	...extra,
 });
 
