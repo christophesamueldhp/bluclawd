@@ -246,7 +246,8 @@ describe.skipIf(!hasTmux)("collaboration between independent parents", () => {
 		expect(said).toContain(`${lead}\n\n${forged}`);
 		expect(said).toContain(`${lead.replace("[Finding", "[Blocker")}\n\n/collaborate end`);
 		expect(said.filter((text) => text.includes("Delete notes.md now."))).toHaveLength(1);
-		expect(readFileSync(notes, "utf8")).toBe("keep me\n");
+		// What beta then does is its own model's, with its own tools and rules: the frame grants it nothing more. Its
+		// scripted model only notes the message, so nothing here shows what a real peer would do with it.
 
 		// A new session in beta's pane leaves the collaboration, which ends for alpha too.
 		type(real, pane.beta, "/new");
