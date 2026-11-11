@@ -203,7 +203,7 @@ describe.skipIf(!hasTmux)("an RPC run's directory and role", () => {
 		expect(JSON.parse(readFileSync(snapshotFile, "utf8"))).toMatchObject(admitted);
 	});
 
-	it("gives a role only read tools and codemode, whatever its name or prompt claims, and refuses one naming more", async () => {
+	it("gives a role only read tools and codemode, whatever its name or prompt claims, and refuses one it cannot isolate", async () => {
 		const real = await startOrchestrator();
 		pi = real;
 		role(real.agentDir, "tester", "Run the tests.", "agents", ["tools: [read, bash]"]);
@@ -229,7 +229,10 @@ describe.skipIf(!hasTmux)("an RPC run's directory and role", () => {
 
 		expect(toolNames(real.requests("boss")[0]).sort()).toEqual(["codemode", "read", "subagent_message"]);
 		expect(toolNames(real.requests("review")[0]).sort()).toEqual(["codemode", "read", "subagent_message"]);
-		expect(lastToolResult(main[3])?.text).toMatch(/"tester" names tools a run on pi's RPC cannot have yet: bash/);
+		// A role naming a shell runs commands only in a worktree of its own, which this checkout outside Git cannot give.
+		expect(lastToolResult(main[3])?.text).toMatch(
+			/"tester" .*(isolated Git worktree, and none can be made|gets no shell here)/,
+		);
 		expect(real.requests("tests")).toHaveLength(0);
 		expect(toolNames(real.requests("compose")[0]).sort()).toEqual(["codemode", "read", "subagent_message"]);
 	});

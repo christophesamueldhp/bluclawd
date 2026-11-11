@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, readdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { descendantCommand, leavingBehind, readHeartbeats, readinessMs } from "./helpers/heartbeats.ts";
@@ -75,6 +75,18 @@ async function startOrchestrator(): Promise<RealPi> {
 	return real;
 }
 
+/** Kills the pi in `pane` as a crash does: it never ends its session, and its pane goes with it. */
+function crash(real: RealPi, pane: string): void {
+	const pid = Number(
+		spawnSync("tmux", ["-S", real.tmux.socket, "display-message", "-p", "-t", `=${pane}:`, "#{pane_pid}"], {
+			encoding: "utf8",
+		}).stdout.trim(),
+	);
+	// Never 0, which would kill this whole process group.
+	expect(pid).toBeGreaterThan(0);
+	process.kill(pid, "SIGKILL");
+}
+
 /** A command whose double-forked descendant, with no environment but PATH, beats into `path` for minutes. */
 const escaping = (path: string, identity: string) =>
 	`env -i PATH=/usr/bin:/bin ${descendantCommand("double-fork", path, identity, 4 * readinessMs)}`;
@@ -107,16 +119,22 @@ describe.skipIf(!hasTmux || !contained)("a run's shell on pi's RPC", () => {
 			{ tool: "bash", args: { command: `printf x > ${quote(join(checkout, "escaped.txt"))}` } },
 			{ tool: "bash", args: { command: connect } },
 			{ tool: "bash", args: { command: leavingBehind(escaping("beats.jsonl", "gp-left"), "beats.jsonl") } },
+			{
+				tool: "bash",
+				args: {
+					command: `printf "require('node:test')('adds', () => require('node:assert').equal(1 + 1, 2));\\n" > sum.test.js && ${quote(process.execPath)} --test sum.test.js && git status --short`,
+				},
+			},
 			{ text: "Made it." },
 		]);
 		real.start(["--", "delegate"]);
 		const main = await real.waitForRequests("main", 2);
 
 		const gp = real.requests("gp");
-		expect(gp).toHaveLength(5);
+		expect(gp).toHaveLength(6);
 		// The bundled role that implements changes runs commands here, besides editing.
 		expect(toolNames(gp[0])).toEqual(expect.arrayContaining(["bash", "edit", "write", "read"]));
-		const [made, escaped, daemon] = toolResults(gp[4]);
+		const [made, escaped, daemon, , tested] = toolResults(gp[5]);
 		// Its pi is told of neither the daemon's nor tmux's endpoints.
 		expect(made).toBe("one\n[||]");
 		expect(escaped).toMatch(/Operation not permitted/);
@@ -125,6 +143,9 @@ describe.skipIf(!hasTmux || !contained)("a run's shell on pi's RPC", () => {
 		await expect(real.rows()).resolves.toBeDefined();
 		expect(daemon).not.toContain("CONNECTED");
 
+		// A test runner, and the processes it starts, run there too, and Git reads the worktree.
+		expect(tested).toMatch(/pass 1\n/);
+		expect(tested).toMatch(/\?\? made\.txt/);
 		const report = toolResults(main[1]).at(-1);
 		expect(report).toMatch(/Changes since its baseline: .*A made\.txt/);
 		expect(git(checkout, "status", "--porcelain")).toBe("");
@@ -178,6 +199,30 @@ describe.skipIf(!hasTmux || !contained)("a run's shell on pi's RPC", () => {
 		process.kill(readJson(join(runDir(real.agentDir, "gp"), "rpc-host.json")).hostPid, "SIGKILL");
 		await waitFor(() => expect(recordOf(real, "gp").status).toBe("failed"));
 		expect(recordOf(real, "gp").errorMessage).toMatch(/host ended before its pi did/);
+		expect(await quietAfterBeats(beats)).toEqual({ started: true, quiet: true });
+	});
+
+	it("ends what its command started once its orchestrator crashed and its host and pi were killed, before its slot frees", async () => {
+		const real = await startOrchestrator();
+		pi = real;
+		real.script("main", [
+			{ tool: "subagent", args: { agent: "general-purpose", name: "gp", task: "Run it.", background: true } },
+			{ text: "waiting" },
+		]);
+		real.script("gp", [
+			{ tool: "bash", args: { command: `${escaping("beats.jsonl", "gp-lost")}; sleep 600` } },
+			{ text: "Never." },
+		]);
+		const orchestrator = real.start(["--", "delegate"]);
+		await waitFor(() => expect(recordOf(real, "gp").status).toBe("running"));
+		const beats = join(worktreeOf(real, "gp"), "beats.jsonl");
+		await waitFor(() => expect(readHeartbeats(beats).some((beat) => beat.ppid === 1)).toBe(true));
+
+		// Nobody but the daemon is left to end them: the orchestrator crashed, the host's group was killed whole.
+		crash(real, orchestrator);
+		const { hostPid } = readJson(join(runDir(real.agentDir, "gp"), "rpc-host.json"));
+		process.kill(-hostPid, "SIGKILL");
+		await waitFor(() => Date.now() - statSync(beats).mtimeMs > 500);
 		expect(await quietAfterBeats(beats)).toEqual({ started: true, quiet: true });
 	});
 

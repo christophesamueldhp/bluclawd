@@ -1,4 +1,4 @@
-import { spawn, spawnSync } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { existsSync, unlinkSync } from "node:fs";
 import { Collaborations } from "./collaborations.ts";
 import { getServerDir, getSocketPath } from "./config.ts";
@@ -56,6 +56,8 @@ export async function serve(): Promise<void> {
 	});
 	const supervisor = new ServerSupervisor({ now: Date.now, tmux, dir: getServerDir(), wakeups });
 	setWakeupKeeper(wakeups);
+	/** Sweeps of what ended runs' commands left running, by host pid: one at a time each, off the event loop. */
+	const sweeps = new Map<number, "running" | "done">();
 	setRunQueue(
 		new RunQueue({
 			now: Date.now,
@@ -76,9 +78,19 @@ export async function serve(): Promise<void> {
 				}
 				// Its host and pi are gone, maybe killed: whatever its commands left running is ended, and counted until it is.
 				if (!contained) return false;
-				return (
-					spawnSync(contained.helper, ["end", contained.marker], { stdio: "ignore", timeout: 10_000 }).status !== 0
-				);
+				const sweep = sweeps.get(pid);
+				if (sweep === "done") {
+					sweeps.delete(pid);
+					return false;
+				}
+				if (!sweep) {
+					sweeps.set(pid, "running");
+					execFile(contained.helper, ["end", contained.marker], { timeout: 10_000 }, (error) => {
+						if (error) sweeps.delete(pid);
+						else sweeps.set(pid, "done");
+					});
+				}
+				return true;
 			},
 		}),
 	);

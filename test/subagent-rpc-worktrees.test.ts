@@ -358,7 +358,9 @@ describe.skipIf(!hasTmux)("an RPC run that edits", () => {
 			[2, empty],
 		] as const) {
 			const refusal = lastToolResult(main[step])?.text;
-			expect(refusal).toMatch(/may edit files, so it works in an isolated Git worktree, and none can be made/);
+			expect(refusal).toMatch(
+				/may edit files or run commands, so it works in an isolated Git worktree, and none can be made/,
+			);
 			expect(refusal).toContain(
 				step === 1 ? `${realpathSync(dir)} is not in a Git repository` : "has no commit yet",
 			);
@@ -371,8 +373,9 @@ describe.skipIf(!hasTmux)("an RPC run that edits", () => {
 		expect(runRecord(real.agentDir, "look-plain")?.cwd).toBe(realpathSync(plain));
 		expect(runRecord(real.agentDir, "look-repo")?.cwd).toBe(realpathSync(repo));
 		expect(lastToolResult(real.requests("look-repo")[1])?.text).toBe("one\n");
-		// The bundled implementer edits on pi's RPC, in a worktree of its own.
+		// The bundled implementer edits on pi's RPC, in a worktree of its own, and runs commands where they can be contained.
 		expect(toolNames(real.requests("gp")[0]).sort()).toEqual([
+			...(process.platform === "darwin" ? ["bash"] : []),
 			"codemode",
 			"edit",
 			"read",

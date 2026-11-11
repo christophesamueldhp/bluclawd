@@ -64,30 +64,32 @@ static int is_member(int pid) {
          sandbox_check(pid, "mach-lookup", SANDBOX_FILTER_GLOBAL_NAME | SANDBOX_CHECK_NO_REPORT, control) == 1;
 }
 
-/* A zombie runs nothing more: it only waits for its parent to collect it. */
+/* A zombie runs nothing more: it only waits for its parent to collect it. One that cannot be read may run. */
 static int zombie(int pid) {
   struct proc_bsdinfo info;
-  if (proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, sizeof(info)) != sizeof(info)) return 1;
+  if (proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, sizeof(info)) != sizeof(info)) return 0;
   return info.pbi_status == SZOMB;
 }
 
 static int stopped(int pid) {
   struct proc_bsdinfo info;
-  if (proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, sizeof(info)) != sizeof(info)) return 1;
+  if (proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, sizeof(info)) != sizeof(info)) return 0;
   return info.pbi_status == SSTOP || info.pbi_status == SZOMB;
 }
 
-/* The live members, by pid and unique id; -1 when the processes cannot be listed. */
+/*
+ * The live members, by pid and unique id (0 for one whose id cannot be read: counted, never signalled); -1 when the
+ * processes cannot all be listed. Whatever cannot be told apart counts as a member still running, never as gone.
+ */
 static int scan(void) {
   int count = proc_listallpids(pids, sizeof(pids));
-  if (count < 0) return -1;
+  if (count < 0 || count >= MAX_PIDS) return -1;
   int n = 0;
-  for (int i = 0; i < count && i < MAX_PIDS; i++) {
+  for (int i = 0; i < count; i++) {
     int pid = pids[i];
     if (pid <= 1 || pid == getpid() || !is_member(pid) || zombie(pid)) continue;
     uint64_t id;
-    if (!unique_id(pid, &id)) continue;
-    members[n++] = (struct member){pid, id};
+    members[n++] = (struct member){pid, unique_id(pid, &id) ? id : 0};
   }
   return n;
 }
@@ -95,7 +97,7 @@ static int scan(void) {
 /* Signals a member, unless its pid now names another process. */
 static int signal_member(const struct member *m, int sig) {
   uint64_t id;
-  if (!unique_id(m->pid, &id) || id != m->id) return 0;
+  if (m->id == 0 || !unique_id(m->pid, &id) || id != m->id) return 0;
   return kill(m->pid, sig) == 0;
 }
 

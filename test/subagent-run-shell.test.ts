@@ -85,6 +85,8 @@ describe.skipIf(!supported)("a run's shell, on the operating system", () => {
 		writeFileSync(join(source, "a.txt"), "one\n");
 		writeFileSync(join(source, "secret.txt"), "TRACKED-SECRET\n");
 		writeFileSync(join(source, "locked.txt"), "locked\n");
+		mkdirSync(join(source, "keys"));
+		writeFileSync(join(source, "keys", "k.pem"), "PEM-SECRET\n");
 		git(source, "init", "-q");
 		git(source, "add", ".");
 		git(source, "commit", "-q", "-m", "start");
@@ -96,7 +98,7 @@ describe.skipIf(!supported)("a run's shell, on the operating system", () => {
 			runId,
 			runDir,
 			workspace: { root: worktree, source: captured.baseline.source, gitDir: captured.baseline.gitDir },
-			deny: [{ cwd: source, rules: ["Read(secret.txt)", "Edit(locked.txt)"] }],
+			deny: [{ cwd: source, rules: ["Read(secret.txt)", "Read(**/*.pem)", "Edit(locked.txt)"] }],
 		};
 		// A private daemon's socket and a tmux server's, listening: outside the sandbox, both answer.
 		for (const name of ["daemon.sock", "tmux.sock"]) {
@@ -200,6 +202,34 @@ describe.skipIf(!supported)("a run's shell, on the operating system", () => {
 			expect(result.code, command).not.toBe(0);
 			expect(result.output).not.toMatch(/TRACKED-SECRET|AGENT-CREDENTIAL|SIBLING-SECRET/);
 		}
+	});
+
+	it("reads no denied file once renamed, hard-linked or moved with its directory, nor one a glob rule denies", async () => {
+		const tried: Record<string, string> = {};
+		for (const command of [
+			"cat keys/k.pem",
+			"mv secret.txt moved.txt; cat moved.txt",
+			"ln secret.txt hard.txt; cat hard.txt",
+			"cp secret.txt copy.txt; cat copy.txt",
+			"mv keys keys2; cat keys2/k.pem",
+			"ln -s secret.txt soft.txt; cat soft.txt",
+		]) {
+			tried[command] = (await run(command)).output;
+		}
+		expect(Object.values(tried).join("\n")).not.toMatch(/TRACKED-SECRET|PEM-SECRET/);
+	});
+
+	it("keeps its worktree's .git link where it is", async () => {
+		const gitFile = readFileSync(join(worktree, ".git"), "utf8");
+		for (const command of ["rm -f .git", "mv .git moved-git"]) expect((await run(command)).code, command).not.toBe(0);
+		expect(readFileSync(join(worktree, ".git"), "utf8")).toBe(gitFile);
+	});
+
+	it("cannot put a process under a profile of its own, out of its run's reach", async () => {
+		const result = await run("sandbox-exec -p '(version 1)(allow default)' /bin/echo ESCAPED");
+		expect(result.code).not.toBe(0);
+		expect(result.output).toContain("sandbox_apply: Operation not permitted");
+		expect(result.output).not.toContain("ESCAPED");
 	});
 
 	it("sees none of the variables the user's sandbox hides", async () => {
