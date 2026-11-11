@@ -107,7 +107,7 @@ The review scenario's bluclawd wall time includes the test's own wait while it n
 
 ## First live run (2026-11-11)
 
-One trial each of `investigate` and `parallel`, stock vs bluclawd, on `openai-codex/gpt-6.1-sol` with thinking `low`, revision 75b0136, pi 1.5.2. The command was the one above with `--trials 1 --arms stock,bluclawd --max-dollars 2`, with `--scenarios investigate --max-tokens 200000` or `--scenarios parallel --max-tokens 400000`.
+One trial each of `investigate` and `parallel` (stock vs bluclawd) and of `review` (bluclawd only), on `openai-codex/gpt-6.1-sol` with thinking `low`, revision 75b0136, pi 1.5.2. The command was the one above with `--trials 1 --arms stock,bluclawd --max-dollars 2`, with `--scenarios investigate --max-tokens 200000`, `--scenarios parallel --max-tokens 400000`, or `--arms bluclawd --scenarios review --max-tokens 600000`.
 
 | arm | correct | wall ms | tokens | cost $ | parent requests | Runs started |
 |---|---|---|---|---|---|---|
@@ -115,6 +115,7 @@ One trial each of `investigate` and `parallel`, stock vs bluclawd, on `openai-co
 | investigate: bluclawd | yes | 10797 | 21517 | 0.0143 | 4 | 0 |
 | parallel: stock | yes | 29384 | 24392 | 0.0195 | 8 | — |
 | parallel: bluclawd | yes | 24266 | 44528 | 0.0310 | 8 | 0 |
+| review: bluclawd | yes | 49534 | 52477 | 0.0476 | 7 | 1 (reviewer, 657 ms startup) |
 
-- **The model delegated nothing in either scenario**, so no Run's pi ran on the real provider. Its guidance tells it to do small work itself, and the fixture tasks are small. The bluclawd orchestrator worked on the real provider; the extra tokens are the tools' cost even when unused (see above).
-- **One trial per scenario** shows no delegation quality and supports no cost or speed claim. Seeing a Run on a real provider needs a task the model chooses to delegate, or one that tells it to.
+- **In `investigate` and `parallel` the model delegated nothing**: its guidance tells it to do small work itself, and the fixture tasks are small. **In `review`, which asks for an independent review, it started one reviewer Run** (`duration-review`, backend `rpc`). That Run's pi ran on the real provider and its Report's outcome was `completed`; the final tree passed. A stock arm was not run for `review`, since stock pi has no independent reviewer. The bluclawd orchestrator worked on the real provider; the extra tokens are the tools' cost even when unused (see above).
+- **One trial per scenario** shows no delegation quality and supports no cost or speed claim.
