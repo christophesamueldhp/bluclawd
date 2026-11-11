@@ -43,8 +43,8 @@ import {
 	rpcRunTools,
 	WORKTREE_TOOLS,
 } from "../ext/subagents/rpc-runs.ts";
-import { type IsolatedWorkspace, workspaceInstructions, worktreePath } from "../ext/subagents/run-worktree.ts";
-import type { SubagentRunExecuteParams } from "../ext/subagents/runs.ts";
+import { type IsolatedWorkspace, workspaceInstructions } from "../ext/subagents/run-worktree.ts";
+import { createRunId, type SubagentRunExecuteParams } from "../ext/subagents/runs.ts";
 
 const REPO = fileURLToPath(new URL("..", import.meta.url));
 
@@ -287,7 +287,7 @@ function contributions(measured: Prompt, baseline: Prompt): Contribution[] {
  */
 async function runInstructions(scratch: Scratch, definition: AgentDefinition, tools: string[]): Promise<string> {
 	const runDir = mkdtempSync(join(scratch.runsDir, `${definition.name}-`));
-	const runId = `sub_footprint_${definition.name}`;
+	const runId = createRunId();
 	const launch = {
 		name: definition.name,
 		definition,
@@ -315,7 +315,11 @@ async function runInstructions(scratch: Scratch, definition: AgentDefinition, to
 	const report = readFileSync(join(runDir, "instructions.md"), "utf8").slice(definition.instructions.length);
 	// A run given a tool that changes files works in a worktree of its own, which it is told of.
 	const writes = tools.some((tool) => WORKTREE_TOOLS.includes(tool));
-	const workspace = { root: worktreePath(scratch.agentDir, runId), baseline: { source: scratch.cwd } };
+	// Paths of a typical machine, not this one's: the figure does not move with where it is measured.
+	const workspace = {
+		root: `/Users/user/.pi/agent/bluclawd/worktrees/${runId}`,
+		baseline: { source: "/Users/user/Projects/project" },
+	};
 	return (
 		definition.instructions +
 		(writes ? `\n${workspaceInstructions(workspace as IsolatedWorkspace, true, tools.includes("bash"))}` : "") +

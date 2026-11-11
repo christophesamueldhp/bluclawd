@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { capturePrefixes, capturePrompt } from "../scripts/prompt-footprint.ts";
 
 /**
@@ -9,17 +9,14 @@ const CEILING = 23_957;
 
 const platform = Object.getOwnPropertyDescriptor(process, "platform");
 
-// The `subagent` description names the platform off darwin, which makes the footprint larger there.
-beforeEach(() => {
-	Object.defineProperty(process, "platform", { value: "darwin" });
-});
-
 afterEach(() => {
 	if (platform) Object.defineProperty(process, "platform", platform);
 });
 
 describe("Prompt footprint", () => {
 	it("the orchestrator's stays at or under its ceiling", async () => {
+		// The `subagent` description names the platform off darwin, which makes the footprint larger there.
+		Object.defineProperty(process, "platform", { value: "darwin" });
 		const { footprint } = await capturePrompt();
 		expect(footprint).toBeLessThanOrEqual(CEILING);
 	});
