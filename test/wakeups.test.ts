@@ -49,7 +49,9 @@ const textOf = (content: unknown) =>
  * as pi started on it would). The clock is faked from 13:30 (and still moving, so pi's own timers run); a second
  * start in the same test keeps it. Each model call records the context it saw.
  */
-async function startSession(options: { dir?: string; sessionFile?: string } = {}) {
+async function startSession(
+	options: { dir?: string; sessionFile?: string; provider?: string; lateAuth?: boolean } = {},
+) {
 	if (!vi.isFakeTimers()) {
 		vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"], shouldAdvanceTime: true, now: NOW });
 	}
@@ -64,7 +66,15 @@ async function startSession(options: { dir?: string; sessionFile?: string } = {}
 		allowModelNetwork: false,
 		refreshOnCreate: true,
 	});
-	const faux = fauxProvider({ provider: `faux-wakeups-${++fauxProviders}`, models: [{ id: "faux-main" }] });
+	const faux = fauxProvider({
+		provider: options.provider ?? `faux-wakeups-${++fauxProviders}`,
+		models: [{ id: "faux-main" }],
+	});
+	// `lateAuth`: its auth is not checked yet when pi resumes the session, as an extension's provider may not be (#318).
+	let authChecked = !options.lateAuth;
+	if (options.lateAuth && faux.provider.auth.apiKey) {
+		faux.provider.auth.apiKey.check = async () => (authChecked ? { type: "api_key", source: "test" } : undefined);
+	}
 	modelRuntime.registerNativeProvider(faux.provider);
 	await modelRuntime.refresh({ allowNetwork: false });
 	const settingsManager = SettingsManager.inMemory({ compaction: { enabled: false }, retry: { enabled: false } });
@@ -89,7 +99,8 @@ async function startSession(options: { dir?: string; sessionFile?: string } = {}
 				services,
 				sessionManager,
 				sessionStartEvent,
-				model: faux.getModel("faux-main"),
+				// Resumed as pi resumes one on its own: the model the session recorded, if pi can restore it.
+				model: options.lateAuth ? undefined : faux.getModel("faux-main"),
 				thinkingLevel: "low",
 				noTools: "builtin",
 			});
@@ -104,6 +115,7 @@ async function startSession(options: { dir?: string; sessionFile?: string } = {}
 		},
 	);
 	runtimes.push(runtime);
+	authChecked = true;
 	// As pi binds a session; without a binding a reload starts no new session.
 	const bind = (session: AgentSessionRuntime["session"]) =>
 		session.bindExtensions({ mode: "print", shutdownHandler: () => {} });
@@ -336,6 +348,25 @@ describe("a wake-up's lifetime", () => {
 		expect(textOf(second.at(-1)?.content)).toContain("Second thing.");
 		expect(textOf(second.at(-1)?.content)).toContain("it was due at 2026-11-10 13:35");
 		expect(wakeups.list()).toEqual([]);
+	});
+
+	it("fires in the model the session recorded, though pi resumed it before that provider's auth was checked", async () => {
+		const first = await startSession();
+		first.replies([
+			call("schedule_wakeup", { prompt: "Check the deploy.", delay: 120 }),
+			fauxAssistantMessage("Scheduled."),
+		]);
+		await first.session.prompt("deploy", { expandPromptTemplates: false });
+		const { sessionFile, model, thinkingLevel } = first.session;
+		crash(first.runtime);
+		vi.setSystemTime(NOW + 60 * MINUTE);
+
+		const reopened = await startSession({ dir: first.dir, sessionFile, provider: model?.provider, lateAuth: true });
+		reopened.replies([fauxAssistantMessage("Deploy is fine.")]);
+		await waitFor(() => reopened.seen.length === 1);
+		expect(lastText(reopened.seen[0])).toContain("Check the deploy.");
+		expect(reopened.session.model).toMatchObject({ provider: model?.provider, id: model?.id });
+		expect(reopened.session.thinkingLevel).toBe(thinkingLevel);
 	});
 
 	/** Another stored session, to `/resume`. */

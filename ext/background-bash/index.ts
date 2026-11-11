@@ -64,6 +64,7 @@ import {
 	subscribeNotificationHold,
 } from "./notification-hold.ts";
 import { findOrphanShells, orphanShellMessage, SHELL_END_ENTRY, SHELL_START_ENTRY } from "./orphan-shells.ts";
+import { restoreSessionModel } from "./session-model.ts";
 import { type TaskRow, TasksDialog, taskRows } from "./tasks-dialog.ts";
 import {
 	isWakeupTaskId,
@@ -516,7 +517,9 @@ const backgroundBash: InlineExtension = {
 			refresh();
 		};
 
-		pi.on("session_start", (event, startCtx) => {
+		pi.on("session_start", async (event, startCtx) => {
+			// First: a due wake-up, restored below, starts its turn at once, and must have the session's model.
+			await restoreSessionModel(pi, startCtx);
 			ctx = startCtx;
 			setMainSession({
 				sendMessage: (message, delivery) => pi.sendMessage(message, delivery),
