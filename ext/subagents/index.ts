@@ -38,6 +38,7 @@ import {
 } from "./definitions.ts";
 import type { RunEntry } from "./directory.ts";
 import { createGenerations, type ParentNotice, reportToParent } from "./generations.ts";
+import { registerIntegration } from "./integration.ts";
 import {
 	fromRunText,
 	PARENT_MESSAGE_ADDRESS,
@@ -695,6 +696,13 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 		// Only runs on pi's RPC that edit have worktrees of their own; only the user removes one that holds changes.
 		if (!launchedBy && rpcRunsEnabled()) {
 			registerWorkspaceCleanup(pi, { agentDir: resolveAgentDir, scope: () => parentScope.current(), directory });
+			registerIntegration(pi, {
+				agentDir: resolveAgentDir,
+				scope: () => parentScope.current(),
+				onBranch: (entryId) => parentScope.onBranch(entryId),
+				directory,
+				whenFinal: (runId) => scheduler.whenFinal(runId),
+			});
 		}
 
 		// Only with runs on pi's RPC, whose finished runs a message does not continue.

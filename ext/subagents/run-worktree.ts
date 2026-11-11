@@ -47,7 +47,7 @@ const GIT_TIMEOUT_MS = 60_000;
 /** As many changed paths as a Report lists; the rest are counted. */
 const MAX_LISTED_CHANGES = 50;
 
-function gitEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
+export function gitEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
 	const env = { ...process.env };
 	for (const name of REDIRECTING_GIT_ENV) delete env[name];
 	return {
@@ -63,7 +63,7 @@ function gitEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
 /** Never the repository's hooks: nothing of the user's runs because a run was admitted. */
 const gitArgs = (args: string[]) => ["-c", "core.hooksPath=/dev/null", ...args];
 
-function gitSync(cwd: string, args: string[], env = gitEnv()): string {
+export function gitSync(cwd: string, args: string[], env = gitEnv()): string {
 	const result = spawnSync("git", gitArgs(args), { cwd, env, encoding: "utf8", timeout: GIT_TIMEOUT_MS });
 	if (result.status !== 0) {
 		throw new Error((result.stderr || result.error?.message || `git ${args[0]} failed`).trim().split("\n")[0]);
@@ -71,7 +71,7 @@ function gitSync(cwd: string, args: string[], env = gitEnv()): string {
 	return result.stdout.trim();
 }
 
-function git(cwd: string, args: string[], env = gitEnv()): Promise<string> {
+export function git(cwd: string, args: string[], env = gitEnv()): Promise<string> {
 	return new Promise((resolve, reject) => {
 		execFile(
 			"git",
@@ -86,7 +86,7 @@ function git(cwd: string, args: string[], env = gitEnv()): Promise<string> {
 }
 
 /** Runs `use` with a scratch index file, copied from `from` when given, and removes it after. */
-function withScratchIndex<T>(from: string | undefined, use: (index: string) => T): T {
+export function withScratchIndex<T>(from: string | undefined, use: (index: string) => T): T {
 	const dir = mkdtempSync(join(tmpdir(), "bluclawd-index-"));
 	const index = join(dir, "index");
 	if (from && existsSync(from)) copyFileSync(from, index);

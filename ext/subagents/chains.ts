@@ -52,6 +52,11 @@ function chainManifestPath(agentDir: string, parentSessionId: string, chain: str
 	return join(getSubagentsRootDir(agentDir), parentSessionId, "chains", `${chain}.md`);
 }
 
+/** Where a settled chain's {@link ChainResultDetails} are kept, beside its manifest. */
+export function chainResultPath(agentDir: string, parentSessionId: string, chain: string): string {
+	return join(getSubagentsRootDir(agentDir), parentSessionId, "chains", `${chain}.json`);
+}
+
 /** What became of a step: it ran, or was refused or stopped before it started, or never got its turn. */
 type StepResult = { member: BatchMember } | { blocked: string } | { cancelled: string } | undefined;
 
@@ -308,6 +313,12 @@ export async function runChain(
 			...(workspace ? { workspace: { root: workspace.root, baseline: workspace.baseline } } : {}),
 			truncated,
 		};
+		// What Integration takes the chain's readiness and worktree from, after this call is long gone.
+		try {
+			writeAtomicPrivateFile(chainResultPath(agentDir, start.parentSessionId, chain), JSON.stringify(details));
+		} catch {
+			// The chain then cannot be integrated, which Integration says.
+		}
 		return { text, details };
 	};
 
