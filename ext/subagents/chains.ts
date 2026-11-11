@@ -215,6 +215,7 @@ export async function runChain(
 		if (!now || !deps.scope.inScope(start) || !deps.scope.onBranch(start.originEntryId)) {
 			return { ok: false, error: "its orchestrator's session or branch changed since the chain began" };
 		}
+		if (writer >= 0 && !workspace) return { ok: false, error: "the worktree of its chain is not stored" };
 		const step = steps[i];
 		const own = "run" in step ? step.run.task : step.task;
 		const handoff = handoffText(agentDir, before, MAX_TASK_INPUT_BYTES - bytes(own));
