@@ -39,14 +39,15 @@ const DEFAULT_CAPACITY = 4;
 /**
  * `subagents.maxActive` in the user's own settings, in agent dir `agentDir`: how many runs the daemon keeps active at
  * once. The daemon reads it itself, so neither a project's settings nor anything an orchestrator or its model sends
- * can raise it.
+ * can raise it. Undefined while the settings cannot be read, as when their writer has written only part of them: a
+ * failed read is no reason to raise the bound.
  */
-export function maxActiveRuns(agentDir: string): number {
+export function maxActiveRuns(agentDir: string): number | undefined {
 	let max: unknown;
 	try {
 		max = JSON.parse(readFileSync(join(agentDir, "settings.json"), "utf8"))?.subagents?.maxActive;
-	} catch {
-		return DEFAULT_CAPACITY;
+	} catch (error) {
+		return (error as NodeJS.ErrnoException).code === "ENOENT" ? DEFAULT_CAPACITY : undefined;
 	}
 	return typeof max === "number" && Number.isInteger(max) && max > 0 ? max : DEFAULT_CAPACITY;
 }
@@ -60,8 +61,8 @@ export interface RunQueueDeps {
 	 * found by the run's `marker`: those are ended then, since nothing of the run is left to own them.
 	 */
 	running: (pid: number, marker: string | undefined) => boolean;
-	/** The user's bound on runs active at once, as it is now (maxActiveRuns). */
-	capacity: () => number;
+	/** The user's bound on runs active at once, as it is now (maxActiveRuns); undefined keeps the bound last read. */
+	capacity: () => number | undefined;
 	/**
 	 * Where the launched runs are kept for the daemon started next: their hosts outlive this one, and hold their slots
 	 * until they end there too.
@@ -122,7 +123,7 @@ export class RunQueue {
 
 	constructor(deps: RunQueueDeps) {
 		this.deps = deps;
-		this.capacity = deps.capacity();
+		this.capacity = deps.capacity() ?? DEFAULT_CAPACITY;
 		// Those still running when an earlier daemon ended hold their slots here, until their processes are gone.
 		for (const { run, parent, pid, contained } of deps.store?.load() ?? []) {
 			if (!deps.running(pid, markerOf(run, contained))) continue;
@@ -149,7 +150,7 @@ export class RunQueue {
 	 * change to it applies from the next.
 	 */
 	claim(run: string, parent: string): Promise<boolean> {
-		this.capacity = this.deps.capacity();
+		this.capacity = this.deps.capacity() ?? this.capacity;
 		const now = this.deps.now();
 		let entry = this.entries.get(run);
 		if (!entry) {

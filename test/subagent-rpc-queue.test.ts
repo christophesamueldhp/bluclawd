@@ -43,6 +43,40 @@ function processes(real: RealPi, marker: string): string[] {
 		.filter((line) => line.includes(base) && line.includes(marker));
 }
 
+/**
+ * `wait`, failing with each run's status, error and model requests as they are then: a run that started out of turn
+ * shows whether another's slot was lost or never held (#321).
+ */
+async function showingRuns(real: RealPi, wait: () => Promise<unknown>): Promise<void> {
+	try {
+		await wait();
+	} catch (error) {
+		const root = join(real.agentDir, "bluclawd", "subagents");
+		const runs = readdirSync(root).flatMap((session) =>
+			readdirSync(join(root, session)).flatMap((run) => {
+				const dir = join(root, session, run);
+				if (!existsSync(join(dir, "record.json"))) return [];
+				const { name, status, generation, errorMessage } = readJson(join(dir, "record.json"));
+				const hostError = existsSync(join(dir, "rpc-host.error"))
+					? readFileSync(join(dir, "rpc-host.error"), "utf8")
+					: undefined;
+				return [
+					JSON.stringify({
+						name,
+						status,
+						generation,
+						errorMessage,
+						hostError,
+						requests: real.requests(name).length,
+					}),
+				];
+			}),
+		);
+		const main = ["alpha", "beta"].map((name) => `${name}: ${real.requests(name).length} requests`);
+		throw new Error(`${error instanceof Error ? error.message : String(error)}\n${[...runs, ...main].join("\n")}`);
+	}
+}
+
 /** An orchestrator pane whose runs are RPC children, which load the faux provider as the pane does. */
 async function startOrchestrator(): Promise<RealPi> {
 	vi.stubEnv("BLUCLAWD_RPC_PROVIDER_EXTENSIONS", FAUX);
@@ -118,7 +152,7 @@ describe.skipIf(!hasTmux)("the daemon's queue of RPC runs", () => {
 		real.start(["--name", "beta", "--", "delegate"]);
 		await real.waitForRequests("beta", 2);
 		real.start(["--name", "alpha", "--", "delegate"]);
-		await waitFor(() => expect(started()).toEqual(["a1", "a2"]));
+		await showingRuns(real, () => waitFor(() => expect(started()).toEqual(["a1", "a2"])));
 		writeFileSync(gate("resume"), "");
 		const beta = await real.waitForRequests("beta", 3);
 		expect(
@@ -132,9 +166,9 @@ describe.skipIf(!hasTmux)("the daemon's queue of RPC runs", () => {
 
 		// a3 was queued first, but alpha was served last.
 		writeFileSync(gate("a1"), "");
-		await waitFor(() => expect(started()).toEqual(["a1", "a2", "kept"]));
+		await showingRuns(real, () => waitFor(() => expect(started()).toEqual(["a1", "a2", "kept"])));
 		writeFileSync(gate("a2"), "");
-		await waitFor(() => expect(started()).toEqual(["a1", "a2", "a3", "kept"]));
+		await showingRuns(real, () => waitFor(() => expect(started()).toEqual(["a1", "a2", "a3", "kept"])));
 		for (const name of [...alpha, "kept"]) writeFileSync(gate(name), "");
 		await waitFor(() => {
 			for (const name of [...alpha, "kept"]) {
