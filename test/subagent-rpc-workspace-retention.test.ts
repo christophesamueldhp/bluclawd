@@ -112,8 +112,11 @@ describe.skipIf(!hasTmux)("the workspace of an RPC run that edits", () => {
 		const repo = real.cwd;
 		dirtyRepository(repo);
 		const gate = join(real.cwd, "..", "first.go");
+		// One at a time, so the one queued is known; no Report arrives meanwhile to take a step of the script.
 		real.script("main", [
-			{ calls: [launch("first"), launch("queued")] },
+			launch("first"),
+			{ text: "waiting" },
+			launch("queued"),
 			{ text: "waiting" },
 			{ tool: "subagent_stop", args: { agent: "queued" } },
 			{ text: "stopped it" },
@@ -127,14 +130,17 @@ describe.skipIf(!hasTmux)("the workspace of an RPC run that edits", () => {
 		const pane = real.start(["--", "delegate"]);
 		await real.waitForRequests("first", 2);
 		await real.waitForRequests("main", 2);
+		real.tmux.sendKeys(pane, ["launch queued", "Enter"]);
+		await real.waitForRequests("main", 4);
 		const queued = worktreeOf(real, "queued");
 		await waitFor(() => expect(leftInRepository(repo).worktrees).toHaveLength(2));
+		expect(recordOf(real, "queued").status).toBe("starting");
 
 		real.tmux.sendKeys(pane, ["stop queued", "Enter"]);
-		await real.waitForRequests("main", 4);
+		await real.waitForRequests("main", 6);
 		expect(recordOf(real, "queued").status).toBe("cancelled");
 		writeFileSync(gate, "");
-		await real.waitForRequests("main", 5);
+		await real.waitForRequests("main", 7);
 
 		expect(real.requests("queued")).toHaveLength(0);
 		// Its worktree, Git's entry for it and its baseline's ref are gone; the run that worked keeps all of them.
@@ -153,11 +159,17 @@ describe.skipIf(!hasTmux)("the workspace of an RPC run that edits", () => {
 		const repo = real.cwd;
 		dirtyRepository(repo);
 		const names = ["done", "broke", "halted", "built"];
+		// A batch, then the run stopped on its own: no Report arrives to take a step of the script.
 		real.script("main", [
-			{ calls: names.map((name) => launch(name)) },
+			{
+				tool: "subagent",
+				args: { tasks: ["done", "broke", "built"].map((name) => ({ agent: writer, name, task: "Edit." })) },
+			},
+			{ text: "batch settled" },
+			launch("halted"),
 			{ text: "waiting" },
 			{ tool: "subagent_stop", args: { agent: "halted" } },
-			...Array(6).fill({ text: "noted" }),
+			{ text: "stopped it" },
 		]);
 		const changed = (name: string) => ({ tool: "write", args: { path: `${name}.txt`, content: `${name}\n` } });
 		real.script("done", [changed("done"), { text: "Done." }]);
@@ -169,9 +181,12 @@ describe.skipIf(!hasTmux)("the workspace of an RPC run that edits", () => {
 			{ text: "Built." },
 		]);
 		const pane = real.start(["--", "delegate"]);
-		await real.waitForRequests("halted", 2);
 		await real.waitForRequests("main", 2);
+		real.tmux.sendKeys(pane, ["launch halted", "Enter"]);
+		await real.waitForRequests("halted", 2);
+		await real.waitForRequests("main", 4);
 		real.tmux.sendKeys(pane, ["stop halted", "Enter"]);
+		await real.waitForRequests("main", 6);
 		await waitFor(() => {
 			expect(recordOf(real, "done").status).toBe("closed");
 			expect(recordOf(real, "broke").status).toBe("closed");
