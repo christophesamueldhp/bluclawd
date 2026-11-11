@@ -1,10 +1,13 @@
 /**
  * The sandbox's settings and the `srt` config they make with the deny rules.
  */
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { SettingsManager } from "@earendil-works/pi-coding-agent";
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { pathRule } from "../ext/permissions/rules.ts";
-import { checkRuntimeConfig, parseSandbox, runtimeConfig, sandboxSetting } from "../ext/sandbox/config.ts";
+import { checkRuntimeConfig, parseSandbox, runtimeConfig, sandboxSetting, serverDirs } from "../ext/sandbox/config.ts";
 
 const none = { allowedDomains: [], allowWrite: [], denyRead: [], denyWrite: [], written: {} };
 
@@ -75,6 +78,7 @@ describe("runtimeConfig", () => {
 			cwd,
 			home,
 			tmp,
+			[],
 		);
 		expect(config.filesystem.denyRead).toEqual([
 			"/proj/**/.env*",
@@ -86,7 +90,7 @@ describe("runtimeConfig", () => {
 	});
 
 	it("drops a trailing separator, which srt refuses on a deny glob", async () => {
-		const config = runtimeConfig(none, ["Read(**/secrets/)", "Read(~/)", "Edit(//)"], cwd, home, tmp);
+		const config = runtimeConfig(none, ["Read(**/secrets/)", "Read(~/)", "Edit(//)"], cwd, home, tmp, []);
 		expect(config.filesystem.denyRead).toEqual(["/proj/**/secrets", "/home/u"]);
 		expect(config.filesystem.denyWrite).toEqual(["/"]);
 		expect(typeof (await checkRuntimeConfig(config))).toBe("object");
@@ -99,6 +103,7 @@ describe("runtimeConfig", () => {
 			cwd,
 			home,
 			tmp,
+			[],
 		);
 		expect(config.filesystem.denyWrite).toEqual(["/proj/.git/**", "/proj/**/.env*"]);
 		expect(config.filesystem.denyRead).toEqual([]);
@@ -117,14 +122,94 @@ describe("runtimeConfig", () => {
 			cwd,
 			home,
 			tmp,
+			[],
 		);
 		expect(config).toEqual({
+			credentials: { files: [] },
 			network: { allowedDomains: ["github.com"], deniedDomains: [] },
 			filesystem: {
 				denyRead: ["/home/u/**/.env*"],
 				allowWrite: ["/proj", "/tmp/x", "/home/u/.npm"],
 				denyWrite: ["/etc"],
 			},
+		});
+	});
+});
+
+describe("bluclawd's server directories", () => {
+	it("are denied as credentials, after the user's own, which stay as written", async () => {
+		const setting = parseSandbox({
+			enabled: true,
+			credentials: {
+				envVars: [{ name: "API_TOKEN", mode: "deny" }],
+				files: [{ path: "~/.aws/credentials", mode: "deny" }],
+			},
+		});
+		if (setting.kind !== "on") throw new Error(setting.kind);
+		const config = runtimeConfig(setting.settings, [], "/proj", "/home/u", "/tmp/x", [
+			"/srv/private",
+			"/home/u/.pi/server",
+		]);
+		expect(config.credentials).toEqual({
+			envVars: [{ name: "API_TOKEN", mode: "deny" }],
+			files: [
+				{ path: "~/.aws/credentials", mode: "deny" },
+				{ path: "/srv/private", mode: "deny" },
+				{ path: "/home/u/.pi/server", mode: "deny" },
+			],
+		});
+		expect(typeof (await checkRuntimeConfig(config))).toBe("object");
+	});
+
+	it("are denied with no credentials setting at all", () => {
+		expect(runtimeConfig(none, [], "/proj", "/home/u", "/tmp/x", ["/home/u/.pi/server"]).credentials).toEqual({
+			files: [{ path: "/home/u/.pi/server", mode: "deny" }],
+		});
+	});
+
+	it("leave a credentials setting that is not one refused, so the sandbox does not start", () => {
+		expect(parseSandbox({ enabled: true, credentials: "junk" })).toEqual({
+			kind: "invalid",
+			reason: "sandbox.credentials is not an object",
+		});
+		expect(parseSandbox({ enabled: true, credentials: { files: "x" } })).toEqual({
+			kind: "invalid",
+			reason: "sandbox.credentials.files is not a list",
+		});
+	});
+
+	describe("as this pi resolves them", () => {
+		let root: string;
+		beforeEach(() => {
+			root = mkdtempSync(join(tmpdir(), "bluclawd-server-dirs-"));
+		});
+		afterEach(() => rmSync(root, { recursive: true, force: true }));
+
+		it("are the default one alone, by real path, even before it exists", () => {
+			const real = join(realpathSync(root), "home");
+			mkdirSync(real);
+			symlinkSync(real, join(root, "home-link"));
+			vi.stubEnv("HOME", join(root, "home-link"));
+			vi.stubEnv("PI_SERVER_DIR", "");
+			vi.stubEnv("PI_CONFIG_DIR", "");
+			expect(serverDirs()).toEqual([join(real, ".pi", "server")]);
+		});
+
+		it("are a private PI_SERVER_DIR and the default one, each by real path", () => {
+			const home = realpathSync(root);
+			mkdirSync(join(home, "real"));
+			symlinkSync(join(home, "real"), join(home, "link"));
+			vi.stubEnv("HOME", home);
+			vi.stubEnv("PI_SERVER_DIR", join(root, "link", "private", "server"));
+			expect(serverDirs()).toEqual([join(home, "real", "private", "server"), join(home, ".pi", "server")]);
+		});
+
+		it("are the PI_CONFIG_DIR's server directory and the default one", () => {
+			const home = realpathSync(root);
+			vi.stubEnv("HOME", home);
+			vi.stubEnv("PI_SERVER_DIR", "");
+			vi.stubEnv("PI_CONFIG_DIR", join(home, "config"));
+			expect(serverDirs()).toEqual([join(home, "config", "server"), join(home, ".pi", "server")]);
 		});
 	});
 });
@@ -138,12 +223,12 @@ describe("srt's own settings", () => {
 	const setting = parseSandbox({ enabled: true, ...written });
 	const config =
 		setting.kind === "on"
-			? runtimeConfig(setting.settings, ["Read(**/.env*)"], "/proj", "/home/u", "/tmp/x")
+			? runtimeConfig(setting.settings, ["Read(**/.env*)"], "/proj", "/home/u", "/tmp/x", [])
 			: undefined;
 
 	it("reach the config as written, around bluclawd's own lists", () => {
 		expect(config).toEqual({
-			credentials: { envVars: [{ name: "API_TOKEN", mode: "deny" }] },
+			credentials: { envVars: [{ name: "API_TOKEN", mode: "deny" }], files: [] },
 			network: { allowedDomains: ["github.com"], deniedDomains: ["*:22"], strictAllowlist: true },
 			filesystem: {
 				allowRead: ["~/.ssh/known_hosts"],
@@ -159,7 +244,7 @@ describe("srt's own settings", () => {
 	});
 
 	it("name a value srt refuses, or a key it does not know", async () => {
-		const base = runtimeConfig(none, [], "/proj", "/home/u", "/tmp/x");
+		const base = runtimeConfig(none, [], "/proj", "/home/u", "/tmp/x", []);
 		expect(await checkRuntimeConfig({ ...base, credentials: { envVars: [{ name: "X", mode: "hide" }] } })).toContain(
 			"sandbox.credentials.envVars.0.mode",
 		);

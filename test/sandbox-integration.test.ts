@@ -63,6 +63,7 @@ describe.skipIf(!supported)(
 				dir,
 				homedir(),
 				tmpdir(),
+				[],
 			);
 			const asker = networkAsker(() => ({ hasUI: true, ui: { confirm } }) as never);
 			expect(await startSandbox(config, asker.ask)).toEqual({ kind: "ready" });
