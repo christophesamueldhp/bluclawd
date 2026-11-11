@@ -193,7 +193,8 @@ describe("Task 3 (M1) — Run state and cancellation", () => {
 
 		stuckGate.resolve({ status: "failed", summaryText: "late" });
 		const done = await run.completion;
-		expect(done.status).toBe("closed");
+		// How the runner says it ended stands: a stop it could not carry out is no close.
+		expect(done.status).toBe("failed");
 		expect(scheduler.listActiveRuns()).toEqual([]);
 	});
 });
@@ -280,7 +281,7 @@ describe("Ticket #12 — Completion resolves only after durable finalization", (
 		expect(settled).toBe(false);
 		finalizerGate.resolve();
 		await drained;
-		expect((await handle.completion).status).toBe("closed");
+		expect((await handle.completion).status).toBe("failed");
 		await tick();
 		expect(changesAfterSettled).toBe(0);
 	});

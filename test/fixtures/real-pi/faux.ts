@@ -16,20 +16,36 @@ import {
 } from "@earendil-works/pi-ai";
 import { type ExtensionAPI, getAgentDir, VERSION } from "@earendil-works/pi-coding-agent";
 
-/** `stallMs`: the answer takes that long, unless the request is aborted first (as Esc does). */
-export type FauxStep = { text: string; stallMs?: number } | { tool: string; args: JsonObject };
+/**
+ * `stallMs`: the answer takes that long; `until`: it waits for that file to exist. Either ends once the request is
+ * aborted (as Esc does). `calls`: several tool calls in one answer, which pi runs side by side. `error`: the answer
+ * fails with that message, as a provider error does.
+ */
+export type FauxStep = (
+	| { text: string; stallMs?: number; error?: string }
+	| { tool: string; args: JsonObject }
+	| { calls: { tool: string; args: JsonObject }[] }
+) & { until?: string };
 
 export const FAUX_MODELS = [
 	{ id: "faux-1", reasoning: false },
 	{ id: "faux-2", reasoning: true },
+	{ id: "faux-3", reasoning: true },
 ];
 
 export function fauxDir(agentDir: string): string {
 	return join(agentDir, "faux");
 }
 
-export default function fauxPi(pi: ExtensionAPI): void {
-	const faux = fauxProvider({ provider: "faux", models: FAUX_MODELS });
+export default fauxModels(FAUX_MODELS);
+
+/** The faux provider with `models`: a fixture of its own may give a pi another catalog than the default one. */
+export function fauxModels(models: typeof FAUX_MODELS) {
+	return (pi: ExtensionAPI) => fauxPi(pi, models);
+}
+
+function fauxPi(pi: ExtensionAPI, models: typeof FAUX_MODELS): void {
+	const faux = fauxProvider({ provider: "faux", models });
 	const respond: FauxResponseFactory = async (context, options, _state, model) => {
 		faux.appendResponses([respond]);
 		const dir = fauxDir(getAgentDir());
@@ -39,7 +55,7 @@ export default function fauxPi(pi: ExtensionAPI): void {
 		const asked = existsSync(log) ? readFileSync(log, "utf8").split("\n").filter(Boolean).length : 0;
 		appendFileSync(
 			log,
-			`${JSON.stringify({ piVersion: VERSION, model: model.id, reasoning: options?.reasoning, messages: context.messages })}\n`,
+			`${JSON.stringify({ piVersion: VERSION, provider: model.provider, model: model.id, reasoning: options?.reasoning, messages: context.messages })}\n`,
 		);
 		const script = join(dir, `${key}.json`);
 		const step = (existsSync(script) ? (JSON.parse(readFileSync(script, "utf8")) as FauxStep[]) : [])[asked];
@@ -54,9 +70,18 @@ export default function fauxPi(pi: ExtensionAPI): void {
 				});
 			});
 		}
+		if (step.until) {
+			const { signal } = options ?? {};
+			while (!existsSync(step.until) && !signal?.aborted) await new Promise((resolve) => setTimeout(resolve, 25));
+		}
+		if ("text" in step) {
+			const failed = step.error === undefined ? {} : { stopReason: "error" as const, errorMessage: step.error };
+			return fauxAssistantMessage(fauxText(step.text), failed);
+		}
+		const calls = "calls" in step ? step.calls : [step];
 		return fauxAssistantMessage(
-			"tool" in step ? fauxToolCall(step.tool, step.args) : fauxText(step.text),
-			"tool" in step ? { stopReason: "toolUse" } : undefined,
+			calls.map(({ tool, args }) => fauxToolCall(tool, args)),
+			{ stopReason: "toolUse" },
 		);
 	};
 	faux.setResponses([respond]);

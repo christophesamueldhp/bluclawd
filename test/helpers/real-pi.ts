@@ -27,7 +27,7 @@ export const PI_CLI = join(
 	dirname(fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent"))),
 	"bundle/cli.js",
 );
-const FAUX = fileURLToPath(new URL("../fixtures/real-pi/faux.ts", import.meta.url));
+export const FAUX = fileURLToPath(new URL("../fixtures/real-pi/faux.ts", import.meta.url));
 /** bluclawd's extensions a pane loads by default. */
 export const DEFAULT_EXTENSIONS = ["agent-view", "subagents"];
 
@@ -45,6 +45,7 @@ export interface FauxMessage {
 /** One request a session's model got. */
 export interface FauxRequest {
 	piVersion: string;
+	provider: string;
 	model: string;
 	reasoning?: string;
 	messages: FauxMessage[];
@@ -61,12 +62,16 @@ function killAll(pids: number[]): void {
 	}
 }
 
-/** The pis' hand-offs of sessions kept under `base` that still run. */
-function handOffs(base: string): number[] {
+/**
+ * What still runs on files under `base` once the tmux servers are gone: the pis' hand-offs, and the RPC runs' hosts
+ * and pis, which outlive the pane that launched them.
+ */
+function leftovers(base: string): number[] {
 	return spawnSync("ps", ["-ax", "-o", "pid=,command="], { encoding: "utf8" })
 		.stdout.split("\n")
-		.filter((line) => line.includes("hand-off.ts") && line.includes(basename(base)))
-		.map((line) => Number.parseInt(line, 10));
+		.filter((line) => line.includes(basename(base)))
+		.map((line) => Number.parseInt(line, 10))
+		.filter((pid) => pid !== process.pid);
 }
 
 function textOf(content: FauxMessage["content"]): string {
@@ -218,11 +223,11 @@ export async function startRealPi(options: { extensions?: string[] } = {}): Prom
 				.map(Number);
 			// A hung-up pi hands its session to the daemon once it has exited (hand-off.ts), starting a daemon if
 			// none runs, which would outlive the test. Killed outright, a pi hands nothing off; a hand-off from a
-			// run closed earlier is killed before the daemon goes.
+			// run closed earlier is killed before the daemon goes, and so is an RPC run's host and pi.
 			killAll(pis);
 			spawnSync("tmux", ["-S", tmux.socket, "kill-server"]);
 			spawnSync("tmux", ["-S", terminal, "kill-server"]);
-			killAll(handOffs(base));
+			killAll(leftovers(base));
 			await client.shutdownDaemon();
 			rmSync(base, { recursive: true, force: true, maxRetries: 10 });
 		},

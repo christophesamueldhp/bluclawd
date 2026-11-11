@@ -1,13 +1,11 @@
 /**
- * Runs as pi sessions of their own (ADR-0006): a run is an interactive pi in agent view's private
- * tmux server, its role its launch flags. Its task and instructions go in files, as tmux refuses a
- * long command line. Its bluclawd knows it is a run by PARENT_ENV, and reports to its orchestrator
- * through the daemon each time it settles; the orchestrator's foreground launch waits for the first,
- * and every other Report goes to the orchestrator as a notice that wakes it.
+ * Runs in tmux, from before runs ran on pi's RPC (ADR-0006, ADR-0010): such a run is an interactive pi in agent
+ * view's private tmux server. None starts any more; one still open when its orchestrator takes the new runtime is
+ * followed until it ends or is stopped. Its bluclawd knows it is a run by PARENT_ENV, and reports to its orchestrator
+ * through the daemon each time it settles; each Report goes to the orchestrator as a notice that wakes it.
  */
 
-import { readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { readFileSync } from "node:fs";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { AgentActivity } from "../../daemon/activity.ts";
 import type { SessionMessage, SessionUsage } from "../../daemon/ipc/protocol.ts";
@@ -15,7 +13,6 @@ import { OrchestratorClient } from "../../daemon/orchestrator-client.ts";
 import { textOf } from "../../daemon/session-state.ts";
 import { endPane, PARENT_ENV, RUN_DIR_ENV, RUN_TASK_ENV, Tmux } from "../../daemon/tmux.ts";
 import { ForegroundActivity } from "../agent-view/self-registration.ts";
-import type { AgentDefinition } from "./definitions.ts";
 import { SUBAGENT_MESSAGE_CUSTOM_TYPE } from "./messages.ts";
 import { fromRun, runTaskText } from "./run-messages.ts";
 import type { SubagentRunExecuteParams, SubagentRunOutcome } from "./runs.ts";
@@ -28,85 +25,21 @@ import {
 } from "./storage.ts";
 import { sessionUsage } from "./usage.ts";
 
-/** What a run is started as: its role and choices, resolved. */
+/** A run in tmux its orchestrator follows: where it is, and where it keeps its session and Reports. */
 export interface RunLaunch {
-	name: string;
-	definition: AgentDefinition;
-	/** `provider/id`. */
-	model: string;
-	thinkingLevel?: string;
-	/** Its first prompt; none for a Resume the user starts, who types in the run. */
-	task?: string;
-	cwd: string;
-	/** Where its session, task and instructions are kept. */
+	/** Where its session and Reports are kept. */
 	runDir: string;
-	/** The session a Resume reopens; a launch starts a new one in `runDir`. */
+	/** The session a Resume reopened, before runs ran on pi's RPC; else its newest in `runDir`. */
 	sessionFile?: string;
 	/** The orchestrator's tmux session. */
 	parent: string;
-	/** Whether the orchestrator trusts the project: the run starts in its trust, never asking. */
-	projectTrusted: boolean;
-	/** A pi already running as the run, which its orchestrator takes over after a reload: none is started. */
-	pane?: string;
-}
-
-/** The run's role as pi's launch flags. */
-export function runLaunchArgs(run: RunLaunch, instructionsFile: string): string[] {
-	const { tools } = run.definition;
-	return [
-		"--name",
-		run.name,
-		"--model",
-		run.model,
-		...(run.thinkingLevel ? ["--thinking", run.thinkingLevel] : []),
-		...(tools ? (tools.length > 0 ? ["--tools", tools.join(",")] : ["--no-tools"]) : []),
-		"--append-system-prompt",
-		instructionsFile,
-		...(run.sessionFile ? ["--session", run.sessionFile] : ["--session-dir", run.runDir]),
-		run.projectTrusted ? "--approve" : "--no-approve",
-	];
-}
-
-/** Start the run's pi in a pane of its own; returns its tmux session. */
-export function startRun(tmux: Pick<Tmux, "newSession">, run: RunLaunch): string {
-	const instructions = join(run.runDir, "instructions.md");
-	const task = join(run.runDir, "task.md");
-	writeFileSync(instructions, run.definition.instructions);
-	if (run.task !== undefined) writeFileSync(task, run.task);
-	return tmux.newSession({
-		cwd: run.cwd,
-		args: runLaunchArgs(run, instructions),
-		env: {
-			[PARENT_ENV]: run.parent,
-			[RUN_DIR_ENV]: run.runDir,
-			...(run.task !== undefined ? { [RUN_TASK_ENV]: task } : {}),
-		},
-	});
+	/** The pane its pi runs in, which its orchestrator takes over. */
+	pane: string;
 }
 
 /** The run's session file: the one a Resume reopened, else the newest pi wrote in its directory. */
 export function runSessionFile(run: Pick<RunLaunch, "runDir" | "sessionFile">): string | undefined {
 	return run.sessionFile ?? newestRunSession(run.runDir);
-}
-
-/**
- * Stops the run's turn in progress, as Esc does; its pi stays open. Asked through the daemon, not by pressing
- * Esc in its pane: a busy pi may read a lone Esc together with the next keys typed there. False when the run
- * cannot be reached.
- */
-export async function stopTurn(pane: string, from: string, signal?: AbortSignal): Promise<boolean> {
-	const client = new OrchestratorClient();
-	try {
-		await sendToRun(
-			(to, message) => client.send(to, message),
-			pane,
-			{ type: "session_message", kind: "stop", from },
-			signal,
-		);
-		return true;
-	} catch {
-		return false;
-	}
 }
 
 /**
@@ -186,6 +119,11 @@ export class RunReports {
 		});
 	}
 
+	/** Whether a call waits for the run's next Report: it is told of the run's end as well. */
+	awaited(runId: string): boolean {
+		return this.waiting.has(runId);
+	}
+
 	/** Gives a run's Report to the launch waiting for it; false when none waits. */
 	take(runId: string, report: RunReport): boolean {
 		const waiter = this.waiting.get(runId);
@@ -202,7 +140,7 @@ export class RunReports {
 }
 
 export interface TmuxRunDeps {
-	tmux: Pick<Tmux, "newSession" | "end" | "hasSession" | "shown" | "moveClients">;
+	tmux: Pick<Tmux, "end" | "hasSession" | "shown">;
 	reports: RunReports;
 	/** A Report no foreground launch took: it goes to the orchestrator. */
 	notify(report: RunReport): void;
@@ -215,26 +153,16 @@ export interface TmuxRunDeps {
 }
 
 /**
- * A run's life in its own pi, as the scheduler sees it: it starts the pi, then routes each Report until the
- * run is closed. It stays open between Reports, so only a Close ends it: its pi is hung up, as quitting does,
- * without asking it, and its session is kept for a Resume.
+ * A run's life in its own pi, as the scheduler sees it: it routes each Report until the run is closed. It stays open
+ * between Reports, so only a stop ends it: its pi is hung up, as quitting does, without asking it, and its session is
+ * kept.
  */
 export async function executeTmuxRun(
 	{ record, signal, controller }: SubagentRunExecuteParams,
 	launch: RunLaunch,
 	deps: TmuxRunDeps,
 ): Promise<SubagentRunOutcome> {
-	const previous = record.pane;
-	const pane = launch.pane ?? startRun(deps.tmux, launch);
-	// The pi of its last Generation, still open while a terminal shows it (closeRun): that terminal goes on in this one.
-	if (previous && previous !== pane && !launch.pane) {
-		try {
-			deps.tmux.moveClients(previous, pane);
-		} catch {
-			// Gone already.
-		}
-		endPane(deps.tmux, previous);
-	}
+	const { pane } = launch;
 	controller.recordPane(pane);
 	controller.markRunning();
 	let last = "";
@@ -267,7 +195,7 @@ export async function executeTmuxRun(
 	const pull = () => {
 		for (const stored of readRunReports(launch.runDir, delivered)) receive(storedReport(pane, stored), true);
 	};
-	// Taken over after a reload, or resumed: what it stored while no instance listened.
+	// Taken over after a reload: what it stored while no instance listened.
 	pull();
 	// Closed by its orchestrator, or its own pi exited (quit, crash): its session is kept either way.
 	let watch: ReturnType<typeof setInterval> | undefined;

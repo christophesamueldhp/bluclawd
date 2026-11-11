@@ -11,12 +11,12 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
-import { type ExtensionAPI, parseSessionEntries, type SessionEntry } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { SessionUsage } from "../../daemon/ipc/protocol.ts";
 import { sanitizeDiagnosticText } from "./diagnostics.ts";
 import { sanitizeReportText } from "./results.ts";
-import { isTerminalSubagentStatus, type SubagentRunRecord } from "./runs.ts";
-import { addSubagentUsage, createEmptySubagentUsage, sessionUsage } from "./usage.ts";
+import { isTerminalSubagentStatus, type RunRuntimeOutcome, type SubagentRunRecord } from "./runs.ts";
+import { addSubagentUsage, createEmptySubagentUsage } from "./usage.ts";
 
 export const SUBAGENT_RUN_CUSTOM_ENTRY = "bluclawd.subagent-run";
 export const MAX_AUTHORIZED_REPORT_VIEW_BYTES = 16 * 1024;
@@ -81,7 +81,7 @@ function ensurePrivateDir(dirPath: string): void {
 	}
 }
 
-function writeAtomicPrivateFile(filePath: string, content: string): void {
+export function writeAtomicPrivateFile(filePath: string, content: string): void {
 	const parentDir = dirname(filePath);
 	ensurePrivateDir(parentDir);
 	const tmpPath = `${filePath}.tmp.${process.pid}.${atomicWriteSeq++}`;
@@ -164,9 +164,16 @@ export function newestRunSession(runDir: string): string | undefined {
 /** A Report as its run stored it before sending it, numbered among the run's Reports. */
 export interface StoredRunReport {
 	seq: number;
+	/** What the run says of its work: its own claim. */
 	text: string;
+	/** How its work settled, as the runtime saw it; absent from a run in tmux, which stores its own Reports. */
+	outcome?: RunRuntimeOutcome;
 	usage?: SessionUsage;
 	sessionId?: string;
+	/** The run's generation that stored it; absent from a run in tmux. */
+	generation?: number;
+	/** How many messages posted to the run during its generation its pi never took: they stay in its sealed inbox. */
+	untaken?: number;
 }
 
 /** The run's own: the orchestrator rewrites `record.json` and `report.md`, so a run's Reports go in files of their own. */
@@ -302,8 +309,10 @@ function decodeLegacyStatus(record: SubagentRunRecord): void {
 	const legacy = record as { status: string; stopSource?: string };
 	if (legacy.status === "timed_out") record.stopReason ??= "Stopped by a deadline (legacy)";
 	if (legacy.status === "budget_exceeded") record.stopReason ??= "Stopped by a budget (legacy)";
-	// An in-process run that ended kept its session, as a closed run does: it can be resumed from it.
-	if (["completed", "cancelled", "timed_out", "budget_exceeded"].includes(legacy.status)) record.status = "closed";
+	// An in-process run that ended kept its session, as a closed run does: it can be resumed from it. A run on pi's
+	// RPC was cancelled as runs are now.
+	const ended = ["completed", "timed_out", "budget_exceeded", ...(record.backend === "rpc" ? [] : ["cancelled"])];
+	if (ended.includes(legacy.status)) record.status = "closed";
 	// A queued run never started, so reconciliation interrupts it like any other orphan.
 	if (legacy.status === "queued") record.status = "starting";
 	// A run from before runs were pis of their own, whose last turn had ended: an orphan, if it was never final.
@@ -527,25 +536,6 @@ export function recordRunSessionUsage(
 		...current.sessions,
 		[record.runId]: { ...current.sessions?.[record.runId], [sessionId]: usage },
 	};
-	writeLedgerFile(agentDir, current);
-}
-
-/**
- * Notes what a session from before runs were pis of their own had counted already, once, before a run resumes it:
- * the run's Reports carry that session's whole total, earlier turns included.
- */
-export function recordCountedSessionUsage(agentDir: string, parentSessionId: string, sessionFile: string): void {
-	let entries: ReturnType<typeof parseSessionEntries>;
-	try {
-		entries = parseSessionEntries(readFileSync(sessionFile, "utf8"));
-	} catch {
-		return;
-	}
-	const header = entries.find((entry) => entry.type === "session");
-	const current = readLedgerFile(agentDir, parentSessionId);
-	if (!header || current.counted?.[header.id]) return;
-	const counted = sessionUsage(entries.filter((entry): entry is SessionEntry => entry.type !== "session"));
-	current.counted = { ...current.counted, [header.id]: counted };
 	writeLedgerFile(agentDir, current);
 }
 

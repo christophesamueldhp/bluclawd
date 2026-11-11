@@ -6,27 +6,35 @@
  * and the sandbox says so.
  */
 import { execFile, spawn } from "node:child_process";
-import { createHash, randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, renameSync } from "node:fs";
-import { join } from "node:path";
+import { randomBytes } from "node:crypto";
+import { existsSync, mkdirSync, renameSync } from "node:fs";
+import { dirname } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
-import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { type BashOperations, getAgentDir } from "@earendil-works/pi-coding-agent";
+import { nativeHelperPath } from "../../daemon/run-members.ts";
 
 type Exec = BashOperations["exec"];
 
 const execFileAsync = promisify(execFile);
 const REAP_WAIT_MS = 2000;
-type Helper = { path: string } | { problem: string };
-let helper: Promise<Helper> | undefined;
+export type Helper = { path: string } | { problem: string };
+const helpers = new Map<string, Promise<Helper>>();
 
-async function build(): Promise<Helper> {
+/** Compiles `native/<name>.c` once per process, into the agent directory; what keeps it from running, if anything. */
+export function nativeHelper(name: string): Promise<Helper> {
+	let helper = helpers.get(name);
+	if (!helper) {
+		helper = build(name);
+		helpers.set(name, helper);
+	}
+	return helper;
+}
+
+async function build(name: string): Promise<Helper> {
 	try {
-		const source = fileURLToPath(new URL("./native/reaper.c", import.meta.url));
-		const hash = createHash("sha256").update(readFileSync(source)).digest("hex").slice(0, 16);
-		const dir = join(getAgentDir(), "bluclawd", "reaper");
-		const path = join(dir, `reaper-${hash}`);
+		const { source, path } = nativeHelperPath(name, getAgentDir());
+		const dir = dirname(path);
 		if (existsSync(path)) return { path };
 		// Fails where `cc` would offer to install the Command Line Tools instead.
 		const tools = await execFileAsync("/usr/bin/xcode-select", ["-p"], { timeout: 5000 }).then(
@@ -49,15 +57,13 @@ async function build(): Promise<Helper> {
 /** Builds the helper ahead of the first command; what keeps it from running, if anything. */
 export async function prepareReaper(): Promise<string | undefined> {
 	if (process.platform !== "darwin") return undefined;
-	helper ??= build();
-	const built = await helper;
+	const built = await nativeHelper("reaper");
 	return "problem" in built ? built.problem : undefined;
 }
 
 /** A helper following the processes whose environment carries its cookie; undefined if none starts. */
 async function startReaper(): Promise<{ cookie: string; reap(): Promise<void> } | undefined> {
-	helper ??= build();
-	const built = await helper;
+	const built = await nativeHelper("reaper");
 	if ("problem" in built) return undefined;
 	const { path } = built;
 	const cookie = randomBytes(32).toString("hex");

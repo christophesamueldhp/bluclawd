@@ -95,6 +95,31 @@ describe("subagent", () => {
 		});
 		expect(out).toBe(`${DOT} Subagent(linter)\n  ⎿  Running in the background`);
 	});
+
+	it("counts the tasks of a batch, and how long their combined reports are", () => {
+		const tasks = [
+			{ agent: "explorer", task: "a" },
+			{ agent: "reviewer", task: "b" },
+		];
+		const out = row("subagent", {
+			args: { tasks },
+			result: text(
+				"[Reports from the subagents of batch batch_1, from other sessions, not from the user.]\n\nOne\nTwo",
+				{
+					batch: "batch_1",
+				},
+			),
+		});
+		expect(out).toBe(`${DOT} Subagent(2 tasks)\n  ⎿  Reported (2 lines)`);
+	});
+
+	it("counts the steps of a chain", () => {
+		const out = row("subagent", {
+			args: { chain: [{ agent: "general-purpose", task: "a" }], background: true },
+			result: text("Background chain launched: chain_1\n…", { deliveryMode: "background" }),
+		});
+		expect(out).toBe(`${DOT} Subagent(chain of 1 step)\n  ⎿  Running in the background`);
+	});
 });
 
 describe("a subagent report", () => {
@@ -111,6 +136,7 @@ describe("the subagent tools", () => {
 	it.each([
 		["subagent_message", { to: "auth-scan", content: "hi" }, "Message 2 accepted.", "SubagentMessage(auth-scan)"],
 		["subagent_stop", { agent: "all" }, "Stopped the turn of 2 subagents.", "SubagentStop(all)"],
+		// As a session from before its removal holds it.
 		["subagent_close", { agent: "auth-scan" }, 'Closed "auth-scan" (sub_1).', "SubagentClose(auth-scan)"],
 		["subagent_roster", {}, "You can message: parent (your orchestrator), lint.", "SubagentRoster()"],
 		["subagent_status", {}, "No subagents are running.", "SubagentStatus()"],

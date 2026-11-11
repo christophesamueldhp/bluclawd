@@ -12,13 +12,12 @@ import {
 	SettingsManager,
 } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { OrchestratorClient } from "../daemon/orchestrator-client.ts";
-import { PANE_ENV, Tmux } from "../daemon/tmux.ts";
 import { agentTasks } from "../ext/_shared/agent-tasks.ts";
 import accounts from "../ext/accounts/index.ts";
 import { AccountStore } from "../ext/accounts/store.ts";
 import { createSubagentsExtension } from "../ext/subagents/index.ts";
 import { AccountsTerminal } from "./helpers/accounts-terminal.ts";
+import { fakeRunHosts } from "./helpers/fake-run-hosts.ts";
 import { readinessMs } from "./helpers/heartbeats.ts";
 import { waitFor } from "./helpers/wait-for.ts";
 
@@ -716,14 +715,10 @@ describe("interactive /accounts", () => {
 	it(
 		"refuses account changes while a subagent run is open after the parent becomes idle",
 		async () => {
-			// The orchestrator runs in a pane, and its run is a pane that never runs a pi.
-			vi.stubEnv(PANE_ENV, "pi-orchestrator");
-			vi.spyOn(Tmux.prototype, "newSession").mockReturnValue("pi-run1");
-			vi.spyOn(Tmux.prototype, "end").mockImplementation(() => {});
-			vi.spyOn(Tmux.prototype, "hasSession").mockReturnValue(true);
-			vi.spyOn(OrchestratorClient.prototype, "send").mockResolvedValue(undefined);
+			// Its run is on pi's RPC, with a host that only waits until it is stopped.
+			const hosts = fakeRunHosts();
 			cleanups.push(async () => {
-				vi.restoreAllMocks();
+				hosts.dispose();
 			});
 			const h = await fixture({ background: true });
 			const accountsBefore = await h.store.list();

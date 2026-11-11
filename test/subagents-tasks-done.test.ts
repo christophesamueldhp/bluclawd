@@ -1,11 +1,12 @@
 import { existsSync } from "node:fs";
-import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import type { ExtensionFactory } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it } from "vitest";
 import { stripAnsi } from "../daemon/ansi.ts";
 import backgroundBash from "../ext/background-bash/index.ts";
 import { TasksDialog } from "../ext/background-bash/tasks-dialog.ts";
 import { paneTasks } from "../ext/remote/report.ts";
+import { RUN_CONVERSATION_ENTRY } from "../ext/subagents/run-intervention.ts";
 import { readPersistedRunRecord, subagentReportPath } from "../ext/subagents/storage.ts";
 import { createSubagentTui, launch, type SubagentTui } from "./helpers/subagent-tui.ts";
 import { waitFor } from "./helpers/wait-for.ts";
@@ -35,13 +36,13 @@ function tasks(t: SubagentTui) {
 	return { dialog, state, screen: () => stripAnsi(dialog.render(100).join("\n")) };
 }
 
-/** A session whose background run "scout" reported and was then closed. */
+/** A session whose background run "scout" reported, and so ended. */
 async function closedRun(extensions?: ExtensionFactory[]) {
 	const t = await createSubagentTui({ extensions });
 	t.script([
 		launch(["scout"], { background: true }),
 		() => fauxAssistantMessage("Waiting for scout."),
-		() => fauxAssistantMessage([fauxToolCall("subagent_close", { agent: "scout" }, { id: "call_close" })]),
+		() => fauxAssistantMessage("Read the report."),
 	]);
 	await t.session.prompt("Delegate.", { expandPromptTemplates: false });
 	t.report("scout", "Mapped the module.");
@@ -67,18 +68,19 @@ describe("/tasks keeps the closed runs of this session", () => {
 		expect(paneTasks(owner(tui))).toEqual([]);
 	});
 
-	it("reopens a closed run's session with Enter in /tasks, and switches the terminal to it", async () => {
+	it("shows a closed run's conversation with Enter in /tasks, without switching the terminal or resuming it", async () => {
 		({ t: tui } = await closedRun([backgroundBash]));
 		void tui.session.prompt("/tasks");
 		await waitFor(() => tui!.view()?.join("\n").includes("Done (1)") ?? false);
 		tui.press(ENTER);
 
-		await waitFor(() => tui!.switched.length === 1);
-		const [first, reopened] = tui.runs;
-		expect(reopened).toMatchObject({ name: "scout", ended: false });
-		expect(reopened.args).toContain("--session");
-		expect(reopened.args[reopened.args.indexOf("--session") + 1]).toMatch(new RegExp(`${first.pane}\\.jsonl$`));
-		expect(tui.switched).toEqual([reopened.pane]);
+		await waitFor(() =>
+			tui!.session.sessionManager
+				.getEntries()
+				.some((entry) => entry.type === "custom" && entry.customType === RUN_CONVERSATION_ENTRY),
+		);
+		expect(tui.switched).toEqual([]);
+		expect(tui.runs).toHaveLength(1);
 	});
 
 	it("dismisses a closed run from Done, keeping its record and report on disk", async () => {

@@ -1,7 +1,7 @@
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { stripTerminalSequences } from "@earendil-works/pi-tui";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { Tmux } from "../daemon/tmux.ts";
+import { OrchestratorClient } from "../daemon/orchestrator-client.ts";
 import { agentTasks } from "../ext/_shared/agent-tasks.ts";
 import { STATUS_KEYS } from "../ext/_shared/status-keys.ts";
 import { type BackgroundExec, backgroundBashJobs } from "../ext/background-bash/background-bash.ts";
@@ -35,7 +35,7 @@ const selected = (t: SubagentTui) => t.panel().find((line) => line.startsWith("�
 const prompt = (t: SubagentTui, text = "Delegate.") => t.session.prompt(text, { expandPromptTemplates: false });
 const readRecord = (t: SubagentTui, runId: string) => readPersistedRunRecord(t.agentDir, t.session.sessionId, runId);
 
-/** Closes the run launched as `name`, as `/tasks` does. */
+/** Stops the run launched as `name`, as `/tasks` does. */
 const close = (t: SubagentTui, name: string) => {
 	const owner = t.session.sessionId;
 	const task = agentTasks()
@@ -154,9 +154,9 @@ describe("↓ with background shells running", () => {
 
 	it("has the pill offer ↓ again once a failed run's row leaves the panel", async () => {
 		const t = await withShell();
-		vi.mocked(Tmux.prototype.newSession).mockImplementationOnce(() => {
-			throw new Error("tmux refused");
-		});
+		// The daemon fails to start its host, every time it is asked.
+		const launchRun = vi.mocked(OrchestratorClient.prototype.launchRun);
+		for (let i = 0; i < 3; i++) launchRun.mockRejectedValueOnce(new Error("the daemon refused"));
 		t.script([launch(["scout"], { background: true })]);
 		await prompt(t);
 		await waitFor(() => row(t, "scout")?.includes("failed"));
@@ -240,7 +240,7 @@ describe("a focused panel", () => {
 		const t = await withOpenRuns(["scout"]);
 
 		t.press(DOWN);
-		expect(t.panel().at(-1)).toBe("  ↑/↓ to select · Enter to open · x to close · Esc to go back");
+		expect(t.panel().at(-1)).toBe("  ↑/↓ to select · Enter to open · x to stop · Esc to go back");
 	});
 
 	it("gives the keyboard back to the prompt on Esc", async () => {
@@ -298,7 +298,7 @@ describe("the prompt's editor wrappers with the panel present", () => {
 });
 
 describe("x on a row", () => {
-	it("closes the run the way a /tasks stop does, ending its pi without waking the orchestrator", async () => {
+	it("stops the run the way a /tasks stop does, ending its processes without waking the orchestrator", async () => {
 		const t = await createSubagentTui();
 		tui = t;
 		let parentTurns = 0;
@@ -322,8 +322,8 @@ describe("x on a row", () => {
 		t.press(DOWN, "x");
 		await waitFor(() => !row(t, "scout"));
 		const runId = t.session.messages.flatMap((m) => JSON.stringify(m).match(/sub_[0-9a-f-]{36}/) ?? [])[0];
-		await waitFor(() => readRecord(t, runId)?.status === "closed");
-		expect(readRecord(t, runId)).toMatchObject({ status: "closed", stopSource: "user" });
+		await waitFor(() => readRecord(t, runId)?.status === "cancelled");
+		expect(readRecord(t, runId)).toMatchObject({ status: "cancelled", stopSource: "user" });
 		expect(t.runs[0]).toMatchObject({ name: "scout", ended: true });
 
 		await new Promise((resolve) => setTimeout(resolve, 80));
@@ -333,7 +333,7 @@ describe("x on a row", () => {
 		).toEqual([]);
 	});
 
-	it("moves the selection to the next row, and closing the last gives the keyboard back", async () => {
+	it("moves the selection to the next row, and stopping the last gives the keyboard back", async () => {
 		const t = await withOpenRuns(["scout", "mapper"]);
 		const [closed, other] = t
 			.panel()

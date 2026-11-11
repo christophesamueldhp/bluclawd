@@ -209,11 +209,16 @@ const task_stop: OwnLook = {
 
 const subagent: OwnLook = {
 	title: "Subagent",
-	arg: (args) => str(args.name) || str(args.agent) || str((args.agent as { name?: unknown } | undefined)?.name),
+	arg: (args) =>
+		Array.isArray(args.tasks)
+			? count(args.tasks.length, "task", "tasks")
+			: Array.isArray(args.chain)
+				? `chain of ${count(args.chain.length, "step", "steps")}`
+				: str(args.name) || str(args.agent) || str((args.agent as { name?: unknown } | undefined)?.name),
 	summary(result, theme) {
 		if (detail(result, "deliveryMode") === "background") return theme.fg("dim", "Running in the background");
-		// A report starts with `[Report from subagent …]`, which says who sent it, not what it says.
-		const report = outputOf(result).replace(/^\[Report from subagent [^\n]*\]\n*/, "");
+		// Reports start with a line that says who sent them, not what they say.
+		const report = outputOf(result).replace(/^\[Reports? from (the )?subagents? [^\n]*\]\n*/, "");
 		return `Reported (${lines(lineCount(report))})`;
 	},
 };
@@ -251,6 +256,7 @@ const OWN_LOOKS: Record<string, OwnLook> = {
 	subagent,
 	subagent_message: answers("SubagentMessage", "to"),
 	subagent_stop: answers("SubagentStop", "agent"),
+	// Removed from the model (ADR-0010): kept so sessions from before still show their calls to it.
 	subagent_close: answers("SubagentClose", "agent"),
 	subagent_roster: answers("SubagentRoster"),
 	subagent_status,

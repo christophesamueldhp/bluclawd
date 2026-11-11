@@ -1,16 +1,32 @@
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import {
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	readdirSync,
+	readFileSync,
+	realpathSync,
+	rmSync,
+	symlinkSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fauxProvider } from "@earendil-works/pi-ai";
-import { type ExtensionContext, ModelRegistry, ModelRuntime, SessionManager } from "@earendil-works/pi-coding-agent";
+import {
+	type ExtensionContext,
+	ModelRegistry,
+	ModelRuntime,
+	ProjectTrustStore,
+	SessionManager,
+} from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
 	type AdmissionContext,
 	type AdmissionResult,
+	type ChainPlacement,
 	createRunAdmission,
 	type LaunchParams,
 	MAX_TASK_INPUT_BYTES,
-	NEEDS_TMUX,
 	type RunAdmissionDeps,
 	type RunExecutionContext,
 } from "../ext/subagents/admission.ts";
@@ -54,12 +70,20 @@ async function setup(
 		mode?: AdmissionContext["mode"];
 		settings?: unknown;
 		firstGenerationCompletes?: boolean;
+		// The tools the orchestrator can give its runs; none by default.
+		tools?: string[];
 		// The orchestrator's tmux session, where runs start as pis of their own; null for a pi outside tmux.
 		pane?: string | null;
+		// Another orchestrator instance of the same session: its directories and session.
+		sameSession?: { cwd: string; agentDir: string; sessionManager: SessionManager };
+		// The daemon that queues runs on pi's RPC cannot be started.
+		queueDown?: boolean;
 	} = {},
 ) {
-	const cwd = makeTempDir("cwd");
-	const agentDir = makeTempDir("agent");
+	// The faux provider is this session's own; no run's pi starts to need it.
+	vi.stubEnv("BLUCLAWD_RPC_PROVIDER_EXTENSIONS", "faux");
+	const cwd = options.sameSession?.cwd ?? makeTempDir("cwd");
+	const agentDir = options.sameSession?.agentDir ?? makeTempDir("agent");
 	if (options.settings) writeFileSync(join(agentDir, "settings.json"), JSON.stringify(options.settings));
 	// The session a first generation that completes leaves, which a resume reopens.
 	if (options.firstGenerationCompletes) writeFileSync(join(agentDir, "transcript.jsonl"), "");
@@ -80,7 +104,7 @@ async function setup(
 	runtime.registerNativeProvider(faux.provider);
 	await runtime.refresh({ allowNetwork: false });
 	const registry = new ModelRegistry(runtime);
-	const sessionManager = SessionManager.inMemory(cwd);
+	const sessionManager = options.sameSession?.sessionManager ?? SessionManager.inMemory(cwd);
 	// Admitted runs stay live until stopped, so later launches see their names.
 	const scheduler = new SubagentRunScheduler<RunExecutionContext>({
 		executeRun: ({ record, signal }) =>
@@ -107,11 +131,12 @@ async function setup(
 		scheduler,
 		directory,
 		agentDir: () => agentDir,
-		catalog: () => undefined,
 		parentThinkingLevel: () => "low",
 		scope,
 		pane: () => (options.pane === null ? undefined : (options.pane ?? "pi-orchestrator")),
-		tools: () => [],
+		tools: () => options.tools ?? [],
+		registeredTools: () => [],
+		ensureQueue: async () => !options.queueDown,
 	};
 	const ctx: AdmissionContext = {
 		cwd,
@@ -123,9 +148,14 @@ async function setup(
 	};
 	const admission = createRunAdmission(deps);
 	let calls = 0;
-	const launch = (params: LaunchParams, overrides: Partial<AdmissionContext> = {}, signal?: AbortSignal) =>
+	const launch = (
+		params: LaunchParams,
+		overrides: Partial<AdmissionContext> = {},
+		signal?: AbortSignal,
+		chain?: ChainPlacement,
+	) =>
 		admission.launch(
-			{ toolCallId: `call_${++calls}`, parentTurnId: "turn_0", params, signal },
+			{ toolCallId: `call_${++calls}`, parentTurnId: "turn_0", params, signal, chain },
 			{ ...ctx, ...overrides },
 		);
 	const resume = (
@@ -139,6 +169,7 @@ async function setup(
 	const storageDir = join(agentDir, "bluclawd", "subagents", sessionManager.getSessionId());
 	return {
 		agentDir,
+		cwd,
 		resume,
 		runtime,
 		faux,
@@ -147,6 +178,7 @@ async function setup(
 		storageDir,
 		directory,
 		scope,
+		sessionManager,
 		invalidateSession: () => scope.invalidate("Parent session switching"),
 	};
 }
@@ -221,15 +253,37 @@ describe("Run admission", () => {
 		expect(existsSync(storageDir)).toBe(false);
 	});
 
-	it("refuses a launch or a resume outside tmux, where no run can be a pi session of its own", async () => {
-		const { launch, resume } = await setup({ pane: null });
-		expect(errorOf(await launch({ agent: "explorer", task: "x" }))).toBe(NEEDS_TMUX);
-		const run = { name: "old" } as SubagentRunRecord;
-		expect(await resume(run, () => "Go on.").result).toMatchObject({
-			ok: false,
-			refusal: "unavailable",
-			error: NEEDS_TMUX,
-		});
+	it("admits a launch outside tmux: a run on pi's RPC needs no pane", async () => {
+		const { launch } = await setup({ pane: null });
+		expect(handleOf(await launch({ agent: "explorer", task: "x" })).record).toMatchObject({ backend: "rpc" });
+	});
+
+	it("gives a tool a role names with a trailing ? only where it can be given, and refuses one named without", async () => {
+		const { launch, storageDir } = await setup({ tools: ["read"] });
+		const role = (tools: string[]) => ({ name: "looker", description: "Looks.", instructions: "Look.", tools });
+		const admitted = handleOf(await launch({ agent: role(["read", "grep?"]), task: "x" })).record;
+		const definition = JSON.parse(readFileSync(join(storageDir, admitted.runId, "definition.json"), "utf8"));
+		expect(definition.tools).toEqual(["read"]);
+		expect(errorOf(await launch({ agent: role(["read", "grep"]), task: "x" }))).toBe(
+			'Subagent role "looker" names tools the orchestrator cannot give a child: grep. Available: read.',
+		);
+	});
+
+	it("refuses a provider an extension registers, which a run's pi would not have", async () => {
+		const { launch, storageDir } = await setup();
+		vi.stubEnv("BLUCLAWD_RPC_PROVIDER_EXTENSIONS", "");
+		expect(errorOf(await launch({ agent: "explorer", task: "x" }))).toMatch(
+			/^Cannot launch subagent: provider "faux-adm" is registered by an extension of this pi/,
+		);
+		expect(existsSync(storageDir)).toBe(false);
+	});
+
+	it("refuses an inherited thinking level the role's model does not support, saying it was inherited", async () => {
+		const { agentDir, launch } = await setup();
+		writeRole(agentDir, "plain", ["model: faux-adm/faux-alt"]);
+		expect(errorOf(await launch({ agent: "plain", task: "x" }))).toMatch(
+			/^Thinking level "low" is not supported .* That level is yours, inherited as neither the call nor the role sets one/,
+		);
 	});
 
 	it("resolves spawn over role over parent for model and thinking", async () => {
@@ -375,33 +429,29 @@ describe("Run admission", () => {
 		expect(directory.list(scope.current()!)).toEqual([]);
 	});
 
-	it("resumes a completed run as a pi on its session, keeping its role and model", async () => {
-		const { launch, resume, scheduler } = await setup({ firstGenerationCompletes: true });
-		const launched = await launch({
-			agent: "explorer",
-			task: "Build v1.",
-			model: "faux-adm/faux-alt",
-			name: "backend",
-		});
-		const completed = await handleOf(launched).completion;
-		expect(completed.status).toBe("closed");
-
-		const prompts: string[] = [];
-		const { result } = resume(completed, () => {
-			prompts.push("built");
-			return "Now add tests.";
-		});
-		const resumed = await result;
-		expect(handleOf(resumed).record).toMatchObject({ name: "backend", modelId: "faux-alt", generation: 1 });
-		expect(prompts).toEqual(["built"]);
-		expect(scheduler.getContext(completed.runId)?.launch).toMatchObject({
-			name: "backend",
-			definition: { name: "explorer" },
-			model: "faux-adm/faux-alt",
-			task: "Now add tests.",
-			sessionFile: completed.transcriptPath,
-			parent: "pi-orchestrator",
-		});
+	it("refuses to resume a run in tmux from before runs ran on pi's RPC, pointing at its Report and transcript", async () => {
+		const { launch, resume } = await setup();
+		const open = handleOf(await launch({ agent: "explorer", task: "x" })).record;
+		const legacy: SubagentRunRecord = {
+			...open,
+			runId: "sub_legacy",
+			name: "legacy",
+			backend: undefined,
+			pane: "pi-legacy",
+			status: "closed",
+			reportPath: "/runs/legacy/report.md",
+			transcriptPath: "/runs/legacy/session.jsonl",
+		};
+		let built = false;
+		const resumed = await resume(legacy, () => {
+			built = true;
+			return "Go on.";
+		}).result;
+		expect(resumed).toMatchObject({ ok: false, refusal: "unavailable" });
+		expect(errorOf(resumed)).toBe(
+			'"legacy" (sub_legacy) ran in tmux, before runs ran on pi\'s RPC, and is not resumed. To continue its work, launch a new subagent and point it at its Report (/runs/legacy/report.md) and transcript (/runs/legacy/session.jsonl).',
+		);
+		expect(built).toBe(false);
 	});
 
 	it("refuses to resume a run whose role is now denied, before taking a message number", async () => {
@@ -439,7 +489,7 @@ describe("Run admission", () => {
 		const running = handleOf(await live.launch({ agent: "explorer", task: "x" })).record;
 		const notDone = await live.resume(running, () => "x").result;
 		expect(notDone).toMatchObject({ ok: false, refusal: "unavailable" });
-		expect(errorOf(notDone)).toMatch(/only a closed subagent can be resumed/);
+		expect(errorOf(notDone)).toMatch(/only a finished or stopped subagent can be resumed/);
 
 		const { launch, resume, invalidateSession } = await setup({ firstGenerationCompletes: true });
 
@@ -449,28 +499,156 @@ describe("Run admission", () => {
 		expect(stale).toMatchObject({ ok: false, refusal: "invalidated" });
 		expect(errorOf(stale)).toMatch(/was replaced; spawn a new subagent/);
 	});
+});
 
-	it("holds at most 8 open runs per orchestrator: a ninth launch or a resume is refused until one closes", async () => {
-		const { agentDir, launch, resume, scheduler } = await setup();
-		// Launched in one message, so every launch is past model resolution before the first is admitted.
-		const launched = await Promise.all(
-			Array.from({ length: 9 }, (_, i) => launch({ agent: "explorer", name: `run-${i}`, task: "Look." })),
+describe("Run admission of a run's own directory, and of its Resume", () => {
+	it("refuses a cwd it cannot use, or that the orchestrator's Read rules deny, before storage", async () => {
+		const secret = makeTempDir("secret");
+		const { launch, storageDir, cwd } = await setup({
+			settings: { permissions: { deny: [`Read(${secret}/**)`] } },
+		});
+		writeFileSync(join(cwd, "file.txt"), "");
+		expect(errorOf(await launch({ agent: "explorer", cwd: "missing", task: "x" }))).toMatch(
+			/cwd ".*missing" cannot be used/,
 		);
-		expect(launched.filter((result) => result.ok)).toHaveLength(8);
-		const refusal =
-			"An orchestrator holds at most 8 open subagents. Close one whose work is done with subagent_close, then try again.";
-		expect(launched.filter((result) => !result.ok).map(errorOf)).toEqual([refusal]);
+		expect(errorOf(await launch({ agent: "explorer", cwd: "file.txt", task: "x" }))).toMatch(/is not a directory/);
+		expect(errorOf(await launch({ agent: "explorer", cwd: secret, task: "x" }))).toMatch(
+			/Blocked by permission rule/,
+		);
+		expect(existsSync(storageDir)).toBe(false);
+	});
 
-		// A closed run's Resume opens a run too.
-		const transcriptPath = join(agentDir, "closed.jsonl");
-		writeFileSync(transcriptPath, "");
-		const first = handleOf(launched.find((result) => result.ok)!);
-		const open = first.record;
-		const closed = { ...open, runId: "sub_closed", name: "closed-run", status: "closed" as const, transcriptPath };
-		expect(errorOf(await resume(closed, () => "Go on.").result)).toBe(refusal);
+	it("refuses a launch, before storing it, when the daemon that queues runs cannot be started", async () => {
+		const { launch, storageDir } = await setup({ queueDown: true });
+		expect(errorOf(await launch({ agent: "explorer", task: "x" }))).toBe(
+			"Cannot launch subagent: the daemon that queues runs is not running and could not be started.",
+		);
+		expect(existsSync(storageDir)).toBe(false);
+	});
 
-		scheduler.cancelRun(open.runId, "model");
-		await first.completion;
-		expect((await launch({ agent: "explorer", name: "run-9", task: "Look." })).ok).toBe(true);
+	it("refuses a run whose orchestrator's or workspace's deny rules cannot be read, rather than holding it to none", async () => {
+		const { launch, cwd, agentDir, storageDir } = await setup({ settings: { permissions: { deny: 42 } } });
+		expect(errorOf(await launch({ agent: "explorer", task: "x" }))).toMatch(/deny rules.*cannot be read/);
+		writeFileSync(join(agentDir, "settings.json"), "{}");
+		const pkg = join(cwd, "pkg");
+		mkdirSync(join(pkg, ".pi"), { recursive: true });
+		writeFileSync(join(pkg, ".pi", "settings.json"), "{ not json");
+		new ProjectTrustStore(agentDir).set(realpathSync(pkg), true);
+		expect(errorOf(await launch({ agent: "explorer", cwd: "pkg", task: "x" }))).toMatch(/deny rules.*cannot be read/);
+		expect(existsSync(storageDir) ? readdirSync(storageDir) : []).toEqual([]);
+	});
+
+	it("gives a directory reached through a symlink no trust of the orchestrator's own", async () => {
+		const { launch, cwd } = await setup();
+		const other = makeTempDir("other");
+		mkdirSync(join(other, ".pi", "agents"), { recursive: true });
+		writeFileSync(join(other, ".pi", "agents", "sneaky.md"), "---\nname: sneaky\ndescription: Sneaky.\n---\nSneak.");
+		symlinkSync(other, join(cwd, "link"));
+		const trusted = { isProjectTrusted: () => true };
+		expect(errorOf(await launch({ agent: "sneaky", cwd: "link", task: "x" }, trusted))).toMatch(
+			/Unknown subagent "sneaky".*untrusted project/s,
+		);
+		const run = handleOf(await launch({ agent: "explorer", cwd: "link", task: "x" }, trusted)).record;
+		expect(run.cwd).toBe(realpathSync(other));
+	});
+
+	it("refuses a chain step whose directory leads out of its chain's worktree through a link a step before made", async () => {
+		const { launch, cwd } = await setup();
+		const source = realpathSync(cwd);
+		mkdirSync(join(source, "sub"));
+		// The worktree, where an earlier step that edits replaced the directory with a link to elsewhere.
+		const root = realpathSync(makeTempDir("worktree"));
+		const outside = realpathSync(makeTempDir("outside"));
+		symlinkSync(outside, join(root, "sub"));
+		const baseline = { source, gitDir: join(source, ".git"), head: "", index: "", tree: "", commit: "", ref: "" };
+		const step = (dir: string) =>
+			launch({ agent: "explorer", cwd: dir, task: "Look." }, {}, undefined, {
+				id: "chain_x",
+				workspace: { root, baseline },
+			});
+		expect(errorOf(await step("sub"))).toMatch(/is not in the worktree of its chain/);
+		// A directory of the worktree itself is the step's.
+		mkdirSync(join(source, "real"));
+		mkdirSync(join(root, "real"));
+		expect(handleOf(await step("real")).record.cwd).toBe(join(root, "real"));
+	});
+
+	it("trusts a directory under the orchestrator's only by the user's own saved decision, not by the session's", async () => {
+		const { launch, cwd, agentDir, storageDir } = await setup();
+		const vendor = join(cwd, "vendor");
+		mkdirSync(join(vendor, ".pi", "agents"), { recursive: true });
+		writeFileSync(join(vendor, ".pi", "agents", "sneaky.md"), "---\nname: sneaky\ndescription: Sneaky.\n---\nSneak.");
+		const trusted = { isProjectTrusted: () => true };
+		const check = async () => {
+			expect(errorOf(await launch({ agent: "sneaky", cwd: "vendor", task: "x" }, trusted))).toMatch(
+				/Unknown subagent "sneaky".*untrusted project/s,
+			);
+			const run = handleOf(await launch({ agent: "explorer", cwd: "vendor", task: "x" }, trusted));
+			const snapshot = JSON.parse(readFileSync(join(storageDir, run.runId, "definition.json"), "utf8"));
+			expect(snapshot.projectTrusted).toBe(false);
+		};
+		await check();
+		new ProjectTrustStore(agentDir).set(realpathSync(vendor), false);
+		await check();
+	});
+
+	/** The saved session a completed first generation leaves: one message, which a Resume goes on from. */
+	const saveConversation = (agentDir: string, cwd: string) => {
+		const at = new Date().toISOString();
+		writeFileSync(
+			join(agentDir, "transcript.jsonl"),
+			[
+				{ type: "session", version: 3, id: "child", timestamp: at, cwd },
+				{ type: "message", id: "m1", parentId: null, timestamp: at, message: { role: "user", content: "x" } },
+			]
+				.map((entry) => JSON.stringify(entry))
+				.join("\n"),
+		);
+	};
+
+	it("refuses to resume a run whose originating entry left the branch, or whose session was replaced", async () => {
+		const { agentDir, cwd, launch, resume, sessionManager, invalidateSession } = await setup({
+			firstGenerationCompletes: true,
+		});
+		sessionManager.appendMessage({ role: "user", content: "delegate", timestamp: Date.now() });
+		const completed = await handleOf(await launch({ agent: "explorer", task: "x" })).completion;
+		saveConversation(agentDir, cwd);
+		expect(completed.originEntryId).toBeDefined();
+
+		sessionManager.resetLeaf();
+		const offBranch = await resume(completed, () => "Go on.").result;
+		expect(offBranch).toMatchObject({ ok: false, refusal: "invalidated" });
+		sessionManager.branch(completed.originEntryId!);
+		invalidateSession();
+		expect(await resume(completed, () => "Go on.").result).toMatchObject({ ok: false, refusal: "invalidated" });
+	});
+
+	it("refuses a Resume with an empty or oversized instruction before it claims the run's next generation", async () => {
+		const { agentDir, cwd, launch, resume, storageDir } = await setup({ firstGenerationCompletes: true });
+		const completed = await handleOf(await launch({ agent: "explorer", task: "x" })).completion;
+		saveConversation(agentDir, cwd);
+
+		expect(errorOf(await resume(completed, () => "  ").result)).toMatch(/Missing required parameter: task/);
+		expect(errorOf(await resume(completed, () => "x".repeat(MAX_TASK_INPUT_BYTES + 1)).result)).toMatch(
+			/exceeds the 32768-byte limit/,
+		);
+		expect(existsSync(join(storageDir, completed.runId, "generations"))).toBe(false);
+		expect(handleOf(await resume(completed, () => "Go on.").result).record.generation).toBe(1);
+	});
+
+	it("lets one of two instances of the orchestrator's session resume a run, never both", async () => {
+		const first = await setup({ firstGenerationCompletes: true });
+		const completed = await handleOf(await first.launch({ agent: "explorer", task: "x" })).completion;
+		const second = await setup({ firstGenerationCompletes: true, sameSession: first });
+		saveConversation(first.agentDir, first.cwd);
+
+		const results = await Promise.all([
+			first.resume(completed, () => "Go on.").result,
+			second.resume(completed, () => "Go on too.").result,
+		]);
+		expect(results.filter((result) => result.ok)).toHaveLength(1);
+		expect(results.filter((result) => !result.ok).map(errorOf)).toEqual([
+			expect.stringMatching(/another Resume of it already started its generation 1/),
+		]);
 	});
 });

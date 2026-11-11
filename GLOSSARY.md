@@ -1,26 +1,46 @@
 # bluclawd
 
-An extension pack for the pi coding agent: a sandboxed shell, background sessions, and an orchestrator that delegates work to subagents in the same live checkout.
+An extension pack for the pi coding agent: a sandboxed shell, background sessions, and an orchestrator that delegates work to subagents.
 
 ## Language
 
 ### Subagents
 
 **Run**:
-One delegated piece of work by a subagent: a pi session of its own that the orchestrator which launched it starts, messages, stops and closes, with its own identity, transcript and reports. A run lives through one or more generations. It is reached from its orchestrator: in agent view its row is folded under the orchestrator's, and goes when that row is deleted; the phone does not list it.
+One delegated piece of work owned by its launching orchestrator, with its own identity, session, context, transcript and reports. A run can span multiple generations; its saved context can outlive the process doing its work.
 _Avoid_: job, task (for a subagent's work), teammate
 
+**Run workspace**:
+The files and directories a run works with, which may be shared for reading or isolated for changes. An isolated run workspace has a defined starting state and does not automatically receive later edits from other runs or its orchestrator.
+_Avoid_: sandbox (for the workspace itself)
+
+**Integration**:
+Applying a run's isolated changes to the orchestrator's workspace, preserving intervening changes and verifying the combined result. It does not by itself include committing or publishing those changes.
+_Avoid_: automatic merge (when no Git merge is involved)
+
+**Cancellation**:
+Ending the selected work and its executing subprocesses, and cancelling pending steps when a batch or chain is cancelled, while retaining sessions and partial changes. User-cancelled work requires an explicit instruction to resume; a late message cannot restart it.
+_Avoid_: rollback, deletion, stopping the wait
+
+**Batch**:
+Independent runs launched together by one orchestrator call, admitted all together or not at all. One member's failure leaves the others working. The batch settles once every member has, with one bounded account of every member's outcome and a reference to each full report; cancelling it cancels every member, working or queued.
+_Avoid_: chain (for runs that depend on each other), group
+
+**Chain**:
+Dependent runs launched by one orchestrator call as ordered steps: each starts only once the step before it completed, given that step's report, never its transcript. When a step edits, every step works in one isolated workspace, one at a time; a later step continues an earlier one's context only by explicit resume. A failed, cancelled or blocked step halts the chain, and the steps after it never run; a review that reports defects has completed. Its output is integrated, if at all, after the whole sequence completes.
+_Avoid_: pipeline, batch (for independent runs)
+
 **Report**:
-A run's last message of a turn, given to its orchestrator each time the run falls idle. A run that stays open reports again after every later turn.
+A run's account of its work, given to its orchestrator when that work settles. Further work in the same run can produce another report, including after resume.
 _Avoid_: result (as if it came once), final answer
 
 **Stop**:
-Ending a run's turn in progress. Its pi stays open and still takes messages.
-_Avoid_: close, kill
+Requesting cancellation of a run's active work while retaining its session and partial changes. Stopping work is distinct from leaving it running in the background.
+_Avoid_: stopping the wait, cleanup
 
-**Close**:
-Ending a run's pi. Its session is kept and the run can be resumed. The orchestrator closes a run without asking it, and the end of the orchestrator's session closes all of its runs. So does the daemon once the orchestrator's pane is gone and the run is not working, though not while that pane is a Silent pane. The user can close a run from its row in agent view. A run the user is looking at when it is closed stays on screen, taking no more prompts, and its pi ends once the user leaves it.
-_Avoid_: stop, delete, shutdown request
+**Workspace cleanup**:
+Removing a run workspace without deleting its transcript or reports. A workspace containing changes requires an explicit user cleanup request; cleanup may make resume unavailable if the required workspace state cannot be restored.
+_Avoid_: stop, cancellation, deleting the session
 
 **Generation**:
 One launch or one resume of a run.
@@ -38,8 +58,12 @@ _Avoid_: validation, preflight
 The orchestrator's session, and its session epoch, that a run or message belongs to. The session epoch changes whenever that session is switched, forked, replaced or shut down, which makes everything of the earlier epoch stale. A reload keeps the session, and its open runs; so does reopening it after a crash, which takes over its runs still open. A run whose originating entry is no longer on the active branch is out of scope too.
 _Avoid_: generation, runtime generation
 
+**Collaboration**:
+Independent orchestrator sessions the user linked, with `/collaborate` in one of them, for work the user named. Its members may send each other findings, questions and blockers; no one else is reached, and nothing a member sends adds a member, changes the work or starts a turn in another member. Changing the work makes what was sent under the earlier one stale. A session is in one at most. Switching to another session, forking or quitting leaves it, and with one member left it ends; a reload keeps it.
+_Avoid_: group chat, broadcast, peer discovery
+
 **Resume**:
-Continuing a closed run with a new message from the orchestrator or the user, as its next generation, with its earlier context.
+Continuing a saved run with an explicit instruction from the orchestrator or the user, as its next generation, with its earlier context. Starting another run with the same role is not a resume.
 _Avoid_: restart, rerun
 
 **Waiting**:

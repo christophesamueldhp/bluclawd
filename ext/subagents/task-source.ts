@@ -13,6 +13,7 @@ const TASK_STATES: Record<SubagentLifecycleStatus, AgentTaskState> = {
 	failed: "failed",
 	interrupted: "failed",
 	closed: "completed",
+	cancelled: "stopped",
 };
 
 export interface AgentTaskSourceDeps {

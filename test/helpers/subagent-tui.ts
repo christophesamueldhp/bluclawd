@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -16,34 +16,15 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import type { Component } from "@earendil-works/pi-tui";
 import { vi } from "vitest";
-import type { AgentActivity } from "../../daemon/activity.ts";
 import { stripAnsi } from "../../daemon/ansi.ts";
-import type { SessionMessage } from "../../daemon/ipc/protocol.ts";
-import { OrchestratorClient } from "../../daemon/orchestrator-client.ts";
 import { PANE_ENV, Tmux } from "../../daemon/tmux.ts";
 import { STATUS_KEYS } from "../../ext/_shared/status-keys.ts";
-import { storeRunReport } from "../../ext/subagents/storage.ts";
+import { fakeRunHosts } from "./fake-run-hosts.ts";
 import { createParentSessionWithSubagents } from "./subagent-session.ts";
 import { waitFor } from "./wait-for.ts";
 
 /** The orchestrator's own tmux session in these tests. */
 const ORCHESTRATOR_PANE = "pi-orchestrator";
-
-/** A run the orchestrator started, as a pane that never runs a pi. */
-interface FakeRun {
-	readonly pane: string;
-	/** Its session name, from its launch flags. */
-	readonly name: string;
-	readonly args: readonly string[];
-	/** Whether its pane is gone: ended by a close, or its pi exited. */
-	ended: boolean;
-}
-
-type SessionMessageBody = SessionMessage extends infer M
-	? M extends SessionMessage
-		? Omit<M, "type" | "from" | "name">
-		: never
-	: never;
 
 type Rendered = Component & { dispose?(): void; focused?: boolean };
 type InputHandler = Parameters<ExtensionUIContext["onTerminalInput"]>[0];
@@ -112,6 +93,8 @@ export async function createSubagentTui(
 		batchWindowMs?: number;
 		/** Whether pistatusline draws the footer; on by default. */
 		pistatusline?: boolean;
+		/** Whether the orchestrator runs outside tmux, in no pane of its own. */
+		outsideTmux?: boolean;
 	} = {},
 ) {
 	initTheme("dark");
@@ -232,48 +215,19 @@ export async function createSubagentTui(
 		setToolsExpanded: () => {},
 	};
 
-	// The orchestrator runs in a pane of its own, and each run it starts is a fake pane: the test speaks for it.
+	// The orchestrator runs in a pane of its own; each run it starts is a fake host, which the test speaks for, given
+	// its turn at once by a daemon that is never asked.
 	const previousPane = process.env[PANE_ENV];
-	process.env[PANE_ENV] = ORCHESTRATOR_PANE;
-	const runs: FakeRun[] = [];
-	const sent: { to: string; message: SessionMessage }[] = [];
+	process.env[PANE_ENV] = options.outsideTmux ? "" : ORCHESTRATOR_PANE;
+	const hosts = fakeRunHosts();
+	const { runs, report, progress } = hosts;
 	const switched: string[] = [];
 	const spies = [
-		vi.spyOn(Tmux.prototype, "newSession").mockImplementation((spec) => {
-			const pane = `pi-run${runs.length + 1}`;
-			runs.push({ pane, name: spec.args[spec.args.indexOf("--name") + 1], args: spec.args, ended: false });
-			// As pi does, it keeps a session in its session directory, which a resume reopens.
-			const sessionDir = spec.args.indexOf("--session-dir");
-			if (sessionDir >= 0) writeFileSync(join(spec.args[sessionDir + 1], `${pane}.jsonl`), "");
-			return pane;
-		}),
-		vi.spyOn(Tmux.prototype, "end").mockImplementation((pane) => {
-			for (const run of runs) if (run.pane === pane) run.ended = true;
-		}),
-		vi
-			.spyOn(Tmux.prototype, "hasSession")
-			.mockImplementation((pane) => runs.some((run) => run.pane === pane && !run.ended)),
 		vi.spyOn(Tmux.prototype, "switchTo").mockImplementation((pane) => {
 			switched.push(pane);
 		}),
-		vi.spyOn(OrchestratorClient.prototype, "send").mockImplementation(async (to, message) => {
-			if (message.type === "session_message") sent.push({ to, message });
-		}),
 	];
 	const eventBus = createEventBus();
-	const runNamed = (name: string) => {
-		const run = [...runs].reverse().find((candidate) => candidate.name === name);
-		if (!run) throw new Error(`No run named ${name} has started.`);
-		return run;
-	};
-	/** What the run's pi sends its orchestrator, through the daemon. */
-	const fromRun = (name: string, message: SessionMessageBody) =>
-		eventBus.emit("bluclawd:session-message", {
-			type: "session_message",
-			from: runNamed(name).pane,
-			name,
-			...message,
-		} satisfies SessionMessage);
 
 	const { session, faux } = await createParentSessionWithSubagents({
 		cwd,
@@ -310,27 +264,15 @@ export async function createSubagentTui(
 			};
 			faux.setResponses(Array.from({ length: 50 }, () => next));
 		},
-		/** The runs started so far, as fake panes, oldest first. */
+		/** The runs started so far, as fake hosts, oldest first. */
 		runs,
 		/** Resolves once a run of that name has started. */
 		started: (name: string) => waitFor(() => runs.some((run) => run.name === name)),
-		/** What the orchestrator sent other sessions through the daemon. */
-		sent,
 		/** The panes the terminal was switched to. */
 		switched,
-		/** The run reports `text` to its orchestrator, as its pi does when it settles; `seq` once it stored it. */
-		report: (name: string, text: string, seq?: number) => fromRun(name, { kind: "report", text, seq }),
-		/** The run stores its Report `text`, as its pi does before sending it, and the send never gets through. */
-		storeReport: (name: string, text: string) => {
-			const { args } = runNamed(name);
-			return storeRunReport(args[args.indexOf("--session-dir") + 1], { text });
-		},
-		/** The orchestrator's pane reaches the daemon again after a heartbeat that could not. */
-		reconnect: () => eventBus.emit("bluclawd:daemon-reconnected", true),
-		/** The run tells its orchestrator what it is doing now. */
-		activity: (name: string, activity: AgentActivity, dialog?: string) =>
-			fromRun(name, { kind: "activity", activity, ...(dialog ? { dialog } : {}) }),
-		fromRun,
+		/** The run reports `text` and its process ends, as an RPC run's does once its work settled. */
+		report,
+		progress,
 		/** The subagent panel, the multi-line status pistatusline draws below its chips, as plain lines; empty when none. */
 		panel: () => {
 			const text = statuses.get(STATUS_KEYS.subagents);
@@ -379,6 +321,7 @@ export async function createSubagentTui(
 		},
 		dispose() {
 			session.dispose();
+			hosts.dispose();
 			for (const spy of spies) spy.mockRestore();
 			if (previousPane === undefined) delete process.env[PANE_ENV];
 			else process.env[PANE_ENV] = previousPane;

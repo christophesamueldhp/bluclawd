@@ -15,9 +15,11 @@ export type SubagentLifecycleStatus =
 	/** Left open by an orchestrator that is gone, with no pi of its own: it never started one, or predates them. */
 	| "interrupted"
 	/** Its pi was ended and its session kept: it can be resumed. */
-	| "closed";
+	| "closed"
+	/** Its work was stopped, and nothing of it runs any more; its session is kept, for an explicit Resume only. */
+	| "cancelled";
 
-export type SubagentTerminalStatus = "failed" | "interrupted" | "closed";
+export type SubagentTerminalStatus = "failed" | "interrupted" | "closed" | "cancelled";
 
 export type SubagentStopSource = "caller" | "user" | "model" | "remote" | "session_invalidated";
 
@@ -40,6 +42,8 @@ export interface SubagentRunRecord {
 	generation: number;
 	/** The tmux session of the run's pi (ADR-0006); absent on runs from before runs were pis of their own. */
 	pane?: string;
+	/** Set on a run whose pi runs on pi's RPC, with no pane (ADR-0010); absent on a run in tmux. */
+	backend?: "rpc";
 	/** What the run's pi is doing, as it last said; absent until it says. */
 	activity?: AgentActivity;
 	transcriptPath?: string;
@@ -56,6 +60,10 @@ export interface SubagentRunRecord {
 	startedAt?: number;
 	endedAt?: number;
 	deliveryMode: SubagentDeliveryMode;
+	/** The ID of the `tasks` batch the run was launched in; absent on a run launched alone. */
+	batch?: string;
+	/** The ID of the `chain` the run is a step of; absent on a run launched alone. */
+	chain?: string;
 	status: SubagentLifecycleStatus;
 	stopReason?: string;
 	stopSource?: SubagentStopSource;
@@ -82,6 +90,12 @@ export interface SubagentRunController {
 	markDelivered(seq: number): void;
 }
 
+/**
+ * How a run's work settled, as the runtime saw it, apart from what the run claims and from its process's exit:
+ * completed means its pi settled without an error, not that the task succeeded.
+ */
+export type RunRuntimeOutcome = { status: "completed" } | { status: "failed" | "stopped"; error: string };
+
 export interface SubagentRunExecuteParams {
 	readonly record: Readonly<SubagentRunRecord>;
 	readonly signal: AbortSignal;
@@ -106,6 +120,7 @@ export interface AdmitSubagentRunRequest<C = unknown> {
 	originToolCallId: string;
 	originEntryId?: string;
 	name?: string;
+	backend?: "rpc";
 	agentName: string;
 	definitionSource: AgentDefinitionSource;
 	provider: string;
@@ -115,6 +130,8 @@ export interface AdmitSubagentRunRequest<C = unknown> {
 	taskSummary?: string;
 	startSnapshot?: WorkspaceSnapshot;
 	deliveryMode: SubagentDeliveryMode;
+	batch?: string;
+	chain?: string;
 	signal?: AbortSignal;
 	context?: C;
 }
@@ -141,11 +158,11 @@ export function createRunId(): string {
 	return `${AGENT_TASK_ID_PREFIX}${randomUUID()}`;
 }
 
-const TERMINAL_STATES = new Set<SubagentLifecycleStatus>(["failed", "interrupted", "closed"]);
+const TERMINAL_STATES = new Set<SubagentLifecycleStatus>(["failed", "interrupted", "closed", "cancelled"]);
 
 /** Whether a final run can take a next generation. */
 export function isResumableSubagentStatus(status: SubagentLifecycleStatus): boolean {
-	return status === "closed";
+	return status === "closed" || status === "cancelled";
 }
 
 export function isTerminalSubagentStatus(status: SubagentLifecycleStatus): status is SubagentTerminalStatus {
@@ -231,6 +248,7 @@ export class SubagentRunScheduler<C = unknown> {
 			originToolCallId: request.originToolCallId,
 			originEntryId: request.originEntryId,
 			name: request.name,
+			...(request.backend ? { backend: request.backend } : {}),
 			generation: 0,
 			agentName: request.agentName,
 			definitionSource: request.definitionSource,
@@ -246,6 +264,8 @@ export class SubagentRunScheduler<C = unknown> {
 			},
 			admittedAt,
 			deliveryMode: request.deliveryMode,
+			...(request.batch ? { batch: request.batch } : {}),
+			...(request.chain ? { chain: request.chain } : {}),
 			status: "starting",
 			usage: createEmptySubagentUsage(),
 			backgroundDeliveryAttempted: false,
@@ -291,9 +311,15 @@ export class SubagentRunScheduler<C = unknown> {
 
 	/**
 	 * Runs a closed run again under the same identity, in the background. A run this scheduler does not
-	 * know is taken over from `stored`, its record as kept on disk.
+	 * know is taken over from `stored`, its record as kept on disk. `model` is the model and level the Resume
+	 * admitted, when they changed.
 	 */
-	resume(runId: string, context: C, stored?: Readonly<SubagentRunRecord>): AdmitSubagentRunResult {
+	resume(
+		runId: string,
+		context: C,
+		stored?: Readonly<SubagentRunRecord>,
+		model?: Pick<SubagentRunRecord, "provider" | "modelId" | "thinkingLevel">,
+	): AdmitSubagentRunResult {
 		if (!this.runs.has(runId) && stored?.runId === runId && isResumableSubagentStatus(stored.status)) {
 			this.adopt(stored);
 		}
@@ -302,7 +328,7 @@ export class SubagentRunScheduler<C = unknown> {
 		if (!isResumableSubagentStatus(managed.record.status)) {
 			return {
 				ok: false,
-				error: `Subagent run is ${managed.record.status}; only a closed run can be resumed.`,
+				error: `Subagent run is ${managed.record.status}; only a closed or cancelled run can be resumed.`,
 			};
 		}
 		let resolveCompletion!: (rec: Readonly<SubagentRunRecord>) => void;
@@ -312,6 +338,7 @@ export class SubagentRunScheduler<C = unknown> {
 		Object.assign(managed, {
 			record: {
 				...managed.record,
+				...model,
 				startedAt: undefined,
 				endedAt: undefined,
 				stopReason: undefined,
@@ -501,7 +528,9 @@ export class SubagentRunScheduler<C = unknown> {
 		}
 		managed.finalizing = true;
 
-		const finalStatus: SubagentTerminalStatus = managed.pendingTerminalStatus ?? outcome.status;
+		// A stopped run is closed, unless its runner says how its stop ended: cancelled, or failed to be confirmed.
+		const finalStatus: SubagentTerminalStatus =
+			outcome.status === "closed" ? (managed.pendingTerminalStatus ?? "closed") : outcome.status;
 		managed.record.endedAt = this.now();
 		managed.record.summaryText = outcome.summaryText;
 		if (outcome.transcriptPath) managed.record.transcriptPath = outcome.transcriptPath;

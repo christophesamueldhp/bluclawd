@@ -1,6 +1,9 @@
 import type { AgentActivity } from "./activity.ts";
+import type { Collaborations } from "./collaborations.ts";
 import type {
 	AckResponse,
+	CollaborationRequest,
+	CollaborationResponse,
 	DeleteRequest,
 	ErrorResponse,
 	InstanceSummary,
@@ -14,6 +17,8 @@ import type {
 	RemoteRequest,
 	RemoteResponse,
 	RenameRequest,
+	RunQueueRequest,
+	RunQueueResponse,
 	SaveRequest,
 	SendRequest,
 	ServerRequest,
@@ -33,6 +38,7 @@ import type {
 } from "./ipc/protocol.ts";
 import { pickPaneHeartbeat } from "./ipc/protocol.ts";
 import type { RemoteControl } from "./remote/control.ts";
+import type { RunQueue } from "./run-queue.ts";
 import type { ListProbe, ServerSupervisor } from "./supervisor.ts";
 import type { InstanceRecord } from "./types.ts";
 import type { WakeupKeeper } from "./wakeups.ts";
@@ -80,6 +86,56 @@ let wakeupKeeper: Pick<WakeupKeeper, "hold"> | undefined;
 
 export function setWakeupKeeper(keeper: Pick<WakeupKeeper, "hold"> | undefined): void {
 	wakeupKeeper = keeper;
+}
+
+/** Installed by serve.ts: the queue of subagent runs. Unset outside `serve` (tests). */
+let runQueue: RunQueue | undefined;
+
+export function setRunQueue(queue: RunQueue | undefined): void {
+	runQueue = queue;
+}
+
+/** Installed by serve.ts: the collaborations between orchestrators. Unset outside `serve` (tests). */
+let collaborations: Collaborations | undefined;
+
+export function setCollaborations(held: Collaborations | undefined): void {
+	collaborations = held;
+}
+
+/** A collaboration request's answer; a refusal is an error with why. */
+async function handleCollaboration(request: CollaborationRequest): Promise<CollaborationResponse | ErrorResponse> {
+	if (!collaborations) return { type: "error", ok: false, error: "collaborations are not kept in this process" };
+	const result = (fields: Omit<CollaborationResponse, "type" | "ok">): CollaborationResponse => ({
+		type: "collaboration_result",
+		ok: true,
+		...fields,
+	});
+	const { sessionId } = request;
+	try {
+		switch (request.action) {
+			case "open":
+				return result({
+					collaboration: await collaborations.open({ sessionId, name: request.name }, request.with, request.scope),
+				});
+			case "scope":
+				return result({ collaboration: await collaborations.rescope(sessionId, request.scope) });
+			case "end":
+				return result({ collaboration: await collaborations.end(sessionId) });
+			case "leave":
+				await collaborations.leave(sessionId);
+				return result({});
+			case "get":
+				return result({ collaboration: collaborations.of(sessionId) });
+			case "send":
+				return result({
+					to: await collaborations.send(sessionId, request.revision, request.to, request.kind, request.text),
+				});
+			case "current":
+				return result({ current: collaborations.current(request.collaboration, request.revision, sessionId) });
+		}
+	} catch (error) {
+		return { type: "error", ok: false, error: error instanceof Error ? error.message : String(error) };
+	}
 }
 
 /** Every row agent view lists: stored rows, then each pane's pi with its activity. With `probe`,
@@ -144,6 +200,14 @@ export async function handleIpcRequest(
 ): Promise<StartResponse | ErrorResponse>;
 export async function handleIpcRequest(
 	supervisor: ServerSupervisor,
+	request: RunQueueRequest,
+): Promise<RunQueueResponse | ErrorResponse>;
+export async function handleIpcRequest(
+	supervisor: ServerSupervisor,
+	request: CollaborationRequest,
+): Promise<CollaborationResponse | ErrorResponse>;
+export async function handleIpcRequest(
+	supervisor: ServerSupervisor,
 	request:
 		| DeleteRequest
 		| RenameRequest
@@ -203,6 +267,13 @@ export async function handleIpcRequest(supervisor: ServerSupervisor, request: Se
 		}
 
 		case "send": {
+			const { message } = request;
+			// Only the daemon says what a collaborator sent, and that a collaboration changed.
+			if (
+				message.type === "session_message" &&
+				(message.kind === "collaboration" || message.kind === "collaborator_message")
+			)
+				return { type: "error", ok: false, error: "only the daemon sends collaboration messages" };
 			return (await supervisor.sendExternal(request.instanceId, request.message))
 				? { type: "ack", ok: true }
 				: unknownInstanceError(request.instanceId);
@@ -231,6 +302,26 @@ export async function handleIpcRequest(supervisor: ServerSupervisor, request: Se
 			wakeupKeeper?.hold(request.held);
 			return { type: "ack", ok: true };
 		}
+
+		case "run_queue": {
+			if (!runQueue) return { type: "error", ok: false, error: "runs are not queued in this process" };
+			if (request.action === "claim") {
+				const granted = await runQueue.claim(request.run, request.parent);
+				return { type: "run_queue_result", ok: true, granted };
+			}
+			if (request.action === "release") {
+				runQueue.release(request.run);
+				return { type: "run_queue_result", ok: true };
+			}
+			try {
+				return { type: "run_queue_result", ok: true, hostPid: runQueue.launch(request.run, request.host) };
+			} catch (error) {
+				return { type: "error", ok: false, error: error instanceof Error ? error.message : String(error) };
+			}
+		}
+
+		case "collaboration":
+			return handleCollaboration(request);
 
 		case "delete": {
 			return supervisor.deleteInstance(request.instanceId)

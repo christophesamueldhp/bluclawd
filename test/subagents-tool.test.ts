@@ -20,8 +20,10 @@ import {
 import { defineTool } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { PANE_ENV } from "../daemon/tmux.ts";
-import { readPersistedRunRecord } from "../ext/subagents/storage.ts";
+import { Tmux } from "../daemon/tmux.ts";
+import type { SubagentRunRecord } from "../ext/subagents/runs.ts";
+import { ensureRunStorageDir, readPersistedRunRecord, writePersistedRunRecord } from "../ext/subagents/storage.ts";
+import { createEmptySubagentUsage } from "../ext/subagents/usage.ts";
 import { createParentSessionWithSubagents } from "./helpers/subagent-session.ts";
 import { createSubagentTui, launch, type SubagentTui } from "./helpers/subagent-tui.ts";
 
@@ -43,13 +45,14 @@ afterEach(() => {
 	}
 });
 
-/** What a run is started with: its launch flags, and the instructions file they name. */
+/** What a run's pi is started with: its flags, and the instructions file they name. */
 function launchOf(t: SubagentTui, name: string) {
 	const run = t.runs.find((candidate) => candidate.name === name);
 	if (!run) throw new Error(`No run ${name} started.`);
 	const flag = (key: string) => (run.args.includes(key) ? run.args[run.args.indexOf(key) + 1] : undefined);
 	const instructions = flag("--append-system-prompt");
 	return {
+		provider: flag("--provider"),
 		model: flag("--model"),
 		thinking: flag("--thinking"),
 		tools: flag("--tools"),
@@ -57,7 +60,7 @@ function launchOf(t: SubagentTui, name: string) {
 	};
 }
 
-describe("A run's role, as its launch flags", () => {
+describe("A run's role, as its pi's flags", () => {
 	it("runs an inline role over a same-named saved role, records its source as inline, and writes no definition file", async () => {
 		const t = await createSubagentTui({ builtinTools: ["read"] });
 		tui = t;
@@ -89,8 +92,8 @@ describe("A run's role, as its launch flags", () => {
 		await t.started("checker");
 
 		expect(launchOf(t, "checker")).toMatchObject({
-			instructions: "INLINE-MARKER: inspect only the schema directory.",
-			tools: "read",
+			instructions: expect.stringMatching(/^INLINE-MARKER: inspect only the schema directory\.\n/),
+			tools: "read,subagent_message",
 		});
 		const runId = JSON.stringify(t.session.messages).match(/sub_[0-9a-f-]{36}/)?.[0] ?? "";
 		expect(readPersistedRunRecord(t.agentDir, t.session.sessionId, runId)).toMatchObject({
@@ -116,7 +119,7 @@ describe("A run's role, as its launch flags", () => {
 								name: "deployer",
 								description: "Deploys.",
 								instructions: "Deploy.",
-								tools: ["read", "deploy"],
+								tools: ["read", "grep"],
 							},
 							task: "Deploy it.",
 							background: true,
@@ -129,7 +132,7 @@ describe("A run's role, as its launch flags", () => {
 
 		const { result, text } = toolResultText(t.session, "unknown_tool");
 		expect(result?.isError).toBe(true);
-		expect(text).toContain('Subagent role "deployer" names tools the orchestrator cannot give a child: deploy.');
+		expect(text).toContain('Subagent role "deployer" names tools the orchestrator cannot give a child: grep.');
 		expect(t.runs).toEqual([]);
 	});
 
@@ -162,8 +165,8 @@ describe("A run's role, as its launch flags", () => {
 		await t.started("alt");
 		await t.started("deep");
 
-		expect(launchOf(t, "alt")).toMatchObject({ model: "faux-tool/faux-alt", thinking: "off" });
-		expect(launchOf(t, "deep")).toMatchObject({ model: "faux-tool/faux-main", thinking: "high" });
+		expect(launchOf(t, "alt")).toMatchObject({ provider: "faux-tool", model: "faux-alt", thinking: "off" });
+		expect(launchOf(t, "deep")).toMatchObject({ provider: "faux-tool", model: "faux-main", thinking: "high" });
 	});
 });
 
@@ -176,61 +179,62 @@ function toolResultText(session: { messages: readonly unknown[] }, id: string) {
 }
 
 describe("The subagent tool", () => {
-	it("gives a foreground call only the end of a Report over either limit, and the file that holds its full text", async () => {
-		const t = await createSubagentTui();
+	it("launches a run outside tmux too: a run on pi's RPC needs no pane", async () => {
+		const t = await createSubagentTui({ outsideTmux: true });
 		tui = t;
-		t.script([launch(["scout", "mapper", "checker"])]);
-		const turn = t.session.prompt("Scout, map and check.", { expandPromptTemplates: false });
-		const reports = {
-			scout: Array.from({ length: 2500 }, (_, i) => `line ${i + 1}`).join("\n"),
-			mapper: Array.from({ length: 100 }, (_, i) => `${i + 1} ${"x".repeat(1000)}`).join("\n"),
-			checker: "Checked.",
-		};
-		for (const [name, text] of Object.entries(reports)) {
-			await t.started(name);
-			t.report(name, text, t.storeReport(name, text));
-		}
-		await turn;
+		t.script([launch(["scout"], { background: true }), () => fauxAssistantMessage("Waiting for scout.")]);
+		await t.session.prompt("Scout.", { expandPromptTemplates: false });
+		await t.started("scout");
 
-		const pointer = /\n\n\[Report truncated, full text: ([^\]]+)\]$/;
-		const scout = toolResultText(t.session, "call_scout");
-		expect(scout.text).toMatch(/\n\nline 501\n/);
-		expect(scout.text).not.toMatch(/\nline 500\n/);
-		expect(scout.text).toMatch(/\nline 2500\n\n\[Report truncated, full text: [^\]]+\]$/);
-		expect(readFileSync(pointer.exec(scout.text)?.[1] ?? "", "utf8")).toBe(`${reports.scout}\n`);
-		expect(scout.result?.details).toMatchObject({ truncated: true });
-		const mapper = toolResultText(t.session, "call_mapper");
-		expect(mapper.text).not.toContain("\n\n1 x");
-		expect(Buffer.byteLength(mapper.text)).toBeLessThan(52 * 1024);
-		expect(readFileSync(pointer.exec(mapper.text)?.[1] ?? "", "utf8")).toBe(`${reports.mapper}\n`);
-		expect(mapper.result?.details).toMatchObject({ truncated: true });
-		const checker = toolResultText(t.session, "call_checker");
-		expect(checker.text).toMatch(/\n\nChecked\.$/);
-		expect(checker.result?.details).toMatchObject({ truncated: false });
+		const { result, text } = toolResultText(t.session, "call_scout");
+		expect(result?.isError).toBeFalsy();
+		expect(text).toContain("Background subagent launched: scout");
+		const runId = text.match(/sub_[0-9a-f-]{36}/)?.[0] ?? "";
+		expect(readPersistedRunRecord(t.agentDir, t.session.sessionId, runId)).toMatchObject({ backend: "rpc" });
 	});
 
-	it("refuses a launch outside tmux, where no run can be a pi session of its own", async () => {
-		vi.stubEnv(PANE_ENV, "");
-		const cwd = makeTempDir("no-tmux-cwd");
-		const agentDir = makeTempDir("no-tmux-agent");
-		const { session, faux } = await createParentSessionWithSubagents({ cwd, agentDir });
+	it("leaves a run in tmux from before running when it is reopened outside tmux, and says so", async () => {
+		const t = await createSubagentTui({ outsideTmux: true });
+		tui = t;
+		const parentSessionId = t.session.sessionId;
+		const runId = "sub_legacy";
+		const storage = ensureRunStorageDir(t.agentDir, parentSessionId, runId);
+		if (!storage.ok) throw new Error(storage.error);
+		const legacy: SubagentRunRecord = {
+			runId,
+			parentSessionId,
+			sessionEpoch: 1,
+			parentTurnId: "turn_1",
+			originToolCallId: "call_legacy",
+			name: "legacy",
+			generation: 0,
+			pane: "pi-legacy",
+			agentName: "explorer",
+			definitionSource: "bundled",
+			provider: "faux-tool",
+			modelId: "faux-main",
+			thinkingLevel: "off",
+			cwd: t.cwd,
+			taskSummary: "Look.",
+			startSnapshot: { headCommit: null, dirty: false, statusDigest: "" },
+			admittedAt: Date.now(),
+			deliveryMode: "background",
+			status: "running",
+			usage: createEmptySubagentUsage(),
+			backgroundDeliveryAttempted: false,
+		};
+		writePersistedRunRecord(t.agentDir, legacy);
+		const end = vi.spyOn(Tmux.prototype, "end");
+		const hasSession = vi.spyOn(Tmux.prototype, "hasSession").mockReturnValue(true);
 		try {
-			await session.bindExtensions({});
-			faux.setResponses([
-				fauxAssistantMessage([fauxToolCall("subagent", { agent: "explorer", task: "Look." }, { id: "c_no_tmux" })]),
-				fauxAssistantMessage("Did it myself."),
-			]);
-			await session.prompt("Delegate the look.", { expandPromptTemplates: false });
-
-			const { result, text } = toolResultText(session, "c_no_tmux");
-			expect(result?.isError).toBe(true);
-			expect(text).toBe(
-				"Subagents need tmux: each run is a pi session of its own in agent view's tmux server, and this pi does not run there. Install tmux if it is missing (brew install tmux), then start pi again in a terminal.",
-			);
-			expect(existsSync(join(agentDir, "bluclawd", "subagents"))).toBe(false);
+			await t.session.reload();
+			expect(end).not.toHaveBeenCalled();
 		} finally {
-			session.dispose();
+			hasSession.mockRestore();
+			end.mockRestore();
 		}
+		expect(t.notifications.join("\n")).toContain('"legacy" (sub_legacy) still run in tmux');
+		expect(readPersistedRunRecord(t.agentDir, parentSessionId, runId)?.status).toBe("running");
 	});
 
 	it("warns on conflicting third-party subagent tool registration", async () => {
@@ -441,7 +445,7 @@ describe("Live finding — background availability in the subagent description",
 				},
 			]);
 			await session.prompt("Look at your tools.", { expandPromptTemplates: false });
-			expect(description).toContain("Available subagent roles:");
+			expect(description).toContain("Available subagent roles, as found from your directory");
 			expect(description.includes("Background runs are unavailable in this one-shot mode")).toBe(oneShot);
 		} finally {
 			session.dispose();

@@ -30,6 +30,15 @@ export interface BuiltSubagentResultEnvelope {
 const ANSI_ESCAPE_RE = /\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|P[\s\S]*?\x1b\\|[@-Z\\-_])/g;
 const CONTROL_CHARS_RE = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]/g;
 
+/** The text of a pi message's content: a string, or its text parts joined. */
+export function textOf(content: unknown): string {
+	if (typeof content === "string") return content;
+	if (!Array.isArray(content)) return "";
+	return content
+		.map((part: { type?: string; text?: string }) => (part.type === "text" ? (part.text ?? "") : ""))
+		.join("");
+}
+
 export function sanitizeReportText(input: string): string {
 	return sanitizeDiagnosticText(input)
 		.replace(/\r\n/g, "\n")
@@ -107,7 +116,7 @@ export function formatSnapshotSummary(start: WorkspaceSnapshot): string {
 	return `${head} (${start.dirty ? "dirty" : "clean"})`;
 }
 
-function truncateUtf8Safe(text: string, maxBytes: number): { text: string; truncated: boolean } {
+export function truncateUtf8Safe(text: string, maxBytes: number): { text: string; truncated: boolean } {
 	if (Buffer.byteLength(text, "utf8") <= maxBytes) {
 		return { text, truncated: false };
 	}

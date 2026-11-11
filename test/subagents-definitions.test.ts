@@ -7,6 +7,7 @@ import {
 	formatAgentRoutingDescriptions,
 	resolveAgentDefinition,
 } from "../ext/subagents/definitions.ts";
+import { rpcRunTools } from "../ext/subagents/rpc-runs.ts";
 
 const tempDirs: string[] = [];
 
@@ -26,14 +27,18 @@ afterEach(() => {
 });
 
 describe("Task 1 (M1) — Agent definitions and bundled roles", () => {
-	it("loads bundled general-purpose, explorer and reviewer roles with responsibilities but no tool ceilings", () => {
+	it("loads bundled general-purpose, explorer and reviewer roles: the readers name no tools, general-purpose its own", () => {
 		const cwd = makeTempDir("cwd");
 		const agentDir = makeTempDir("agent");
 
 		const catalog = discoverAgentDefinitions({ cwd, agentDir, projectTrusted: true });
 		expect(catalog.diagnostics).toEqual([]);
 		expect(catalog.definitions.map((d) => d.name)).toEqual(["explorer", "general-purpose", "reviewer"]);
-		expect(catalog.definitions.every((d) => d.tools === undefined)).toBe(true);
+		expect(catalog.definitions.map((d) => d.tools)).toEqual([
+			undefined,
+			["read", "grep?", "find?", "ls?", "codemode?", "edit", "write", "bash?"],
+			undefined,
+		]);
 
 		const generalPurpose = resolveAgentDefinition(catalog, "general-purpose");
 		expect(generalPurpose.ok).toBe(true);
@@ -366,5 +371,101 @@ describe("Task 1 (M1) — Agent definitions and bundled roles", () => {
 			expect(resolvedAfterReload.definition.description).toBe("Version 2.");
 			expect(resolvedAfterReload.definition.instructions).toBe("Instructions v2.");
 		}
+	});
+});
+
+describe("Project roles for a run's directory", () => {
+	const role = (dir: string, name: string, body: string, extra: string[] = []) => {
+		mkdirSync(join(dir, ".pi", "agents"), { recursive: true });
+		writeFileSync(
+			join(dir, ".pi", "agents", `${name}.md`),
+			["---", `name: ${name}`, `description: ${body}`, ...extra, "---", body].join("\n"),
+		);
+	};
+	const instructionsOf = (result: ReturnType<typeof resolveAgentDefinition>) =>
+		result.ok ? result.definition.instructions : result.error;
+
+	/** outer/.pi above the repository root, repo/.pi at it, repo/pkg/.pi nearer, and the run in repo/pkg/sub. */
+	function nested() {
+		const outer = makeTempDir("outer");
+		const agentDir = makeTempDir("nested-agent");
+		const repo = join(outer, "repo");
+		const cwd = join(repo, "pkg", "sub");
+		mkdirSync(cwd, { recursive: true });
+		role(outer, "outsider", "Above the root.");
+		role(outer, "explorer", "Outer explorer.");
+		role(repo, "explorer", "Root explorer.");
+		role(repo, "rooted", "Root only.");
+		role(join(repo, "pkg"), "explorer", "Package explorer.");
+		return { outer, agentDir, repo, cwd };
+	}
+
+	it("looks from the run's directory up to its root, the nearest definition of a name winning", () => {
+		const { agentDir, repo, cwd } = nested();
+		const catalog = discoverAgentDefinitions({ cwd, root: repo, agentDir, projectTrusted: () => true });
+		expect(instructionsOf(resolveAgentDefinition(catalog, "explorer"))).toBe("Package explorer.");
+		expect(instructionsOf(resolveAgentDefinition(catalog, "rooted"))).toBe("Root only.");
+		expect(resolveAgentDefinition(catalog, "outsider").ok).toBe(false);
+	});
+
+	it("does not fall back past an invalid nearer definition", () => {
+		const { agentDir, repo, cwd } = nested();
+		role(join(repo, "pkg"), "explorer", "Broken.", ["tools: 42"]);
+		const catalog = discoverAgentDefinitions({ cwd, root: repo, agentDir, projectTrusted: () => true });
+		expect(instructionsOf(resolveAgentDefinition(catalog, "explorer"))).toMatch(/invalid and cannot be launched/);
+	});
+
+	it("skips the roles of a directory the user does not trust, and says so", () => {
+		const { agentDir, repo, cwd } = nested();
+		const catalog = discoverAgentDefinitions({ cwd, root: repo, agentDir, projectTrusted: (dir) => dir === repo });
+		expect(instructionsOf(resolveAgentDefinition(catalog, "explorer"))).toBe("Root explorer.");
+		expect(catalog.diagnostics.join("\n")).toContain(join(repo, "pkg", ".pi", "agents"));
+	});
+
+	it("narrows the eligible sources by scope without trusting more", () => {
+		const { agentDir, repo, cwd } = nested();
+		mkdirSync(join(agentDir, "agents"));
+		writeFileSync(
+			join(agentDir, "agents", "explorer.md"),
+			"---\nname: explorer\ndescription: User explorer.\n---\nUser explorer.",
+		);
+		const discover = (scope: "user" | "project" | "both", trusted = true) =>
+			discoverAgentDefinitions({ cwd, root: repo, agentDir, projectTrusted: () => trusted, scope });
+		expect(instructionsOf(resolveAgentDefinition(discover("both"), "explorer"))).toBe("Package explorer.");
+		expect(instructionsOf(resolveAgentDefinition(discover("user"), "explorer"))).toBe("User explorer.");
+		expect(resolveAgentDefinition(discover("user"), "reviewer")).toMatchObject({
+			ok: true,
+			definition: { source: "bundled" },
+		});
+		expect(instructionsOf(resolveAgentDefinition(discover("project"), "explorer"))).toBe("Package explorer.");
+		expect(resolveAgentDefinition(discover("project"), "reviewer").ok).toBe(false);
+		expect(resolveAgentDefinition(discover("project", false), "explorer").ok).toBe(false);
+	});
+});
+
+describe("A run's tools where its commands cannot be contained, as on Linux and WSL", () => {
+	const noShell = { ok: false as const, reason: "only on macOS so far, not on linux" };
+	const orchestrators = ["read", "grep", "find", "ls", "edit", "write", "bash"];
+
+	it("gives the bundled general-purpose every tool but the shell, so it still edits", () => {
+		const catalog = discoverAgentDefinitions({
+			cwd: makeTempDir("cwd"),
+			agentDir: makeTempDir("agent"),
+			projectTrusted: true,
+		});
+		const generalPurpose = resolveAgentDefinition(catalog, "general-purpose");
+		if (!generalPurpose.ok) throw new Error(generalPurpose.error);
+		expect(rpcRunTools(generalPurpose.definition, orchestrators, noShell)).toEqual({
+			ok: true,
+			tools: ["read", "grep", "find", "ls", "edit", "write"],
+		});
+	});
+
+	it("refuses a role that names bash, with the reason", () => {
+		const tester = { name: "tester", tools: ["read", "bash"] };
+		expect(rpcRunTools(tester, orchestrators, noShell)).toEqual({
+			ok: false,
+			error: 'Subagent role "tester" names bash, and a run gets no shell here: only on macOS so far, not on linux. Give it a role that does not run commands.',
+		});
 	});
 });
