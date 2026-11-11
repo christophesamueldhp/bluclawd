@@ -102,24 +102,66 @@ describe("startSandbox", () => {
 		const status = await startSandbox(config, deny, "linux");
 		expect(status.kind).toBe("unavailable");
 		expect(status.kind === "unavailable" && status.reason).toContain("apply-seccomp");
-		expect(status.kind === "unavailable" && status.reason).toContain("allowAllUnixSockets");
+		// Allowing every Unix socket no longer starts it on Linux either.
+		expect(status.kind === "unavailable" && status.reason).not.toContain("allowAllUnixSockets");
 		expect(engine.calls).toEqual([]);
 	});
 
-	it("starts on Linux without the Unix-socket filter when the settings allow every Unix socket", async () => {
-		setSandboxEngine(fakeEngine({ canBlockUnixSockets: async () => false }));
-		const allowAll = { ...config, network: { ...config.network, allowAllUnixSockets: true } };
-		expect(await startSandbox(allowAll, deny, "linux")).toEqual({ kind: "ready" });
-	});
-
-	it("becomes unavailable on Linux when the settings stop allowing every Unix socket and none can be blocked", async () => {
-		const engine = fakeEngine({ canBlockUnixSockets: async () => false });
+	it("becomes unavailable on Linux when the settings drop the apply-seccomp binary a running sandbox found", async () => {
+		const seccomp = { applyPath: "/opt/srt/apply-seccomp" };
+		const engine = fakeEngine({ canBlockUnixSockets: async (given) => given?.applyPath === seccomp.applyPath });
 		setSandboxEngine(engine);
-		const allowAll = { ...config, network: { ...config.network, allowAllUnixSockets: true } };
-		await startSandbox(allowAll, deny, "linux");
+		await startSandbox({ ...config, seccomp }, deny, "linux");
 		const status = await startSandbox(config, deny, "linux");
 		expect(status.kind === "unavailable" && status.reason).toContain("apply-seccomp");
 		expect(engine.calls).toEqual(["initialize"]);
+	});
+
+	it("is unavailable on Linux when every Unix socket is allowed, since a server directory made later is not hidden", async () => {
+		const engine = fakeEngine();
+		setSandboxEngine(engine);
+		const allowAll = { ...config, network: { ...config.network, allowAllUnixSockets: true } };
+		const status = await startSandbox(allowAll, deny, "linux");
+		expect(status.kind).toBe("unavailable");
+		expect(status.kind === "unavailable" && status.reason).toContain("allowAllUnixSockets");
+		expect(status.kind === "unavailable" && status.reason).toContain("bluclawd's own sockets");
+		expect(engine.calls).toEqual([]);
+	});
+
+	it("becomes unavailable on Linux when the settings start allowing every Unix socket", async () => {
+		const engine = fakeEngine();
+		setSandboxEngine(engine);
+		await startSandbox(config, deny, "linux");
+		const allowAll = { ...config, network: { ...config.network, allowAllUnixSockets: true } };
+		const status = await startSandbox(allowAll, deny, "linux");
+		expect(status.kind === "unavailable" && status.reason).toContain("allowAllUnixSockets");
+		expect(engine.calls).toEqual(["initialize"]);
+	});
+
+	it("starts on macOS with every Unix socket allowed and the file rules off", async () => {
+		setSandboxEngine(fakeEngine());
+		const open = {
+			network: { ...config.network, allowAllUnixSockets: true },
+			filesystem: { ...config.filesystem, disabled: true },
+		};
+		expect(await startSandbox(open, deny, "darwin")).toEqual({ kind: "ready" });
+	});
+
+	it("is unavailable on Linux when filesystem.disabled drops the read deny while every Unix socket is allowed", async () => {
+		const engine = fakeEngine();
+		setSandboxEngine(engine);
+		const status = await startSandbox(
+			{
+				network: { ...config.network, allowAllUnixSockets: true },
+				filesystem: { ...config.filesystem, disabled: true },
+			},
+			deny,
+			"linux",
+		);
+		expect(status.kind).toBe("unavailable");
+		expect(status.kind === "unavailable" && status.reason).toContain("filesystem.disabled");
+		expect(status.kind === "unavailable" && status.reason).toContain("bluclawd's own sockets");
+		expect(engine.calls).toEqual([]);
 	});
 
 	it("starts on macOS whatever the Linux Unix-socket filter", async () => {

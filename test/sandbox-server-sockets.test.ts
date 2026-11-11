@@ -1,7 +1,7 @@
 /**
  * The orchestrator's sandboxed shell, for real, cannot connect to bluclawd's own sockets, the daemon's
- * `server.sock` and tmux's `tmux.sock`, whatever the user's Unix-socket settings allow (ADR-0012). macOS only:
- * on Linux the Unix-socket settings are ignored and the server directory is hidden instead.
+ * `server.sock` and tmux's `tmux.sock`, whatever the user's Unix-socket settings allow (ADR-0012). On Linux the
+ * Unix-socket allows are ignored, and the sandbox does not start with every Unix socket allowed.
  */
 import { execFile } from "node:child_process";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
@@ -15,7 +15,7 @@ import { parseSandbox, runtimeConfig, serverDirs } from "../ext/sandbox/config.t
 import { setSandboxEngine, startSandbox, stopSandbox, wrapExec } from "../ext/sandbox/runtime.ts";
 
 const supported =
-	process.platform === "darwin" &&
+	(process.platform === "darwin" || process.platform === "linux") &&
 	SandboxManager.isSupportedPlatform() &&
 	SandboxManager.checkDependencies().errors.length === 0;
 
@@ -49,14 +49,17 @@ describe.skipIf(!supported)("the orchestrator's shell and bluclawd's own sockets
 		return { code: exitCode, output };
 	}
 
-	async function start(network: Record<string, unknown>): Promise<void> {
+	function config(network: Record<string, unknown>) {
 		const setting = parseSandbox({ enabled: true, network });
 		if (setting.kind !== "on") throw new Error(setting.kind);
-		const config = runtimeConfig(setting.settings, [], project, home, tmpdir(), dirs);
-		expect(await startSandbox(config, async () => false)).toEqual({ kind: "ready" });
+		return runtimeConfig(setting.settings, [], project, home, tmpdir(), dirs);
 	}
 
-	/** Every server socket refuses the shell, though each answers outside it; the user's own socket still answers. */
+	async function start(network: Record<string, unknown>): Promise<void> {
+		expect(await startSandbox(config(network), async () => false)).toEqual({ kind: "ready" });
+	}
+
+	/** Every server socket refuses the shell, though each answers outside it; the user's own socket still answers on macOS. */
 	async function expectOwnSocketsDenied(): Promise<void> {
 		for (const dir of [privateDir, defaultDir]) {
 			for (const name of ["server.sock", "tmux.sock"]) {
@@ -71,10 +74,10 @@ describe.skipIf(!supported)("the orchestrator's shell and bluclawd's own sockets
 				expect(result.output, path).toMatch(/^EPERM/);
 			}
 		}
-		expect(await run(connect(userSocket))).toMatchObject({
-			code: 0,
-			output: expect.stringMatching(/^CONNECTED hello\n/),
-		});
+		// Linux ignores `allowUnixSockets`: its filter refuses every Unix socket.
+		expect((await run(connect(userSocket))).output).toMatch(
+			process.platform === "linux" ? /^EPERM/ : /^CONNECTED hello\n/,
+		);
 	}
 
 	beforeAll(async () => {
@@ -111,9 +114,19 @@ describe.skipIf(!supported)("the orchestrator's shell and bluclawd's own sockets
 		rmSync(root, { recursive: true, force: true });
 	});
 
-	it("cannot connect to either server directory's, with every Unix socket allowed", async () => {
-		await start({ allowAllUnixSockets: true });
-		await expectOwnSocketsDenied();
+	it.skipIf(process.platform === "linux")(
+		"cannot connect to either server directory's, with every Unix socket allowed",
+		async () => {
+			await start({ allowAllUnixSockets: true });
+			await expectOwnSocketsDenied();
+		},
+	);
+
+	it.skipIf(process.platform !== "linux")("does not start on Linux with every Unix socket allowed", async () => {
+		expect(await startSandbox(config({ allowAllUnixSockets: true }), async () => false)).toEqual({
+			kind: "unavailable",
+			reason: expect.stringContaining("allowAllUnixSockets"),
+		});
 	});
 
 	it("cannot, with an allowUnixSockets entry above both server directories", async () => {

@@ -96,20 +96,22 @@ port per session (no UI: refused).
 
 ### bluclawd's own sockets
 
-bluclawd's own sockets are never a way out of the sandbox, whatever the Unix-socket keys allow,
-save with `filesystem.disabled` on Linux (below). The daemon's `server.sock` and tmux's
+bluclawd's own sockets are never a way out of the sandbox, whatever the Unix-socket keys allow.
+The daemon's `server.sock` and tmux's
 `tmux.sock` live in the server directory (`~/.pi/server`, or `$PI_SERVER_DIR`). bluclawd always
 adds that directory and the default one, by real path, to `denyUnixSockets` and to the denied
 `credentials.files`; no setting removes them. On macOS a command cannot connect to either socket,
 even with `allowAllUnixSockets` or an `allowUnixSockets` entry above the directory (`~`,
 `~/.pi`), and cannot read the directory, whatever `allowRead` names. On Linux one socket path
-cannot be denied, so hiding the directory is the whole mechanism; it is read from `srt`'s code
-and not yet run there.
+cannot be denied, and hiding the directory holds only for one that exists when a command starts:
+run on Linux, a command started before the daemon made its directory (it does on the first `←`)
+could list it, read it and connect to both sockets. So on Linux the sandbox does not start with
+`allowAllUnixSockets`, and its filter refuses every Unix socket. A command cannot list or read a
+directory that exists when it starts; one made while it runs stays readable to it.
 
 One setting lifts the read deny: `filesystem.disabled: true` drops every file rule, the credential
-denies included, so a command can then read the server directory, on macOS too. The socket deny
-is a network rule and still holds on macOS. On Linux nothing is left: with `filesystem.disabled`
-and Unix sockets allowed, a command can reach bluclawd's sockets.
+denies included, so a command can then read the server directory. The socket deny still holds on
+macOS, where it is a network rule, and on Linux, where every Unix socket is refused.
 
 Sockets bluclawd does not own (your tmux, Docker) follow these keys as written. Why: ADR-0012.
 
@@ -204,7 +206,7 @@ fails in the sandbox; run it yourself with `!`.
 | `mandatoryDenySearchDepth` | 1–10 | Linux: how deep under the working directory the always-protected names are looked for (default 3) |
 | `ripgrep` | `{ command, args?, argv0? }` | Linux: how `srt` runs ripgrep (default `{ "command": "rg" }`) |
 | `bwrapPath`, `socatPath` | absolute path | Linux: these binaries instead of the ones on `PATH` |
-| `seccomp` | `{ applyPath?, argv0? }` | Linux: a different `apply-seccomp` binary. Without a working one the sandbox does not start, unless `network.allowAllUnixSockets` is `true` |
+| `seccomp` | `{ applyPath?, argv0? }` | Linux: a different `apply-seccomp` binary. Without a working one the sandbox does not start |
 | `javaAgentJarPath` | absolute path | The JVM proxy agent, only for a repackaged `srt` |
 | `windows` | object | Native Windows only, which bluclawd does not run on |
 
@@ -215,7 +217,7 @@ Each of these reopens something the sandbox otherwise closes. Turn one on only f
 | Key | What it gives up |
 |---|---|
 | `filesystem.disabled: true` | Every file rule, including the deny rules' paths, `credentials.files`, the read deny on [bluclawd's server directories](#bluclawds-own-sockets) and the always-protected names. `.env` becomes readable |
-| `network.allowAllUnixSockets: true` | All Unix sockets (a Docker socket gives full control of the machine), except [bluclawd's own](#bluclawds-own-sockets) (not yet run on Linux). On Linux, VM sockets too |
+| `network.allowAllUnixSockets: true` | All Unix sockets (a Docker socket gives full control of the machine), except [bluclawd's own](#bluclawds-own-sockets). On Linux the sandbox does not start with it |
 | `allowAppleEvents: true` | macOS: commands can launch other apps with `open` and script them; those apps run outside the sandbox |
 | `enableWeakerNetworkIsolation: true` | macOS: access to `com.apple.trustd.agent`, a possible way to send data out |
 | `enableWeakerNestedSandbox: true` | A weaker sandbox, for running inside Docker |
