@@ -14,6 +14,7 @@ import {
 	formatRunLabel,
 	type LaunchParams,
 	type LaunchRequest,
+	nameTaken,
 	type RunAdmission,
 } from "./admission.ts";
 import { NOT_APPROVAL } from "./messages.ts";
@@ -298,8 +299,7 @@ export async function admitBatch(
 		const first = entries.findIndex((entry) => entry.name?.trim() === named);
 		const holder = deps.nameHolder(named);
 		if (first < i) faults.push({ i, error: `"${named}" is also the name of tasks[${first}]; give each its own.` });
-		else if (holder)
-			faults.push({ i, error: `Subagent name "${named}" is already used by running agent ${holder.runId}.` });
+		else if (holder) faults.push({ i, error: `${nameTaken(named, holder)}.` });
 	});
 
 	let refused = faults.length > 0;

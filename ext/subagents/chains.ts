@@ -20,6 +20,7 @@ import {
 	invalidTaskText,
 	type LaunchRequest,
 	MAX_TASK_INPUT_BYTES,
+	nameTaken,
 	type RunAdmission,
 } from "./admission.ts";
 import { type BatchMember, capAggregate, fullReportOf, inlineReports, memberOutcome, settleBatch } from "./batches.ts";
@@ -156,8 +157,7 @@ export async function runChain(
 			const twin = named ? steps.findIndex((other) => "run" in other && other.run.name?.trim() === named) : i;
 			const holder = named ? deps.nameHolder(named) : undefined;
 			if (twin < i) faults.push({ i, error: `"${named}" is also the name of chain[${twin}]; give each its own.` });
-			else if (holder)
-				faults.push({ i, error: `Subagent name "${named}" is already used by running agent ${holder.runId}.` });
+			else if (named && holder) faults.push({ i, error: `${nameTaken(named, holder)}.` });
 			try {
 				const result = await deps.admission.launch(
 					{

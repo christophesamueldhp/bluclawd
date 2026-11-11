@@ -317,6 +317,10 @@ export function formatRunLabel(run: Pick<SubagentRunRecord, "name" | "runId">): 
 	return run.name ? `"${run.name}" (${run.runId})` : `"${run.runId}"`;
 }
 
+/** Why a run cannot have the name `name`: the open run `holder` has it. */
+export const nameTaken = (name: string, holder: Pick<SubagentRunRecord, "runId">): string =>
+	`Subagent name "${name}" is already used by running agent ${holder.runId}`;
+
 /**
  * Why a run in tmux, from before runs ran on pi's RPC, does not go on (ADR-0010): its work continues in a new run,
  * admitted afresh, pointed at its history.
@@ -815,7 +819,7 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 			}
 			if (!(await deps.ensureQueue())) return reject(`Cannot launch subagent: ${QUEUE_DOWN}`);
 			if (ready && !(await ready({ cwd, root: workspace.root, writes }))) {
-				return reject("Not admitted: another task of its batch was refused.");
+				return reject("Not admitted: another member of its batch was refused.");
 			}
 
 			// Everything from here to admit runs without awaiting, so the session cannot change in between.
@@ -832,9 +836,7 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 			if (requestedName !== undefined) {
 				const holder = holderOf(requestedName);
 				if (holder) {
-					return reject(
-						`Subagent name "${requestedName}" is already used by running agent ${holder.runId}; choose another name.`,
-					);
+					return reject(`${nameTaken(requestedName, holder)}; choose another name.`);
 				}
 			}
 			let runName = requestedName;
