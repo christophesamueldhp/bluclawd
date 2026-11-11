@@ -202,4 +202,47 @@ describe.skipIf(!hasTmux)("an RPC run's model and thinking", () => {
 			thinkingLevel: "medium",
 		});
 	});
+
+	it("keeps the model and thinking a queued run was admitted with when its orchestrator changes its own before the run's turn", async () => {
+		const real = await startOrchestrator();
+		pi = real;
+		const settings = join(real.agentDir, "settings.json");
+		writeFileSync(
+			settings,
+			JSON.stringify({ ...JSON.parse(readFileSync(settings, "utf8")), subagents: { maxActive: 1 } }),
+		);
+		const release = join(real.cwd, "release");
+		const background = (name: string) => ({
+			tool: "subagent",
+			args: { agent: "explorer", name, task: "List.", background: true },
+		});
+		real.script("main", [
+			{ calls: [background("holder"), background("queued")] },
+			{ text: "launched" },
+			{ text: "switched" },
+			...Array(3).fill({ text: "noted" }),
+		]);
+		real.script("holder", [{ text: "holder listed", until: release }]);
+		real.script("queued", [{ text: "queued listed" }]);
+		const pane = real.start(["--model", "faux/faux-2", "--thinking", "medium", "--", "delegate"]);
+		await real.waitForRequests("main", 2);
+		await real.waitForRequests("holder", 1);
+
+		// The only slot is the holder's, so the other run waits with no model call while the orchestrator switches.
+		real.tmux.sendKeys(pane, ["/model faux/faux-1", "Enter"]);
+		await waitFor(() => expect(real.tmux.capture(pane, 50).join("\n")).toContain("Model: faux-1"));
+		real.tmux.sendKeys(pane, ["anything new?", "Enter"]);
+		expect(asked((await real.waitForRequests("main", 3)).slice(2))).toEqual(["faux/faux-1:off"]);
+		expect(real.requests("queued")).toEqual([]);
+		writeFileSync(release, "");
+
+		expect(asked(await real.waitForRequests("queued", 1))).toEqual(["faux/faux-2:medium"]);
+		expect(admitted(real.agentDir, "queued").admitted).toEqual({
+			provider: "faux",
+			modelId: "faux-2",
+			thinkingLevel: "medium",
+		});
+		await waitFor(() => expect(JSON.stringify(real.requests("main"))).toContain("queued listed"));
+		expect(JSON.stringify([...real.requests("main"), ...real.requests("queued")])).not.toContain("ran dry");
+	});
 });
