@@ -99,6 +99,22 @@ function withScratchIndex<T>(from: string | undefined, use: (index: string) => T
 	}
 }
 
+/** Why no worktree can be made from the checkout `cwd` is in, as far as is known before its state is recorded. */
+export function worktreeUnavailable(cwd: string): string | undefined {
+	let source: string;
+	try {
+		source = realpathSync(gitSync(cwd, ["rev-parse", "--show-toplevel"]));
+	} catch {
+		return `${cwd} is not in a Git repository`;
+	}
+	try {
+		gitSync(cwd, ["rev-parse", "--verify", "-q", "HEAD^{commit}"]);
+	} catch {
+		return `${source} has no commit yet`;
+	}
+	return undefined;
+}
+
 /**
  * Records the checkout `cwd` is in as it is now, for run `runId`: refused outside Git, before a first commit, with
  * unresolved conflicts, or when `cwd` itself is not part of what is recorded (an ignored directory). `cwd` is real.

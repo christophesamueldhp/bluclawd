@@ -44,7 +44,13 @@ import {
 	WRITE_TOOLS,
 } from "./rpc-runs.ts";
 import { type RunWorkspace, resolveRunWorkspace } from "./run-workspace.ts";
-import { captureRunBaseline, dropRunBaseline, type IsolatedWorkspace, worktreePath } from "./run-worktree.ts";
+import {
+	captureRunBaseline,
+	dropRunBaseline,
+	type IsolatedWorkspace,
+	worktreePath,
+	worktreeUnavailable,
+} from "./run-worktree.ts";
 import {
 	type AdmittedSubagentHandle,
 	createRunId,
@@ -759,6 +765,14 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 					`Subagent role "${definition.name}" names tools the orchestrator cannot give a child: ${unknownTools.join(", ")}. Available: ${available.join(", ") || "none"}.`,
 				);
 			}
+			const writes = rpcTools?.tools.some((tool) => WRITE_TOOLS.includes(tool)) === true;
+			const cannotIsolate = (why: string) =>
+				reject(
+					`Subagent role "${definition.name}" may edit files, so it works in an isolated Git worktree, and none can be made: ${why}. A run that edits never works in a shared checkout: give it a cwd in a Git repository with a commit, or a role that only reads.`,
+				);
+			// Known before a batch's members are admitted together, unlike what recording the checkout may still find.
+			const unisolated = writes ? worktreeUnavailable(cwd) : undefined;
+			if (unisolated) return cannotIsolate(unisolated);
 
 			// Spawn > role > parent for the model and thinking level, verified before admission.
 			const invalid = invalidModelChoice(params);
@@ -821,13 +835,9 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 			// checkout. It keeps the checkout's trust and deny rules: its files are the checkout's.
 			let isolated: IsolatedWorkspace | undefined;
 			let runCwd = cwd;
-			if (rpcTools?.tools.some((tool) => WRITE_TOOLS.includes(tool))) {
+			if (writes) {
 				const captured = captureRunBaseline(cwd, runId);
-				if (!captured.ok) {
-					return reject(
-						`Subagent role "${definition.name}" may edit files, so it works in an isolated Git worktree, and none can be made: ${captured.error}. A run that edits never works in a shared checkout: give it a cwd in a Git repository with a commit, or a role that only reads.`,
-					);
-				}
+				if (!captured.ok) return cannotIsolate(captured.error);
 				isolated = { root: worktreePath(agentDir, runId), baseline: captured.baseline };
 				runCwd = join(isolated.root, captured.cwd);
 			}

@@ -17,6 +17,8 @@ import {
 } from "./admission.ts";
 import { NOT_APPROVAL } from "./messages.ts";
 import { sanitizeReportText, truncateUtf8Safe } from "./results.ts";
+import { readRunDefinition, runDefinitionPath } from "./rpc-runs.ts";
+import { describeWorkspace } from "./run-worktree.ts";
 import type { AdmittedSubagentHandle, SubagentRunRecord } from "./runs.ts";
 import {
 	getSubagentsRootDir,
@@ -48,6 +50,8 @@ export type MemberOutcome = { status: "completed" } | { status: "failed" | "canc
 export interface BatchMember {
 	record: Readonly<SubagentRunRecord>;
 	report?: StoredRunReport;
+	/** A member that edits: its worktree, and where it worked and what it changed there, as Git sees it. */
+	workspace?: { root: string; lines: string[] };
 }
 
 export function memberOutcome({ record, report }: BatchMember): MemberOutcome {
@@ -100,7 +104,11 @@ export function formatBatchAggregate(
 	let used = bytes(head);
 	let truncated = false;
 
-	const line = (i: number) => `- ${formatRunLabel(members[i].record)}: ${describe(outcomes[i], true)}`;
+	const line = (i: number) => {
+		const { record, workspace } = members[i];
+		const edits = workspace ? `; its edits are in its worktree ${workspace.root}, not in your checkout` : "";
+		return `- ${formatRunLabel(record)}: ${describe(outcomes[i], true)}${edits}`;
+	};
 	const indexes = members.map((_, i) => i);
 	const allLines = indexes.map(line);
 	let listed = indexes;
@@ -133,7 +141,8 @@ export function formatBatchAggregate(
 	const inlined = Math.min(reported.length, Math.floor(room / MIN_INLINE_REPORT_BYTES));
 	const share = inlined ? Math.floor(room / inlined) : 0;
 	const sections = reported.slice(0, inlined).map((i) => {
-		const heading = `### ${formatRunLabel(members[i].record)}: completed\n`;
+		const where = members[i].workspace?.lines.map((text) => `${text}\n`).join("") ?? "";
+		const heading = `### ${formatRunLabel(members[i].record)}: completed\n${where}`;
 		const cut = `\n[Cut short; its full Report: ${members[i].record.reportPath ?? "see the manifest"}]`;
 		const text = sanitizeReportText(members[i].report?.text ?? "").trim();
 		const fits = bytes(heading) + bytes(text) <= share;
@@ -164,6 +173,7 @@ function batchManifest(batch: string, members: readonly BatchMember[]): string {
 			return [
 				`- tasks[${i}] ${formatRunLabel(record)}: ${describe(memberOutcome(member))}`,
 				`  Role ${record.agentName}, model ${record.provider}/${record.modelId} at thinking ${record.thinkingLevel}, cwd ${record.cwd}`,
+				...(member.workspace?.lines.map((text) => `  ${text}`) ?? []),
 				`  Report: ${record.reportPath ?? "none stored"}`,
 				`  Transcript: ${record.transcriptPath ?? "none"}`,
 			];
@@ -283,13 +293,17 @@ export async function settleBatch(
 			return completion.finally(() => settled.abort());
 		}),
 	);
-	return finals.map((record) => {
-		const runDir = subagentRunDir(agentDir, record.parentSessionId, record.runId);
-		const report = readRunReports(runDir, 0)
-			.filter(({ generation }) => generation === record.generation)
-			.at(-1);
-		return { record, ...(report ? { report } : {}) };
-	});
+	return Promise.all(
+		finals.map(async (record) => {
+			const runDir = subagentRunDir(agentDir, record.parentSessionId, record.runId);
+			const report = readRunReports(runDir, 0)
+				.filter(({ generation }) => generation === record.generation)
+				.at(-1);
+			const isolated = readRunDefinition(runDefinitionPath(runDir, record.generation))?.workspace;
+			const workspace = isolated && { root: isolated.root, lines: await describeWorkspace(isolated) };
+			return { record, ...(report ? { report } : {}), ...(workspace ? { workspace } : {}) };
+		}),
+	);
 }
 
 /** Stores the manifest of a settled batch; the aggregate pointing to it says so if it could not be stored. */

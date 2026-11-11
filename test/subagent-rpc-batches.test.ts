@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { JsonObject } from "@earendil-works/pi-ai";
@@ -70,6 +71,25 @@ const toolResults = (request: FauxRequest) =>
 		.filter((message) => message.role === "toolResult")
 		.map(({ text }) => text);
 
+/** Git in `cwd`, as a user of the fixture repository: its own identity, no hooks, no signing. */
+function git(cwd: string, ...args: string[]): string {
+	const result = spawnSync(
+		"git",
+		["-c", "user.name=Fixture", "-c", "user.email=fixture@example.com", "-c", "commit.gpgsign=false", ...args],
+		{ cwd, encoding: "utf8" },
+	);
+	if (result.status !== 0) throw new Error(`git ${args.join(" ")}: ${result.stderr}`);
+	return result.stdout;
+}
+
+/** An inline role that edits files: it works in a worktree of its own. */
+const writer = {
+	name: "writer",
+	description: "Edits files.",
+	instructions: "Make the change asked.",
+	tools: ["read", "edit", "write"],
+};
+
 /** An orchestrator pane whose runs are RPC children, which load the faux provider as the pane does. */
 async function startOrchestrator(): Promise<RealPi> {
 	vi.stubEnv("BLUCLAWD_RPC_RUNS", "1");
@@ -104,6 +124,7 @@ describe.skipIf(!hasTmux)("a tasks batch of RPC runs", () => {
 								task: "Write.",
 								name: "writer",
 							},
+							{ agent: writer, task: "Edit.", name: "editor" },
 						],
 					}),
 					subagent({
@@ -128,8 +149,11 @@ describe.skipIf(!hasTmux)("a tasks batch of RPC runs", () => {
 		expect(invalid).toMatch(/^No task of the batch was started:/);
 		expect(invalid).toMatch(/tasks\[1\] \("unknown"\): .*nosuch/);
 		expect(invalid).toMatch(/tasks\[2\] \("blank"\): Missing required parameter: task/);
-		// Writing members wait for the isolated writer path: a role that writes is refused as a single run is.
-		expect(invalid).toMatch(/tasks\[3\] \("writer"\): .*read-only run cannot have: bash/);
+		// A member is held to what a single run is: no shell, and edits only in a worktree of its own.
+		expect(invalid).toMatch(/tasks\[3\] \("writer"\): .*cannot have yet: bash/);
+		expect(invalid).toMatch(
+			/tasks\[4\] \("editor"\): .*isolated Git worktree, and none can be made: .* is not in a Git repository/,
+		);
 		expect(invalid).not.toMatch(/tasks\[0\]/);
 		expect(twins).toMatch(/tasks\[1\] \("twin"\): .*also the name of tasks\[0\]/);
 		expect(reserved).toMatch(/tasks\[0\] \("batch_mine"\): Invalid subagent name/);
@@ -388,5 +412,48 @@ describe.skipIf(!hasTmux)("a tasks batch of RPC runs", () => {
 			expect(aggregate).toContain(`[Cut short; its full Report: ${full}]`);
 			expect(readFileSync(full, "utf8")).toContain(`${name} ends.`);
 		}
+	});
+
+	it("lets a member that edits work in a worktree of its own beside one that reads the checkout, and says where its edits are", async () => {
+		const real = await startOrchestrator();
+		pi = real;
+		const repo = real.cwd;
+		writeFileSync(join(repo, "a.txt"), "one\n");
+		git(repo, "init", "-q");
+		git(repo, "add", ".");
+		git(repo, "commit", "-q", "-m", "start");
+		real.script("main", [
+			{
+				tool: "subagent",
+				args: {
+					tasks: [
+						{ agent: writer, name: "w", task: "Write new.txt." },
+						{ agent: "explorer", name: "r", task: "Read a.txt." },
+					],
+				},
+			},
+			{ text: "read the batch" },
+		]);
+		real.script("w", [{ tool: "write", args: { path: "new.txt", content: "NEW\n" } }, { text: "Wrote new.txt." }]);
+		real.script("r", [{ tool: "read", args: { path: "a.txt" } }, { text: "Read a.txt." }]);
+		real.start(["--", "delegate"]);
+		await real.waitForRequests("main", 1);
+		await Promise.all([real.waitForRequests("w", 2), real.waitForRequests("r", 2)]);
+		const [aggregate] = toolResults((await real.waitForRequests("main", 2))[1]);
+
+		const worktree = recordOf(real, "w").cwd as string;
+		expect(worktree).not.toBe(realpathSync(repo));
+		expect(readFileSync(join(worktree, "new.txt"), "utf8")).toBe("NEW\n");
+		expect(existsSync(join(repo, "new.txt"))).toBe(false);
+		expect(recordOf(real, "r").cwd).toBe(realpathSync(repo));
+		expect(toolResults(real.requests("r")[1])).toEqual(["one\n"]);
+		expect(aggregate).toMatch(/2 tasks, 2 completed, 0 failed, 0 cancelled\./);
+		expect(aggregate).toContain(`- "w" (${recordOf(real, "w").runId}): completed; its edits are in its worktree`);
+		expect(aggregate).toMatch(
+			/### "w" \(sub_[\w-]+\): completed\nWorkspace: .*\n.*\nChanges since its baseline: A new\.txt\nWrote new\.txt\./,
+		);
+		expect(aggregate).toMatch(/- "r" \(sub_[\w-]+\): completed\n/);
+		const manifest = /Every member's status, full Report and transcript: (\S+)/.exec(aggregate)?.[1] ?? "";
+		expect(readFileSync(manifest, "utf8")).toContain("  Changes since its baseline: A new.txt");
 	});
 });
