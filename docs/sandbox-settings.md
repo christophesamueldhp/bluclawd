@@ -181,7 +181,7 @@ fails in the sandbox; run it yourself with `!`.
 | `mandatoryDenySearchDepth` | 1–10 | Linux: how deep under the working directory the always-protected names are looked for (default 3) |
 | `ripgrep` | `{ command, args?, argv0? }` | Linux: how `srt` runs ripgrep (default `{ "command": "rg" }`) |
 | `bwrapPath`, `socatPath` | absolute path | Linux: these binaries instead of the ones on `PATH` |
-| `seccomp` | `{ applyPath?, argv0? }` | Linux: a different `apply-seccomp` binary |
+| `seccomp` | `{ applyPath?, argv0? }` | Linux: a different `apply-seccomp` binary. Without a working one the sandbox does not start, unless `network.allowAllUnixSockets` is `true` |
 | `javaAgentJarPath` | absolute path | The JVM proxy agent, only for a repackaged `srt` |
 | `windows` | object | Native Windows only, which bluclawd does not run on |
 

@@ -19,6 +19,11 @@ export type AskNetwork = (request: { host: string; port: number | undefined }) =
 export interface SandboxEngine {
 	isSupportedPlatform(): boolean;
 	checkDependencies(): { errors: string[]; warnings: string[] };
+	/**
+	 * Linux: whether `srt` finds the `apply-seccomp` binary that blocks Unix sockets. Without it `srt` leaves them all
+	 * open and only warns.
+	 */
+	canBlockUnixSockets(seccomp: SandboxRuntimeConfig["seccomp"]): Promise<boolean>;
 	initialize(config: SandboxRuntimeConfig, ask: AskNetwork, enableLogMonitor: boolean): Promise<void>;
 	updateConfig(config: SandboxRuntimeConfig): void;
 	wrapWithSandbox(
@@ -63,6 +68,11 @@ function serialized<T>(task: () => Promise<T>): Promise<T> {
 const LINUX_HINT =
 	"install bubblewrap, socat and ripgrep (apt install bubblewrap socat ripgrep); on Ubuntu 24.04+ also allow unprivileged user namespaces, see the README";
 
+const NO_UNIX_SOCKET_FILTER =
+	"Unix sockets cannot be blocked: the sandbox runtime's apply-seccomp binary was not found; " +
+	"reinstall bluclawd, set sandbox.seccomp.applyPath to a working apply-seccomp, " +
+	"or set sandbox.network.allowAllUnixSockets to true to let commands reach every Unix socket";
+
 /**
  * The hosts the user let the model's commands reach this session, as `host:port`: a subagent run asking for one of
  * them is not asked about again (ext/subagents/generations.ts).
@@ -100,7 +110,16 @@ async function engine(): Promise<SandboxEngine> {
 	if (current) return current;
 	// Loaded when a sandbox first starts, so a session without one never loads it.
 	const { SandboxManager } = await import("@anthropic-ai/sandbox-runtime");
-	const loaded: SandboxEngine = SandboxManager;
+	// The lookup `srt` makes when it wraps a command; its package has no export map.
+	const { getApplySeccompBinaryPathAsync } = await import(
+		"@anthropic-ai/sandbox-runtime/dist/sandbox/generate-seccomp-filter.js"
+	);
+	const loaded: SandboxEngine = {
+		...SandboxManager,
+		// `srt` takes any non-empty `argv0` as a binary compiled into its caller.
+		canBlockUnixSockets: async (seccomp) =>
+			Boolean(seccomp?.argv0) || (await getApplySeccompBinaryPathAsync(seccomp?.applyPath)) !== null,
+	};
 	setSandboxEngine(loaded);
 	return loaded;
 }
@@ -127,7 +146,13 @@ async function start(config: RuntimeConfig, ask: AskNetwork, platform: NodeJS.Pl
 		const checked = await checkRuntimeConfig(config);
 		if (typeof checked === "string") return markSandboxUnavailable(checked);
 		const sandbox = await engine();
+		// Checked on every start, since a settings change can drop `allowAllUnixSockets` from a running sandbox.
+		const unixSocketsOpen = async () =>
+			platform === "linux" &&
+			checked.network.allowAllUnixSockets !== true &&
+			!(await sandbox.canBlockUnixSockets(checked.seccomp));
 		if (state.get().initialized) {
+			if (await unixSocketsOpen()) return markSandboxUnavailable(NO_UNIX_SOCKET_FILTER);
 			sandbox.updateConfig(checked);
 			return setStatus({ kind: "ready" });
 		}
@@ -138,6 +163,7 @@ async function start(config: RuntimeConfig, ask: AskNetwork, platform: NodeJS.Pl
 				platform === "linux" ? `${errors.join("; ")}: ${LINUX_HINT}` : errors.join("; "),
 			);
 		}
+		if (await unixSocketsOpen()) return markSandboxUnavailable(NO_UNIX_SOCKET_FILTER);
 		await sandbox.initialize(checked, (request) => state.get().ask(request), true);
 		state.set({ ...state.get(), initialized: true });
 		return setStatus({ kind: "ready" });
