@@ -10,8 +10,12 @@ const ACTIVITY_LABEL: Record<AgentActivity, string> = {
 	awaiting_input: "needs input",
 };
 
-/** What a Run is doing, for display: an open one in a pi of its own says whether it works, idles or needs input. */
-export function runStatus(run: Pick<SubagentRunRecord, "pane" | "status" | "activity">): string {
+/**
+ * What a Run is doing, for display: an open one in a pi of its own says whether it works, idles or needs input; one on
+ * pi's RPC that has not started waits for its turn in the daemon's queue.
+ */
+export function runStatus(run: Pick<SubagentRunRecord, "pane" | "status" | "activity" | "backend">): string {
+	if (run.backend === "rpc" && run.status === "starting") return "queued";
 	return run.pane && run.status === "running" ? ACTIVITY_LABEL[run.activity ?? "working"] : run.status;
 }
 

@@ -74,6 +74,8 @@ const BACKGROUND_BATCH_WINDOW_MS = 40;
 /** As remote and the daemon do, so a hung tmux server cannot hold up pi. */
 /** How long the panel keeps a run that failed, and its `/tasks` hint after a close. */
 const ENDED_SHOWN_MS = 30_000;
+/** How many open runs `subagent_status` describes at once. */
+const MAX_STATUS_RUNS = 30;
 const timedTmux = (): Tmux => new Tmux(undefined, undefined, { timeoutMs: 2000 });
 const SUBAGENT_DESCRIPTION_LEAD = "Delegate a task to a child agent that works in this same checkout";
 // Wording follows Codex's "After you delegate" block and Claude Code's harness text (docs/research/subagents-ux-and-waiting.md).
@@ -771,9 +773,15 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 				const now = Date.now();
 				const target = params.agent?.trim();
 				const runs = target ? [views.findOpen(target)].filter((run) => run !== undefined) : views.open();
+				// However many run: a batch's manifest lists each of its members.
+				const listed = runs.slice(0, MAX_STATUS_RUNS);
+				const unlisted = runs.length - listed.length;
 				const text =
 					runs.length > 0
-						? runs.map((run) => describeProgress(run, now)).join("\n\n")
+						? [
+								...listed.map((run) => describeProgress(run, now)),
+								...(unlisted ? [`[${unlisted} more not listed here: name one to see it.]`] : []),
+							].join("\n\n")
 						: target
 							? `No running subagent "${target}".`
 							: "No subagents are running.";

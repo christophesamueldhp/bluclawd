@@ -241,13 +241,15 @@ describe.skipIf(!hasTmux)("a tasks batch of RPC runs", () => {
 		);
 		expect(aggregate).toMatch(/Batch batch_\w+: 3 tasks, 3 completed, 0 failed, 0 cancelled\./);
 		for (const name of ["ta", "tb"])
-			expect(aggregate).toMatch(new RegExp(`### "${name}" \\(sub_[\\w-]+\\): completed\\n${name} saw it\\.`));
-		expect(aggregate).toMatch(/### "tc" \(sub_[\w-]+\): completed\ntc done\./);
+			expect(aggregate).toMatch(
+				new RegExp(`### "${name}" \\(sub_[\\w-]+\\): completed\\nChecks: [^\\n]+\\n${name} saw it\\.`),
+			);
+		expect(aggregate).toMatch(/### "tc" \(sub_[\w-]+\): completed\nChecks: [^\n]+\ntc done\./);
 		const manifest = /Every member's status, full Report and transcript: (\S+)/.exec(aggregate)?.[1] ?? "";
 		const listed = readFileSync(manifest, "utf8");
 		for (const [i, name] of ["ta", "tb", "tc"].entries()) {
 			expect(listed).toMatch(new RegExp(`- tasks\\[${i}\\] "${name}" \\(sub_[\\w-]+\\): completed`));
-			expect(listed).toContain(`Report: ${recordOf(real, name).reportPath}`);
+			expect(listed).toContain(`Report: ${join(runDir(real, name), "reports", "1.md")}`);
 		}
 		expect(recordOf(real, "ta")).toMatchObject({
 			cwd: realpathSync(join(real.cwd, "a")),
@@ -284,7 +286,9 @@ describe.skipIf(!hasTmux)("a tasks batch of RPC runs", () => {
 		expect(aggregate).not.toMatch(/### "bad"/);
 		for (const name of ["ok1", "ok2"]) {
 			expect(aggregate).toMatch(new RegExp(`- "${name}" \\(sub_[\\w-]+\\): completed`));
-			expect(aggregate).toMatch(new RegExp(`### "${name}" \\(sub_[\\w-]+\\): completed\\n${name} found it\\.`));
+			expect(aggregate).toMatch(
+				new RegExp(`### "${name}" \\(sub_[\\w-]+\\): completed\\nChecks: [^\\n]+\\n${name} found it\\.`),
+			);
 		}
 		expect(real.requests("bad")).toHaveLength(1);
 	});
@@ -375,7 +379,7 @@ describe.skipIf(!hasTmux)("a tasks batch of RPC runs", () => {
 				new RegExp(`- "${name}" \\(sub_[\\w-]+\\): cancelled: Its batch ${batch} was stopped`),
 			);
 		}
-		expect(aggregate).toMatch(/### "m0" \(sub_[\w-]+\): completed\nm0 found it\./);
+		expect(aggregate).toMatch(/### "m0" \(sub_[\w-]+\): completed\nChecks: [^\n]+\nm0 found it\./);
 		for (const name of ["m2", "m3"]) {
 			expect(real.requests(name)).toEqual([]);
 			expect(existsSync(join(runDir(real, name), "rpc-host.json"))).toBe(false);
@@ -406,9 +410,11 @@ describe.skipIf(!hasTmux)("a tasks batch of RPC runs", () => {
 		expect(Buffer.byteLength(aggregate)).toBeLessThanOrEqual(16 * 1024);
 		expect(aggregate).toMatch(/3 tasks, 3 completed, 0 failed, 0 cancelled\./);
 		for (const name of names) {
-			expect(aggregate).toMatch(new RegExp(`### "${name}" \\(sub_[\\w-]+\\): completed\\n${name} begins\\.`));
+			expect(aggregate).toMatch(
+				new RegExp(`### "${name}" \\(sub_[\\w-]+\\): completed\\nChecks: [^\\n]+\\n${name} begins\\.`),
+			);
 			expect(aggregate).not.toContain(`${name} ends.`);
-			const full = recordOf(real, name).reportPath ?? "";
+			const full = join(runDir(real, name), "reports", "1.md");
 			expect(aggregate).toContain(`[Cut short; its full Report: ${full}]`);
 			expect(readFileSync(full, "utf8")).toContain(`${name} ends.`);
 		}
@@ -450,7 +456,7 @@ describe.skipIf(!hasTmux)("a tasks batch of RPC runs", () => {
 		expect(aggregate).toMatch(/2 tasks, 2 completed, 0 failed, 0 cancelled\./);
 		expect(aggregate).toContain(`- "w" (${recordOf(real, "w").runId}): completed; its edits are in its worktree`);
 		expect(aggregate).toMatch(
-			/### "w" \(sub_[\w-]+\): completed\nWorkspace: .*\n.*\nChanges since its baseline: A new\.txt\nWrote new\.txt\./,
+			/### "w" \(sub_[\w-]+\): completed\nWorkspace: .*\n.*\nChanges since its baseline: A new\.txt\nChecks: [^\n]+\nWrote new\.txt\./,
 		);
 		expect(aggregate).toMatch(/- "r" \(sub_[\w-]+\): completed\n/);
 		const manifest = /Every member's status, full Report and transcript: (\S+)/.exec(aggregate)?.[1] ?? "";

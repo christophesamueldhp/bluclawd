@@ -47,6 +47,50 @@ describe("a settled batch's aggregate", () => {
 		expect(text).toContain(`### "a" (sub_a): completed\na: ${"finding ".repeat(200).trim()}`);
 		expect(text).not.toContain("not inlined");
 	});
+
+	it("puts what a member's transcript shows of its checks above its own claim", () => {
+		const checked = member("a", "completed");
+		checked.checks = "Checks: its transcript shows 2 commands, 1 not ending with exit 0.";
+		const { text } = formatBatchAggregate("batch_c", [checked], "/m.md", 16 * 1024);
+
+		expect(text).toContain(
+			'### "a" (sub_a): completed\nChecks: its transcript shows 2 commands, 1 not ending with exit 0.\na: finding',
+		);
+	});
+	it("gives the room short Reports leave to longer ones, and points to each full Report as its run stored it", () => {
+		const short = ["a", "b", "c"].map((name) => member(name, "completed"));
+		for (const one of short) one.report = { ...one.report!, text: `${one.record.name}: brief.` };
+		const long = member("long", "completed");
+		long.report = { ...long.report!, text: `long begins. ${"finding ".repeat(2500)}long ends.` };
+		long.reportFile = "/runs/long/reports/1.md";
+		const { text, truncated } = formatBatchAggregate("batch_r", [...short, long], "/m.md", 16 * 1024);
+
+		expect(Buffer.byteLength(text)).toBeLessThanOrEqual(16 * 1024);
+		expect(truncated).toBe(true);
+		for (const name of ["a", "b", "c"]) expect(text).toContain(`${name}: brief.`);
+		const inlined = /long begins\. (?:finding )*/.exec(text)?.[0] ?? "";
+		// An even share would be a quarter of the room; it gets nearly all of it.
+		expect(Buffer.byteLength(inlined)).toBeGreaterThan(14 * 1024);
+		expect(text).not.toContain("long ends.");
+		expect(text).toContain("[Cut short; its full Report: /runs/long/reports/1.md]");
+	});
+
+	it("accounts for members not settled yet, so a cancelled call still shows what each did", () => {
+		const queued = { record: { runId: "sub_q", name: "q", status: "starting", backend: "rpc" } as SubagentRunRecord };
+		const working = { record: { runId: "sub_w", name: "w", status: "running", backend: "rpc" } as SubagentRunRecord };
+		const { text } = formatBatchAggregate(
+			"batch_u",
+			[member("done", "completed"), queued, working],
+			"/m.md",
+			16 * 1024,
+		);
+
+		expect(text).toContain("Batch batch_u: 3 tasks, 1 completed, 0 failed, 0 cancelled, 2 not settled yet.");
+		expect(text).toContain('- "q" (sub_q): not settled yet: queued');
+		expect(text).toContain('- "w" (sub_w): not settled yet: running');
+		expect(text).toContain('### "done" (sub_done): completed\ndone: finding');
+	});
+
 	it("lists a long failure as one line, so it cannot crowd out the other statuses", () => {
 		const failed = member("f", "failed");
 		const error = `first line of the failure\n${"stderr noise ".repeat(2000)}`;

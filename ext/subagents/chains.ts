@@ -22,7 +22,7 @@ import {
 	MAX_TASK_INPUT_BYTES,
 	type RunAdmission,
 } from "./admission.ts";
-import { type BatchMember, memberOutcome, settleBatch } from "./batches.ts";
+import { type BatchMember, capAggregate, fullReportOf, inlineReports, memberOutcome, settleBatch } from "./batches.ts";
 import { NOT_APPROVAL } from "./messages.ts";
 import type { ParentScopeChecks } from "./parent-scope.ts";
 import { sanitizeReportText, truncateUtf8Safe } from "./results.ts";
@@ -463,22 +463,31 @@ function formatChainAggregate(
 		...workspaceLines,
 		verdict,
 	].join("\n");
-	const last = results.reduce<number>(
-		(found, result, i) =>
-			result && "member" in result && statuses[i] === "completed" && result.member.report?.text.trim() ? i : found,
-		-1,
+	// Every completed step's Report, the last first: it is the chain's latest word. A step resumed later is still
+	// its own Report, each kept in its own file.
+	const reported = results
+		.flatMap((result, i) =>
+			result && "member" in result && statuses[i] === "completed" && result.member.report?.text.trim()
+				? [{ i, member: result.member }]
+				: [],
+		)
+		.reverse();
+	const notesReserve = 200;
+	const inlined = inlineReports(
+		reported.map(({ i, member }) => ({
+			heading: `### ${stepLabel(steps, results[i], i, label)}: completed\n${member.checks ? `${member.checks}\n` : ""}`,
+			text: member.report?.text ?? "",
+			full: fullReportOf(member),
+		})),
+		Math.max(0, budget - bytes(head) - notesReserve),
 	);
-	if (last < 0) return truncateUtf8Safe(head, budget);
-	const member = (results[last] as { member: BatchMember }).member;
-	const heading = `\n\n### ${stepLabel(steps, results[last], last, label)}: completed\n`;
-	const text = sanitizeReportText(member.report?.text ?? "").trim();
-	const cut = `\n[Cut short; its full Report: ${member.record.reportPath ?? "see the manifest"}]`;
-	const room = budget - bytes(head) - bytes(heading);
-	if (bytes(text) <= room) return { text: `${head}${heading}${text}`, truncated: false };
-	return {
-		text: `${head}${heading}${truncateUtf8Safe(text, Math.max(0, room - bytes(cut))).text}${cut}`,
-		truncated: true,
-	};
+	const skipped = reported.length - inlined.sections.length;
+	const text = [
+		head,
+		...inlined.sections.reverse().flatMap((section) => ["", section]),
+		...(skipped ? ["", `[${skipped} earlier steps' Reports not inlined: see the manifest.]`] : []),
+	].join("\n");
+	return capAggregate(text, inlined.truncated, manifest, budget);
 }
 
 /** Stores the manifest of a settled chain; the aggregate pointing to it says so if it could not be stored. */
@@ -504,7 +513,8 @@ function writeManifest(
 			return [
 				line,
 				`  Role ${record.agentName}, model ${record.provider}/${record.modelId} at thinking ${record.thinkingLevel}, cwd ${record.cwd}`,
-				`  Report: ${record.reportPath ?? "none stored"}`,
+				...(result.member.checks ? [`  ${result.member.checks}`] : []),
+				`  Report: ${(result.member.report && fullReportOf(result.member)) ?? "none stored"}`,
 				`  Transcript: ${record.transcriptPath ?? "none"}`,
 			];
 		}),
