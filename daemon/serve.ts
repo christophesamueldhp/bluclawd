@@ -20,7 +20,7 @@ import { pistatusline } from "./remote/pistatusline.ts";
 import { launchUsable, startSession } from "./remote/spawn.ts";
 import { statusLine } from "./remote/statusline.ts";
 import { nativeHelperPath } from "./run-members.ts";
-import { RunQueue } from "./run-queue.ts";
+import { maxActiveRuns, RunQueue } from "./run-queue.ts";
 import { loadActiveRuns, saveActiveRuns } from "./storage.ts";
 import { ServerSupervisor } from "./supervisor.ts";
 import { Tmux } from "./tmux.ts";
@@ -71,6 +71,7 @@ export async function serve(): Promise<void> {
 		new RunQueue({
 			now: Date.now,
 			store: { load: () => loadActiveRuns(getServerDir()), save: (runs) => saveActiveRuns(getServerDir(), runs) },
+			capacity: () => maxActiveRuns(daemonAgentDir()),
 			// Detached, so a run's host leads a process group of its own and outlives the daemon.
 			spawn: ({ runDir, env }) => {
 				const root = process.env.PI_PACKAGE_ROOT;

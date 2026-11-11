@@ -3,7 +3,6 @@ import {
 	type ExtensionContext,
 	getAgentDir,
 	type InlineExtension,
-	SettingsManager,
 	type ToolLoadout,
 	type ToolLoadoutChanges,
 } from "@earendil-works/pi-coding-agent";
@@ -16,7 +15,6 @@ import { notifyAgentTasksChanged, publishAgentTasks } from "../_shared/agent-tas
 import { commandBlock } from "../_shared/command-block.ts";
 import { focusedComponent, isPromptEditor } from "../_shared/focus.ts";
 import { pistatuslineDrawsFooter } from "../_shared/pistatusline.ts";
-import { maxActiveSubagents } from "../_shared/settings.ts";
 import { STATUS_KEYS } from "../_shared/status-keys.ts";
 import { publishSubagentPanel } from "../_shared/subagent-panel.ts";
 import { timed } from "../_shared/timing.ts";
@@ -301,9 +299,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			}
 		};
 
-		const slots = daemonRunSlots(() =>
-			maxActiveSubagents(SettingsManager.create(process.cwd(), resolveAgentDir(), { projectTrusted: false })),
-		);
+		const slots = daemonRunSlots();
 		const { scheduler, directory, messageFromParent, resumeFromParent, pullReports, retellReport } =
 			createGenerations({
 				agentDir: resolveAgentDir,

@@ -1,5 +1,8 @@
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { RUN_CLAIM_WAIT_MS, type RunHostLaunch, RunQueue } from "../daemon/run-queue.ts";
+import { maxActiveRuns, RUN_CLAIM_WAIT_MS, type RunHostLaunch, RunQueue } from "../daemon/run-queue.ts";
 
 let queues: RunQueue[] = [];
 beforeEach(() => {
@@ -14,7 +17,7 @@ afterEach(() => {
 const host = (run: string): RunHostLaunch => ({ runDir: `/runs/${run}`, env: { PATH: "/bin", RUN: run } });
 
 /** A queue whose launched hosts run until `end(run)`; what it spawned is listed. */
-function fixture() {
+function fixture(capacity = () => 4) {
 	let nextPid = 100;
 	const live = new Map<string, number>();
 	const spawned: RunHostLaunch[] = [];
@@ -25,12 +28,13 @@ function fixture() {
 			return nextPid++;
 		},
 		running: (pid) => [...live.values()].includes(pid),
+		capacity,
 	});
 	queues.push(queue);
 	/** A claim, and whether it was granted yet. */
-	const claim = (run: string, parent: string, capacity = 4) => {
+	const claim = (run: string, parent: string) => {
 		const state: { granted?: boolean } = {};
-		const done = queue.claim(run, parent, capacity).then((granted) => {
+		const done = queue.claim(run, parent).then((granted) => {
 			state.granted = granted;
 			return granted;
 		});
@@ -55,8 +59,8 @@ const settle = () => vi.advanceTimersByTimeAsync(0);
 describe("the daemon's queue of runs", () => {
 	it("grants as many runs as its capacity across orchestrators, and the next once a run's processes are gone", async () => {
 		const f = fixture();
-		const claims = ["a1", "a2", "a3"].map((run) => f.claim(run, "alpha", 4));
-		const [b1, b2] = ["b1", "b2"].map((run) => f.claim(run, "beta", 4));
+		const claims = ["a1", "a2", "a3"].map((run) => f.claim(run, "alpha"));
+		const [b1, b2] = ["b1", "b2"].map((run) => f.claim(run, "beta"));
 		await settle();
 		expect([...claims, b1, b2].map(({ state }) => state.granted)).toEqual([true, true, true, true, undefined]);
 		for (const run of ["a1", "a2", "a3", "b1"]) f.launch(run);
@@ -67,11 +71,11 @@ describe("the daemon's queue of runs", () => {
 	});
 
 	it("holds a run's slot while its processes run, though its orchestrator released it", async () => {
-		const f = fixture();
-		f.claim("a1", "alpha", 1);
+		const f = fixture(() => 1);
+		f.claim("a1", "alpha");
 		await settle();
 		f.launch("a1");
-		const next = f.claim("a2", "alpha", 1);
+		const next = f.claim("a2", "alpha");
 		f.queue.release("a1");
 		f.queue.check();
 		await settle();
@@ -107,12 +111,12 @@ describe("the daemon's queue of runs", () => {
 	});
 
 	it("serves the orchestrator served least recently first, so a large batch does not hold another's runs back", async () => {
-		const f = fixture();
-		const alpha = ["a1", "a2", "a3", "a4"].map((run) => f.claim(run, "alpha", 2));
+		const f = fixture(() => 2);
+		const alpha = ["a1", "a2", "a3", "a4"].map((run) => f.claim(run, "alpha"));
 		await settle();
 		f.launch("a1");
 		f.launch("a2");
-		const b1 = f.claim("b1", "beta", 2);
+		const b1 = f.claim("b1", "beta");
 
 		f.end("a1");
 		await settle();
@@ -124,69 +128,96 @@ describe("the daemon's queue of runs", () => {
 	});
 
 	it("grants no run whose orchestrator stopped claiming it", async () => {
-		const f = fixture();
-		f.claim("a1", "alpha", 1);
+		const f = fixture(() => 1);
+		f.claim("a1", "alpha");
 		await settle();
 		f.launch("a1");
-		const gone = f.claim("b1", "beta", 1);
+		const gone = f.claim("b1", "beta");
 		await vi.advanceTimersByTimeAsync(RUN_CLAIM_WAIT_MS);
 		expect(gone.state.granted).toBe(false);
 
 		f.end("a1");
-		const later = f.claim("c1", "gamma", 1);
+		const later = f.claim("c1", "gamma");
 		await settle();
 		expect(later.state.granted).toBe(true);
 		expect(() => f.launch("b1")).toThrow(/not granted/);
 	});
 
 	it("gives a granted run's slot to the next once its orchestrator neither launches nor releases it", async () => {
-		const f = fixture();
-		f.claim("a1", "alpha", 1);
+		const f = fixture(() => 1);
+		f.claim("a1", "alpha");
 		await settle();
-		const next = f.claim("b1", "beta", 1);
+		const next = f.claim("b1", "beta");
 		await vi.advanceTimersByTimeAsync(20_000);
 		expect(next.state.granted).toBeUndefined();
 		// A claim waits its while, then is made again.
 		await vi.advanceTimersByTimeAsync(RUN_CLAIM_WAIT_MS);
-		const again = f.claim("b1", "beta", 1);
+		const again = f.claim("b1", "beta");
 		await vi.advanceTimersByTimeAsync(20_000);
 		expect(again.state.granted).toBe(true);
 		expect(() => f.launch("a1")).toThrow(/not granted/);
 	});
 
 	it("frees the slot of a run whose host could not be started, and of a claim given up", async () => {
-		const f = fixture();
+		const f = fixture(() => 1);
 		const queue = new RunQueue({
 			now: () => Date.now(),
 			spawn: () => {
 				throw new Error("spawn node ENOENT");
 			},
 			running: () => true,
+			capacity: () => 1,
 		});
 		queues.push(queue);
-		await queue.claim("a1", "alpha", 1);
+		await queue.claim("a1", "alpha");
 		expect(() => queue.launch("a1", host("a1"))).toThrow(/ENOENT/);
-		expect(await queue.claim("a2", "alpha", 1)).toBe(true);
+		expect(await queue.claim("a2", "alpha")).toBe(true);
 
-		f.claim("b1", "beta", 1);
+		f.claim("b1", "beta");
 		await settle();
-		const given = f.claim("b2", "beta", 1);
+		const given = f.claim("b2", "beta");
 		f.queue.release("b2");
 		await settle();
 		expect(given.state.granted).toBe(false);
 		f.queue.release("b1");
-		const next = f.claim("b3", "beta", 1);
+		const next = f.claim("b3", "beta");
 		await settle();
 		expect(next.state.granted).toBe(true);
 	});
 
-	it("bounds active runs by the capacity the latest claim gives", async () => {
-		const f = fixture();
-		for (const run of ["a1", "a2"]) f.claim(run, "alpha", 2);
+	it("bounds active runs by the user's own setting as it is at each claim, which no orchestrator gives", async () => {
+		let max = 2;
+		const f = fixture(() => max);
+		for (const run of ["a1", "a2"]) f.claim(run, "alpha");
 		await settle();
 		for (const run of ["a1", "a2"]) f.launch(run);
-		const third = f.claim("a3", "alpha", 3);
+		const third = f.claim("a3", "alpha");
 		await settle();
-		expect(third.state.granted).toBe(true);
+		expect(third.state.granted).toBeUndefined();
+
+		// The user raises it: the next claim, as an orchestrator makes one again while it waits, is granted.
+		max = 3;
+		const again = f.claim("a3", "alpha");
+		await settle();
+		expect(again.state.granted).toBe(true);
+	});
+});
+
+describe("maxActiveRuns: the user's bound on active runs", () => {
+	it("is four unless the user's own settings give a positive whole number", () => {
+		const agentDir = mkdtempSync(join(tmpdir(), "bluclawd-max-active-"));
+		try {
+			const bound = (settings: unknown) => {
+				writeFileSync(join(agentDir, "settings.json"), JSON.stringify(settings));
+				return maxActiveRuns(agentDir);
+			};
+			expect(bound({ subagents: { maxActive: 2 } })).toBe(2);
+			for (const maxActive of [0, -1, 2.5, "6"]) expect(bound({ subagents: { maxActive } })).toBe(4);
+			expect(bound({})).toBe(4);
+			writeFileSync(join(agentDir, "settings.json"), "{ not json");
+			expect(maxActiveRuns(agentDir)).toBe(4);
+		} finally {
+			rmSync(agentDir, { recursive: true, force: true });
+		}
 	});
 });

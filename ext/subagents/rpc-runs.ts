@@ -360,8 +360,8 @@ export interface RunSlots {
 	release(run: string): Promise<void>;
 }
 
-/** The daemon's queue, with the bound on active runs `capacity` gives at each claim. */
-export function daemonRunSlots(capacity: () => number): RunSlots {
+/** The daemon's queue, bound by the user's own setting, which the daemon reads. */
+export function daemonRunSlots(): RunSlots {
 	let ensuring: Promise<boolean> | undefined;
 	return {
 		ensure: () => {
@@ -371,7 +371,7 @@ export function daemonRunSlots(capacity: () => number): RunSlots {
 			});
 			return ensuring;
 		},
-		claim: (run, parent, signal) => new OrchestratorClient().claimRun(run, parent, capacity(), signal),
+		claim: (run, parent, signal) => new OrchestratorClient().claimRun(run, parent, signal),
 		launch: (run, host) => new OrchestratorClient().launchRun(run, host),
 		release: (run) => new OrchestratorClient().releaseRun(run),
 	};

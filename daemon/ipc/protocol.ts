@@ -192,7 +192,7 @@ export interface WakeupsRequest {
  * starts the granted run's host, a release gives up a claim or a slot not yet launched.
  */
 export type RunQueueRequest = { type: "run_queue" } & (
-	| { action: "claim"; run: string; parent: string; capacity: number }
+	| { action: "claim"; run: string; parent: string }
 	| { action: "launch"; run: string; host: RunHostLaunch }
 	| { action: "release"; run: string }
 );

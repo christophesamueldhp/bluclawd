@@ -8,7 +8,8 @@
  * not claim: a queued run whose orchestrator is gone waits, then is forgotten.
  */
 
-import { isAbsolute } from "node:path";
+import { readFileSync } from "node:fs";
+import { isAbsolute, join } from "node:path";
 import { runMarker } from "./run-members.ts";
 
 /**
@@ -35,6 +36,21 @@ const UNCLAIMED_MS = 2 * RUN_CLAIM_WAIT_MS;
 const CHECK_MS = 200;
 const DEFAULT_CAPACITY = 4;
 
+/**
+ * `subagents.maxActive` in the user's own settings, in agent dir `agentDir`: how many runs the daemon keeps active at
+ * once. The daemon reads it itself, so neither a project's settings nor anything an orchestrator or its model sends
+ * can raise it.
+ */
+export function maxActiveRuns(agentDir: string): number {
+	let max: unknown;
+	try {
+		max = JSON.parse(readFileSync(join(agentDir, "settings.json"), "utf8"))?.subagents?.maxActive;
+	} catch {
+		return DEFAULT_CAPACITY;
+	}
+	return typeof max === "number" && Number.isInteger(max) && max > 0 ? max : DEFAULT_CAPACITY;
+}
+
 export interface RunQueueDeps {
 	now: () => number;
 	/** Starts a run's host detached, in a process group of its own; returns its pid, or throws. */
@@ -44,6 +60,8 @@ export interface RunQueueDeps {
 	 * found by the run's `marker`: those are ended then, since nothing of the run is left to own them.
 	 */
 	running: (pid: number, marker: string | undefined) => boolean;
+	/** The user's bound on runs active at once, as it is now (maxActiveRuns). */
+	capacity: () => number;
 	/**
 	 * Where the launched runs are kept for the daemon started next: their hosts outlive this one, and hold their slots
 	 * until they end there too.
@@ -98,12 +116,13 @@ export class RunQueue {
 	/** When each orchestrator was last granted a slot, as a sequence: the least recently served goes first. */
 	private readonly served = new Map<string, number>();
 	private sequence = 0;
-	private capacity = DEFAULT_CAPACITY;
+	private capacity: number;
 	private timer: ReturnType<typeof setInterval> | undefined;
 	private readonly deps: RunQueueDeps;
 
 	constructor(deps: RunQueueDeps) {
 		this.deps = deps;
+		this.capacity = deps.capacity();
 		// Those still running when an earlier daemon ended hold their slots here, until their processes are gone.
 		for (const { run, parent, pid, contained } of deps.store?.load() ?? []) {
 			if (!deps.running(pid, markerOf(run, contained))) continue;
@@ -126,11 +145,11 @@ export class RunQueue {
 
 	/**
 	 * Claims a slot for run `run` of orchestrator `parent`, queuing it on its first claim. Resolves true once it is
-	 * granted, false when {@link RUN_CLAIM_WAIT_MS} pass first. `capacity` is the user's setting, as the orchestrator
-	 * read it: the last claim's applies.
+	 * granted, false when {@link RUN_CLAIM_WAIT_MS} pass first. The user's bound is read again at each claim, so a
+	 * change to it applies from the next.
 	 */
-	claim(run: string, parent: string, capacity: number): Promise<boolean> {
-		this.capacity = Number.isInteger(capacity) && capacity > 0 ? capacity : DEFAULT_CAPACITY;
+	claim(run: string, parent: string): Promise<boolean> {
+		this.capacity = this.deps.capacity();
 		const now = this.deps.now();
 		let entry = this.entries.get(run);
 		if (!entry) {

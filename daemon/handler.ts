@@ -306,7 +306,7 @@ export async function handleIpcRequest(supervisor: ServerSupervisor, request: Se
 		case "run_queue": {
 			if (!runQueue) return { type: "error", ok: false, error: "runs are not queued in this process" };
 			if (request.action === "claim") {
-				const granted = await runQueue.claim(request.run, request.parent, request.capacity);
+				const granted = await runQueue.claim(request.run, request.parent);
 				return { type: "run_queue_result", ok: true, granted };
 			}
 			if (request.action === "release") {

@@ -308,8 +308,8 @@ export class OrchestratorClient {
 	 * Claims a slot in the daemon's queue for subagent run `run` of orchestrator `parent` (daemon/run-queue.ts):
 	 * true once granted, false when the daemon's wait passed first.
 	 */
-	async claimRun(run: string, parent: string, capacity: number, signal: AbortSignal): Promise<boolean> {
-		const res = await this.request({ type: "run_queue", action: "claim", run, parent, capacity }, 30_000, signal);
+	async claimRun(run: string, parent: string, signal: AbortSignal): Promise<boolean> {
+		const res = await this.request({ type: "run_queue", action: "claim", run, parent }, 30_000, signal);
 		if (res.type !== "run_queue_result") throw new Error(OUT_OF_DATE);
 		return res.granted === true;
 	}

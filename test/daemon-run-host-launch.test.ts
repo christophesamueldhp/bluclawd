@@ -20,7 +20,7 @@ describe.skipIf(!hasTmux)("the daemon's launch of a run's host", () => {
 		const runDir = join(real.agentDir, "bluclawd", "subagents", "session", RUN_ID);
 		mkdirSync(runDir, { recursive: true });
 		const run = `${RUN_ID}/${generation}`;
-		expect(await real.client.claimRun(run, "session", 4, new AbortController().signal)).toBe(true);
+		expect(await real.client.claimRun(run, "session", new AbortController().signal)).toBe(true);
 		return { run, runDir };
 	}
 
