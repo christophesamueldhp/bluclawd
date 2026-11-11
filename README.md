@@ -185,7 +185,7 @@ bluclawd's names and behaviours, on top of pi's own commands:
 |---|---|
 | `permissions.deny`, Alt+M | deny rules block matching tool calls; the footer shows pi's `defaultProjectTrust` (`⏵⏵ always` / `⏸ ask` / `✕ never`) and Alt+M cycles it — see [Permissions](#permissions) |
 | `/tasks` | background tasks dialog: shells (`run_in_background`, Ctrl+B on the model's running bash, or a foreground command past its `timeout`), monitors, subagents (`subagent` with `background: true`), pending wake-ups (`schedule_wakeup`, `x` cancels one), and the model's bash still running in the foreground once it has run 2s (marked `foreground`; `x` kills it; bluclawd does not list these); running tasks only; Enter shows a task's output tail, `x` stops it (the model is told without a turn starting), and updates wait while the dialog is open. The model's bash is bluclawd's: `timeout` in milliseconds (2 minutes by default), a command still running then - or on Ctrl+B after 2s, or when you send a message - moves to the background instead of being killed, and the model reads a task's output file with `read`. The footer pill counts the running shells and monitors; ↓ from an empty prompt selects it and Enter opens the dialog. A shell writes its whole output to a file named in its start result and exit notification; `task_stop` stops shells, monitors, and background subagents (`sub_*`), and cancels wake-ups (`w*`). `schedule_wakeup` (orchestrators only, not runs) schedules a turn of the agent's own: `prompt` plus `delay` in seconds or `at` a local `HH:MM` (its next occurrence), due between 1 minute and 24 hours from now; when it is due a notice carrying the prompt and due time starts the next turn, after the running one ends. Wake-ups are kept in the session log: they survive a reload and a reopen of the session (`/resume`, or pi started on its file), and one that fell due while the session was closed fires once, late, saying when it was due. Ending the session cancels them: a quit, `/new`, a `/resume` of another session, a fork (the fork gets none), tree navigation, or a stop of its row in agent view. An interactive pi that crashes, or is ended by a signal bluclawd did not send (a closed terminal, a `kill`, a logout), keeps them: the daemon, which scheduling one starts, holds a copy, and when one falls due with that pi gone it reopens the session in agent view's tmux, where it fires, late if the daemon was down. A job notifies the model once when it exits, and once more if it goes quiet for 45s on what reads as an interactive prompt (`(y/n)`, `Press Enter`, …); the `monitor` tool turns each stdout line of a long-running command, or each frame of a WebSocket (`ws`), into an event that wakes the model (bluclawd's `Monitor`; stderr goes to the output file; every monitor expires after `timeout_ms`, 5 minutes by default and at most 30, with one notice so the model can re-arm it) |
-| `subagent` tool | model-only delegation (`general-purpose`, `explorer` and `reviewer` bundled, plus custom Markdown definitions in trusted `<cwd>/.pi/agents/*.md` and `~/.pi/agent/agents/*.md`). Each run is a full pi session of its own in agent view's tmux server (subagents need tmux), with a fresh context in the same live checkout and the role as its launch flags; it cannot delegate further. It inherits the parent model and thinking level unless the role or the call picks others; a model picked without a thinking level gets pi's default for it. The `subagent_models` tool lists the models a run can use. A run stays open and reports after each of its turns until it is closed (`subagent_close`, `x`, or the end of the orchestrator's session), at most 8 open at once, never on a turn, tool-call, token, or time limit. A foreground call returns the run's first report; `background: true` returns at once. A run's usage is counted in its own session; `/status` shows the runs' total apart (see [Subagents](#subagents)) |
+| `subagent` tool | model-only delegation (`general-purpose`, `explorer` and `reviewer` bundled, plus custom Markdown definitions in trusted `<cwd>/.pi/agents/*.md` and `~/.pi/agent/agents/*.md`): one run, a `tasks` batch side by side, or a `chain` of steps. Each run is a pi of its own on pi's RPC, with a fresh context and only its role's tools; one that edits works in an isolated Git worktree, which `subagent_integrate` applies to the checkout. It cannot delegate further. It inherits the parent model and thinking level unless the role or the call picks others. A run's process ends once it reports; `subagent_stop` cancels it, `subagent_resume` continues it, and `/clean-workspace` removes a worktree with changes. At most `subagents.maxActive` (4) work at once, the rest queued, never on a turn, tool-call, token, or time limit. A foreground call returns the run's Report; `background: true` returns at once. `/collaborate` links sessions you name. A run's usage is counted in its own session; `/status` shows the runs' total apart (see [Subagents](#subagents)) |
 | `/rewind` (or Esc twice on an empty prompt) | bluclawd's rewind: a file checkpoint per message you send; lists your prompts newest first with what each changed (`a.ts +3 -1`, `No code changes`, `⚠ No code restore`), then Restore code and conversation / Restore conversation (the prompt returns to the editor) / Restore code / Never mind, with no further confirmation (the current files are checkpointed first and listed as `(before rewind)`, so `/rewind` undoes it). New files the agent created since the point (`write`, `bash`) are removed and your own are kept; unlike bluclawd it also restores files changed through bash or by hand. Checkpoints are git commits kept under `refs/bluclawd/checkpoints/<session>/`: the newest 50 per session, and another session's refs are pruned after 30 days |
 | `←` on an empty prompt (or `/agent-view`) | agent view: background sessions in Needs input (blocked on a prompt) / Working (a turn running) / Idle (nothing running) bands (empty ones hidden; ctrl+s: by directory, this one first, remembered), one line each — `✻`/spinner/`∙` + name, what it is doing (a working session's current tool; an idle one with a wake-up pending, when the earliest is due: `wakes 14:05`), age. Type a task + enter to start a background session (ctrl+enter: start it and switch to it), shift+enter / alt+enter / ctrl+j adds a line, ctrl+g writes it in `$EDITOR`, ctrl+v attaches a clipboard image to the new-session composer, an unknown `/command` is sent as the task, `!<command>` runs it in your shell as a row of its own (its last output line while it runs, then done, `exit N — …` or stopped; enter shows its output, ctrl+x stops it then removes the row, and it is never run again), space peeks and replies (the reply is the session's next prompt, `/stop` stops it; a reply draft is kept per session), enter/→ switches this terminal to any session at once, including Working and Needs input (see [Session switching](#session-switching)), ↑↓ wrap, alt/ctrl+↑↓ jump between bands, alt+1-9 opens the Nth session in the focused one's directory, ctrl+x stops then deletes (this terminal's own session too: the terminal moves to agent view; an orchestrator's runs go with it), an orchestrator's open runs fold into a `▸ N subagents` line under its row that enter shows and hides, ctrl+t pins, ctrl+r renames, shift+↑↓ reorders the Pinned band and directory view (Needs input, Working and Idle always list most recent first), `s:<state>` / `n:<name>` filter (ctrl+f turns the text into a name search), `/resume` brings a past session back and opens it, `/model <name>` (or `default`) sets the model for new ones, `/cd <dir>` sets the directory they start in (relative to the current one; bare `/cd` goes back), tab completes the model or directory (several matches are listed: ↑↓ and tab or enter pick one), typing `/` lists these commands (↑↓ to pick, tab or enter completes one that takes an argument, enter runs the rest), the hint line starts with the mode new ones start in (`⏵⏵ always` or `✕ never`; nothing at pi's default, `ask`), `?` shows the shortcuts, esc returns to your session, and ctrl+c twice (or `exit`, `/exit`) leaves tmux with the sessions still running, except the one `pi` started in this terminal, which ends with it while idle. The footer shows `← for agents` / `← N agents` / `← N done`, and `Press ← again to open agents` after the first press. Every session is a pi of its own in tmux, so it keeps running after its terminal leaves or closes; a local daemon (`daemon/`, a Unix socket in `~/.pi/server`) only lists them. Agent View detects both changed daemon code and a changed Pi installation, and restarts an obsolete daemon. A session that was idle when its pi quit is kept as a row with no process (it resumes when opened or replied to); every row stays until ctrl+x deletes it |
 | `/remote-control` | bluclawd's Remote Control, for every agent-view session: a phone app (a PWA the daemon serves) lists them in agent view's bands, shows a session's conversation and its reply as it streams, sends it a prompt, stops its turn, starts sessions, switches the model, and notifies you; a message once sent is never edited from the phone, only stopped. `/remote-control` turns it on and shows a QR code that pairs your phone; once on, it offers a menu: pair a new phone, the paired phones (remove one or all), start at login (macOS), turn off — see [Remote control](#remote-control) |
@@ -405,98 +405,152 @@ reading the API:
 
 ## Subagents
 
-The orchestrator (the parent session) splits work across subagent runs. Each run is a full
-interactive pi of its own in agent view's private tmux server, so subagents need tmux: without it,
-the `subagent` tool refuses and says so. A run works in the **same live checkout** as the
-orchestrator, loads your packages and settings (so the same deny rules, hooks and sandbox apply in
-it), and starts in the orchestrator's trust for the project, never asking. There are no locks or
-conflict detection: edits are live for everyone and the last write wins, so the orchestrator owns the
-split, handoffs and final verification. A run cannot launch runs of its own. A run asks for approval
-in its own session, such as the sandbox's network confirm: its panel row reads `needs input` and the
-orchestrator's session gets a notice; open the run to answer.
+The orchestrator (the parent session) delegates work to subagent runs. Each run is a pi of its own on
+pi's RPC ([ADR-0010](docs/adr/0010-rpc-runs-and-workspace-isolation.md)), with no terminal pane: a
+detached host process holds it, it takes its task in a fresh session, stores its Report once its work
+settles, and exits. Its session, Reports and any worktree stay for an explicit Resume. A run cannot
+launch runs of its own, and needs neither tmux nor a terminal: only the daemon, which queues it.
 
-Ask the parent to delegate distinct pieces of work with explicit files or areas in each task.
-The model calls `subagent` with `{ "agent": "general-purpose", "task": "Add input validation to src/auth.ts" }`.
-A foreground call waits for the run's first report and returns it; `"background": true` returns at
-once. Either way the run stays open after it reports, and reports again after each later turn: its
-last message of a turn reaches the orchestrator as a message from another session, never from you,
-and wakes it when it is waiting. There is no `/agents` command.
+The model calls `subagent` with one of:
+- `{ "agent": "explorer", "task": "…" }`: one run, with optional `name`, `cwd` (its own directory,
+  relative to yours), `model`, `thinkingLevel`, `agentScope` and `background`.
+- `{ "tasks": [{ "agent": "…", "task": "…" }, …] }`: a batch run side by side. One combined report
+  (at most 16 KiB) comes once all have finished; a manifest lists every member's status, Report and
+  transcript as they settle. A member that fails leaves its siblings working.
+- `{ "chain": [{ "agent": "general-purpose", "name": "w", "task": "…" }, { "agent": "reviewer", "task": "…" }, { "resume": "w", "task": "…" }] }`:
+  steps one after another, each given the previous step's Report; when a step edits, all of them work in
+  one worktree, one at a time. A failed, stopped or blocked step halts the chain; a review that finds
+  defects has completed.
 
-Open runs show in the panel below the status line, as in Claude Code's agent panel: a `main` row for
-the orchestrator, then one row per run (name, role, model, working / idle / needs input, elapsed time,
-last report). Idle runs past the first three are counted in one row (`2 idle agents`). A run that
-failed stays 30 s (`x` dismisses it), and closing a run leaves `/tasks to see subagents` for 30 s.
-Runs also show in `/tasks` with the closed runs of the session. ↓ on an empty prompt
-moves into the panel; Enter on a run, there or in `/tasks`, switches your terminal to it, and ← on its
-empty prompt switches back to the orchestrator (to agent view for a run opened from there). Only your keys switch the terminal. What you type in a
-run is noted to the orchestrator without starting its turn.
+A foreground call waits for the Report, and Esc cancels the run; `"background": true` returns at once,
+and the Report arrives as a notice that wakes the orchestrator. Progress a run sends wakes nobody; its
+findings, questions and blockers reach the orchestrator as messages. At most `subagents.maxActive`
+runs (4 by default, a user setting: project settings cannot raise it) work at once, across every
+orchestrator of the daemon, served fairly; the others wait, `queued`. There is no cap on runs in
+total and nothing to close: a run's process ends once it reports.
+
+What a run may do is its role's, held by the run's own pi at every call, nested codemode calls
+included, never by its instructions:
+- A role that names no `tools` only reads: `read`, `grep`, `find`, `ls` and `codemode`, those you
+  have. A run that only reads works in your checkout.
+- A run given `edit`, `write` or `bash` works in an isolated Git worktree of its own, outside the
+  repository (`<getAgentDir()>/bluclawd/worktrees/<run>`), made from your checkout as it was at the call:
+  its staged, unstaged and untracked changes, not its ignored files (`.env` stays where it is). Nothing
+  is committed. Outside a Git repository with a commit such a run is refused, never let loose in your
+  checkout.
+- `bash` only where the run's commands can be contained: on macOS (see [Sandbox](#sandbox)). On Linux and
+  WSL runs get no shell: a role naming `bash` is refused, and `general-purpose` edits without running
+  commands, so its Report says no checks ran.
+- MCP tools, tool search and `subagent` are refused.
+- A tool named with a trailing `?` is given only where it can be; any other the run cannot be given
+  refuses it. The bundled `general-purpose` names `read, grep?, find?, ls?, codemode?, edit, write, bash?`.
+- The run is held to your deny rules and those of its own directory, in its project's trust, as
+  admitted: a later change to its role, your settings or your tools never widens a queued or resumed run.
+
+Its model and thinking level are chosen independently: the call's, else the role's, else yours
+(`inherit` takes yours). A level set nowhere is yours, so a role naming a model that does not reason
+needs `thinkingLevel: off`. An unknown model, missing auth, a virtual router or a level the model does
+not support is refused before the run starts, and the run's pi checks it got exactly that model and
+level before its first request: nothing is substituted. A run's pi loads none of your extensions
+(`-ne`), only bluclawd's own for runs, with your agent dir: pi's built-in providers, `models.json` and
+the logins in `auth.json` (`/accounts` among them) reach it, and so does your environment. A provider an
+extension registers does not, so a run of one is refused at the call, and an API key given only to
+this pi at runtime (`--api-key`) does not reach it.
+
+A Report is the run's last message, cut to 8 KiB, followed by what the runtime saw: `Outcome`,
+`Process`, `Checks` (the commands it ran and their exit codes, or that none ran), its changes or its
+workspace and changes since its baseline, `Transcript` and `Report` (the full text). The rest is the
+run's own claim; always recheck citations before acting on findings.
 
 The orchestrator's tools:
-- `subagent_status`: each open run's status, whether it is working or idle, task and elapsed time.
-- `subagent_message({ to, content })`: a message to a run by name or `sub_…` run ID. A run reads it as a
-  message from another session; a closed run resumes with it.
-- `subagent_stop`: ends a run's turn in progress, or every run's with `"all"`, as Esc does. The run stays open.
-- `subagent_close`: ends a run's pi without asking it. Its session is kept.
+- `subagent_status`: each open run's status (queued, running, stopping), task and elapsed time.
+- `subagent_message({ to, content })`: information for a working run, which it gets at its next safe
+  point. It continues no finished run.
+- `subagent_stop`: cancels a run, a batch or chain by its ID, or `"all"`, queued or working, and
+  returns once none of its processes runs. Its session, Reports and worktree are kept.
+- `subagent_resume({ agent, task, model?, thinkingLevel? })`: continues a finished or stopped run in
+  its saved session, with its role and permissions as admitted, narrowed to what you can give now, in
+  its own worktree, made again from its baseline if it was removed unchanged. Never in your checkout as
+  it is now: a run whose changed worktree you removed is refused, its Reports and transcript kept for a
+  new run to read.
+- `subagent_integrate({ agent, preview?, keep?, check? })`: applies what a completed run, or a
+  completed chain (`chain_…`), changed since its baseline to your checkout as it is now, keeping your
+  edits there: all or nothing, through a three-way merge. A conflict applies nothing and lists the
+  paths; `keep` leaves paths you resolved yourself, `preview` applies nothing, and `check` runs a
+  command in the checkout afterwards to validate the combined result. Nothing is staged or committed.
 - `subagent_models`: the models a run can use, with auth status and supported thinking levels.
 
-Inside a run, `subagent_message` reaches `parent` (its orchestrator) or a sibling by name. Nothing
-closes an idle run for you: the orchestrator is told to close a run once its work is done, and holds
-at most 8 open runs. `x` in the panel or `/tasks` closes a run too. Every run of an orchestrator's
-session closes when that session ends: quit, `/new`, `/resume` of another session, fork or reload, and
-also when the orchestrator's pi is gone for good (not while it is a Silent pane).
+Inside a run, its own `subagent_message` reaches `parent` (its orchestrator) or a sibling by name.
 
-A closed run can be resumed with its earlier context: a message from the orchestrator does it, and so
-does Enter on it in `/tasks`, for you to type in. It keeps its name, run ID, role, model and thinking
-level, and is checked like a launch: the orchestrator's current deny rules apply. Runs from before runs
-were pis of their own resume the same way, from their saved session.
+Open runs show in the panel below the status line, as in Claude Code's agent panel: a `main` row for
+the orchestrator, then one row per run (name, role, model, status, elapsed time, latest progress). A
+run that failed stays 30 s (`x` dismisses it); one that finished or was stopped leaves `/tasks to see
+subagents` for 30 s. Runs also show in `/tasks` with the finished runs of the session. ↓ on an empty
+prompt moves into the panel, where `x` stops a run. Enter on a run, there or in `/tasks`, shows its
+latest conversation and asks for an instruction (Esc only looks): a working run takes it at its next
+safe point, a finished one resumes with it, and the orchestrator is told without starting its turn.
 
-Custom roles are Markdown files in `~/.pi/agent/agents/` or a trusted project's `.pi/agents/`.
-A trusted project definition overrides a user definition, which overrides a bundled role.
-For example, `.pi/agents/api-review.md`:
+A run that asks to reach a network host no rule allows is asked about in the orchestrator's session,
+naming the run, its generation, the action and the target. Yes holds, until a reload, for every run
+of the session that asks the same; with no one to ask, the request is blocked.
+
+A worktree that holds changes stays, after the run completed, failed or was stopped, until you remove
+it: `/clean-workspace <name or run ID>`, refused while the run or another in that worktree works. That
+run can no longer be resumed. One left as it was made is removed once its run ends, a Resume making it
+again. Its transcript and Reports always stay.
+
+A run's host outlives its orchestrator. After a reload or a crash, the reopened session takes its
+open runs over: one still working is followed to its Report; one that had not started queues again, if
+the session may still start it; one whose host ended with no Report is reported failed, with what
+became of it uncertain, and is never started again. Its chains go on with their next steps. The daemon
+keeps the runs it started in `run-slots.json`, so one started anew still counts them.
+
+`/collaborate <session>[, <session>…]: <work>` links this session with others you name, for that work
+only: their models then send each other findings, questions and blockers with `collaborator_message`.
+`/collaborate scope: <work>` changes the work, `/collaborate end` ends it, and `/collaborate` alone
+shows it. Only you open one: sessions never find each other. It lives in the daemon's memory, so a
+daemon restart ends it.
+
+Runs started by an earlier bluclawd, each an interactive pi in a tmux pane of its own, are runs in tmux
+from before. One still open when its orchestrator's session is reopened is taken over and keeps working
+until it is stopped (`subagent_stop`, `x`) or that session ends; it is never ended silently, and Enter
+switches the terminal to it. Its transcript and Report stay readable (Enter in `/tasks` shows its
+conversation), but it is not resumed: a Resume or a message points at them instead, for a new run.
+
+Custom roles are Markdown files in `~/.pi/agent/agents/` or a trusted project's `.pi/agents/`. Roles
+are resolved from the run's own directory: an inline role, then the nearest trusted project's, then
+yours, then the bundled one; a project's are searched up to its repository root. For example,
+`.pi/agents/api-review.md`:
 
 ```markdown
 ---
 name: api-review
 description: Review explicitly supplied API handler files for defects.
-tools: read, grep, find, ls, bash
+tools: read, grep, find, ls
 model: inherit
 ---
-Review only the supplied targets. Do not edit files. Cite path:line evidence and report exactly which checks ran.
+Review only the supplied targets. Cite path:line evidence.
 ```
 
-Reload after changing definitions. Only `name`, `description`, `tools`, `model`, and `thinkingLevel`
-are supported; the obsolete `maxTurns` field is rejected with a remove-field diagnostic. The role becomes
-the run's launch flags: `tools` its tool list (pi's defaults when omitted), `model` and `thinkingLevel` its
-model, and the body its added instructions. A role's tool list is an orchestration choice, not a
-security boundary. Explicit models use `provider/model`; virtual routers and model aliases are
-unsupported. A run gets a fresh conversation, not the parent's history.
+Only `name`, `description`, `tools`, `model`, and `thinkingLevel` are supported; the obsolete
+`maxTurns` field is rejected with a remove-field diagnostic. The body is the run's added instructions.
+Explicit models use `provider/model`; virtual routers and model aliases are unsupported. A run gets a
+fresh conversation, not the parent's history.
 
 The parent can also pass an inline role instead of a name:
 `{ "agent": { "name": "schema-check", "description": "…", "instructions": "…" }, "task": "…" }`,
 with optional `tools`, `model`, and `thinkingLevel`. An inline role is validated like a saved
 one, recorded with source `inline`, and never written to disk.
 
-A call may also set `model` (`provider/model` or `inherit`) and `thinkingLevel` (`off` … `max` or
-`inherit`). Each is chosen independently: the call's value, else the role's. With neither, an
-inherited model keeps the parent's thinking level, and a chosen model gets pi's default for it.
-`inherit` on the call picks the parent even when the role sets a value. An unknown model, missing
-auth, a virtual router, or an explicitly requested thinking level the model does not support fails
-before the run starts; nothing is substituted.
-
 Each run has a name, unique among the open runs of the session: the call's `name`, or `<role>-<n>`.
-A run's session, task, instructions and latest report live outside the repository under
-`<getAgentDir()>/bluclawd/subagents/<parent-session>/<run>/`. Test results in a report are
-agent-reported; always recheck citations before acting on findings.
+A run's sessions, task, instructions, role as admitted and Reports live outside the repository under
+`<getAgentDir()>/bluclawd/subagents/<parent-session>/<run>/`.
 
-A run's usage is counted in its own session. `/status` and the phone's status sheet show the total
-of the orchestrator's runs apart from its own totals, from `background-usage-ledger.json` in the
-same directory: each of a run's sessions counted once, however many reports repeat its total.
-Unpriced usage is labelled unknown, not free; price-table estimates are not subscription invoices.
-
-Coordination is the orchestrator's job. It should give each run its own files or area, name who owns a
-shared file, and tell the others to ask that owner through `subagent_message` instead of editing it.
-A run that hits a failing command, a denied action or an unexpected change should report it rather than
-work around it.
+A run's usage is counted in its own session, however its generation ended. `/status` and the phone's
+status sheet show the total of the orchestrator's runs apart from its own totals, from
+`background-usage-ledger.json` in the same directory: each of a run's sessions counted once, however many
+Reports repeat its total. Unpriced usage is labelled unknown, not free; price-table estimates are not
+subscription invoices.
 
 **Evaluation.** `test/subagents-evaluation.test.ts` checks the grading of
 `scripts/eval-subagents.ts`: a run is graded by the fixture's own tests and the final tree, never by what
@@ -612,7 +666,7 @@ it is read when a session starts, so `/reload` after editing:
   could change; and it is compiled when the sandbox starts, so without the Command Line Tools
   (`xcode-select --install`) commands run unreaped, and pi warns at session start. An escaped
   descendant keeps the sandbox's limits.
-- Subagent runs on pi's RPC (behind `BLUCLAWD_RPC_RUNS` for now): a run given `bash` (the bundled
+- Subagent runs: a run given `bash` (the bundled
   `general-purpose`, or a role naming it) runs every command in a sandbox of its own, whether or not this one
   is on. It writes only in its isolated worktree and a temp directory of its own, never the worktree's `.git`,
   the Git directory it shares or the run's own state (approvals, inbox, definition); it reads nothing of

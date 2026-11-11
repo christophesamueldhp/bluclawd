@@ -9,7 +9,7 @@ This compares bluclawd's delegation with stock pi 1.5.2 on the same tasks, model
 Every arm runs the parent as `pi --mode rpc -ne`, with the same `--model` and `--thinking`. Only the extensions differ.
 
 - **stock**: no extensions (`-ne` also turns off pi's built-in `mcp`, `codemode` and `tool-search`).
-- **bluclawd**: only bluclawd's `subagents` extension, with `BLUCLAWD_RPC_RUNS=1`. This is the RPC-run path and the gated delegation guidance. The rest of the package (permissions, sandbox, agent view and the others) is not loaded. Those extensions add their own tools and prompt text, so whole-package figures would be higher than these.
+- **bluclawd**: only bluclawd's `subagents` extension, measured with `BLUCLAWD_RPC_RUNS=1` while RPC runs were behind that switch; they are the default since #311. This is the RPC-run path and its delegation guidance. The rest of the package (permissions, sandbox, agent view and the others) is not loaded. Those extensions add their own tools and prompt text, so whole-package figures would be higher than these.
 - **example** (live only): pi's example extension `examples/extensions/subagent`. pi ships it as an example; it is not built-in behavior. Its sample roles are installed with their pinned `model:` lines removed, so its children run on the model under evaluation. Its children are unnamed and share one faux script, so it cannot run on the scripted model.
 
 On the faux model, each arm also loads the faux provider extension (`test/fixtures/real-pi/faux.ts`). It only registers the model.

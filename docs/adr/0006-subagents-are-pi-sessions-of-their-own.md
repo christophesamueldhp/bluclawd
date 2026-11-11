@@ -1,6 +1,6 @@
 # Subagents are pi sessions of their own
 
-Superseded in part by ADR-0008: a run outlives its orchestrator's crash to finish its turn, and a reopened orchestrator takes its open runs over.
+Superseded in part by ADR-0008: a run outlives its orchestrator's crash to finish its turn, and a reopened orchestrator takes its open runs over. Superseded by ADR-0010 for new runs: since #311 every run runs on pi's RPC with no pane, and a run in tmux from before is only followed until it ends. Agent view's own sessions stay interactive pis in tmux.
 
 A run is a full interactive pi in the agent view's private tmux server, launched by its orchestrator, rather than an SDK session inside the orchestrator's pi. Opening a run switches the terminal to it, so it looks and behaves exactly like any other session: its own editor, status line and slash commands. The orchestrator starts, messages, stops and closes it, and runs message each other, the way Claude Code's agent teams talk between sessions, except that the orchestrator's close is not a request the run can refuse. Runs are not agent view rows or phone rows of their own; they are reached from their orchestrator. The user asked for this after the in-process transcript view still read as "not a pi session of its own", the same reason a viewer was rejected for agent view.
 

@@ -2,6 +2,8 @@
 
 Supersedes the part of ADR-0006 that says a run lives as long as its orchestrator's session: a crash does not end the session. When the orchestrator's pi disappears without ending its session, a working run finishes its turn, stores its Report, and is then closed; an idle one is closed at once. When the session starts again, it takes over the runs still open on its branch, as a reload always did. pi does not resume a tool call a crash cut off, so a run taken over, and a Report pulled for one, comes as a notice, and the run goes on in the background. Ending the session (a quit, `/new`, `/resume` of another session, a fork, tree navigation) still closes its runs.
 
+Runs on pi's RPC (ADR-0010) keep this contract without a pane: a run's host, not its pane, outlives the orchestrator and the daemon, and the reopened session takes the run over from its run directory, as ADR-0010 records (#308). What follows of panes holds for runs in tmux from before, which are still taken over this way until they end.
+
 Decided 2026-11-09; the spec is GitHub issue #267, settled by comparing bluclawd's subagents with `pi/packages/durable`.
 
 ## Considered Options
