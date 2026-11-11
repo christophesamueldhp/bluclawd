@@ -1,6 +1,7 @@
 import { existsSync } from "node:fs";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { SessionMessage, SessionUsage } from "../../daemon/ipc/protocol.ts";
+import { hostAllowed } from "../sandbox/runtime.ts";
 import { createRunAddressing } from "./addressing.ts";
 import { formatRunLabel, type RunExecutionContext } from "./admission.ts";
 import type { BatchResultDetails } from "./batches.ts";
@@ -15,7 +16,7 @@ import {
 import { inParentScope, type ParentScope, type ParentScopeChecks, type ScopedRun } from "./parent-scope.ts";
 import { buildSubagentResultEnvelope, MAX_PARENT_REPORT_BYTES, type SubagentResultDetails } from "./results.ts";
 import { executeRpcRun, type RunSlots } from "./rpc-runs.ts";
-import type { RunApprovalAnswer, RunApprovalRequest } from "./run-approvals.ts";
+import { NETWORK_ACCESS, type RunApprovalAnswer, type RunApprovalRequest } from "./run-approvals.ts";
 import { postToRun, whenGiven } from "./run-mailbox.ts";
 import { type RpcRunSender, rpcRunMessageText } from "./run-messages.ts";
 import { isTerminalSubagentStatus, type SubagentRunRecord, SubagentRunScheduler } from "./runs.ts";
@@ -113,6 +114,8 @@ export function createGenerations(deps: GenerationDeps) {
 			if (!record || signal.aborted || !deps.scope.inScope(record)) return "blocked";
 			const key = JSON.stringify([record.parentSessionId, record.sessionEpoch, request.action, request.target]);
 			if (allowed.has(key)) return "allow";
+			// A host the user let this session's own commands reach is no new authority for its runs' commands.
+			if (request.action === NETWORK_ACCESS && hostAllowed(request.target)) return "allow";
 			const ctx = deps.scope.context();
 			if (!ctx?.hasUI) return "blocked";
 			const yes = await ctx.ui.confirm(

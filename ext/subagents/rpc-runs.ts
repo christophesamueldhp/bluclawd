@@ -3,8 +3,10 @@
  * a host process of its own (rpc-host.ts), that takes its task in a fresh session, stores its Report once its work
  * settles, and exits; a Resume starts another on its saved session, as its next generation. Either waits its turn
  * in the daemon's queue (daemon/run-queue.ts), which starts the host once a slot is free. Its tools are a plain
- * allowlist of pi's read tools, codemode and, for a run that edits, edit and write, confined to a worktree of its own
- * (run-worktree.ts); anything else is refused at Admission, and its pi checks every call again (rpc-child.ts).
+ * allowlist of pi's read tools, codemode and, for a run that edits or runs commands, edit, write and bash, confined to
+ * a worktree of its own (run-worktree.ts), its commands to a sandbox of its own (run-shell.ts); anything else is
+ * refused at Admission, and its pi checks every call again (rpc-child.ts). A generation ends once none of its
+ * processes runs: its host's group, and every process its commands started (ext/sandbox/run-containment.ts).
  */
 
 import { randomUUID } from "node:crypto";
@@ -17,6 +19,13 @@ import { OrchestratorClient } from "../../daemon/orchestrator-client.ts";
 import type { RunHostLaunch } from "../../daemon/run-queue.ts";
 import { piCommand } from "../../daemon/tmux.ts";
 import * as forkSettings from "../_shared/settings.ts";
+import {
+	endRunProcesses,
+	prepareRunContainment,
+	type RunContainment,
+	type RunContainmentReady,
+	runMarker,
+} from "../sandbox/run-containment.ts";
 import type { AgentDefinition } from "./definitions.ts";
 import { SUBAGENT_MESSAGE_TOOL } from "./messages.ts";
 import { type RpcDenyRules, RUN_DEFINITION_FLAG } from "./rpc-child.ts";
@@ -31,6 +40,7 @@ import {
 } from "./run-approvals.ts";
 import { openRunInbox, type RunOutboxMessage, readRunOutbox, sealedRunInbox, sealRunInbox } from "./run-mailbox.ts";
 import { rpcRunMessageText, runTaskText } from "./run-messages.ts";
+import { runShellTmp } from "./run-shell.ts";
 import {
 	describeWorkspace,
 	type IsolatedWorkspace,
@@ -57,8 +67,10 @@ export const rpcRunsEnabled = (): boolean => Boolean(process.env[RPC_RUNS_ENV]);
 const READ_TOOLS = ["read", "grep", "find", "ls"];
 /** pi's tools that change files: a run given either works in a worktree of its own, and changes nothing else. */
 export const WRITE_TOOLS = ["edit", "write"];
-/** All an RPC run may have until its shell is enforced: the read tools, codemode over them, and the edit tools. */
-const RPC_TOOLS = [...READ_TOOLS, "codemode", ...WRITE_TOOLS];
+/** A run given any of these works in a worktree of its own: a command changes files as an edit does. */
+export const WORKTREE_TOOLS = [...WRITE_TOOLS, "bash"];
+/** All an RPC run may have: the read tools, codemode over them, the edit tools and the shell. */
+const RPC_TOOLS = [...READ_TOOLS, "codemode", ...WORKTREE_TOOLS];
 /** What a run gets when its role names no tools: it reads. */
 const DEFAULT_RPC_TOOLS = [...READ_TOOLS, "codemode"];
 /** The bundled role made to implement changes, which names no tools so that it keeps every tool in tmux. */
@@ -105,6 +117,8 @@ export interface RunDefinition extends AgentDefinition {
 	admitted: { provider: string; modelId: string; thinkingLevel: string };
 	/** A run that edits: the worktree it may change, and its baseline. */
 	workspace?: IsolatedWorkspace;
+	/** A run given `bash`: what its commands' sandbox is named after and kept out of (run-shell.ts). */
+	shell?: { runId: string; runDir: string };
 }
 
 /** Where the definition of a run's generation is: the launch's in definition.json, each Resume's beside it. */
@@ -176,25 +190,40 @@ export function rpcGrantableTools(callable: readonly string[], registered: reado
 	return [...callable, ...(registered.includes("codemode") && !callable.includes("codemode") ? ["codemode"] : [])];
 }
 
+const bundledWriter = (definition: Pick<AgentDefinition, "name" | "source">) =>
+	definition.source === "bundled" && definition.name === BUNDLED_WRITER;
+
+/** Whether a run of this role may get `bash`, so whether Admission must know first that its shell can be contained. */
+export function rpcRunMayShell(definition: Pick<AgentDefinition, "name" | "tools" | "source">): boolean {
+	return definition.tools ? definition.tools.includes("bash") : bundledWriter(definition);
+}
+
 /**
  * The tools an RPC run gets: those its role names, or every read tool and codemode the orchestrator can give it
- * when it names none, and the edit tools besides for the bundled general-purpose role. Anything else is refused, the
- * shell, MCP and subagents among them; Admission checks that the orchestrator can give those named.
+ * when it names none, and the edit tools and the shell besides for the bundled general-purpose role; the shell only
+ * where `shell` says its commands can be contained. Anything else is refused, MCP and subagents among them;
+ * Admission checks that the orchestrator can give those named.
  */
 export function rpcRunTools(
 	definition: Pick<AgentDefinition, "name" | "tools" | "source">,
 	available: readonly string[],
+	shell: RunContainmentReady | undefined,
 ): { ok: true; tools: string[] } | { ok: false; error: string } {
-	const defaults =
-		definition.source === "bundled" && definition.name === BUNDLED_WRITER
-			? [...DEFAULT_RPC_TOOLS, ...WRITE_TOOLS]
-			: DEFAULT_RPC_TOOLS;
+	const defaults = bundledWriter(definition)
+		? [...DEFAULT_RPC_TOOLS, ...WRITE_TOOLS, ...(shell?.ok ? ["bash"] : [])]
+		: DEFAULT_RPC_TOOLS;
 	const named = definition.tools ?? defaults.filter((tool) => available.includes(tool));
 	const refused = named.filter((tool) => !RPC_TOOLS.includes(tool));
 	if (refused.length > 0) {
 		return {
 			ok: false,
-			error: `Subagent role "${definition.name}" names tools a run on pi's RPC cannot have yet: ${refused.join(", ")}. It may only read, script its reads with codemode, and edit files in a worktree of its own (${RPC_TOOLS.join(", ")}): no shell, MCP, tool search or subagents.`,
+			error: `Subagent role "${definition.name}" names tools a run on pi's RPC cannot have: ${refused.join(", ")}. It may only read, script its reads with codemode, and edit files and run commands in a worktree of its own (${RPC_TOOLS.join(", ")}): no MCP, tool search or subagents.`,
+		};
+	}
+	if (named.includes("bash") && !shell?.ok) {
+		return {
+			ok: false,
+			error: `Subagent role "${definition.name}" names bash, and a run gets no shell here: ${shell?.ok === false ? shell.reason : "it was not checked"}. Give it a role that does not run commands.`,
 		};
 	}
 	return { ok: true, tools: [...named] };
@@ -374,7 +403,8 @@ export async function executeRpcRun(
 	const { workspace } = launch;
 	writeFileSync(
 		instructions,
-		launch.definition.instructions + (workspace ? `\n${workspaceInstructions(workspace)}` : ""),
+		launch.definition.instructions +
+			(workspace ? `\n${workspaceInstructions(workspace, launch.tools.includes("bash"))}` : ""),
 	);
 	// Open before anything is awaited: the run takes messages from its Admission on, queued or working.
 	openRunInbox(launch.runDir, record.generation);
@@ -392,6 +422,8 @@ export async function executeRpcRun(
 		const untaken = sealRunInbox(launch.runDir, record.generation).length;
 		return untaken ? `; ${untakenText(untaken, launch.runDir, record.generation)}.` : "";
 	};
+	/** What finds the processes its commands start, for a run with a shell: none may outlive its generation. */
+	let contained: RunContainment | undefined;
 	// Built before anything is awaited, so within its Admission: the run starts as admitted, however long it queues.
 	const host = prepareRpcHost(launch.runDir, {
 		command: rpcCommand(launch, instructions, runDefinitionPath(launch.runDir, record.generation)),
@@ -405,6 +437,15 @@ export async function executeRpcRun(
 		generation: record.generation,
 		...(launch.sessionFile ? { sessionFile: launch.sessionFile } : {}),
 	});
+	if (launch.tools.includes("bash")) {
+		const ready = await prepareRunContainment();
+		if (!ready.ok) {
+			const reason = `its shell cannot be contained (${ready.reason})`;
+			if (record.deliveryMode === "background") deps.notStarted(reason);
+			return { status: "failed", summaryText: "", errorMessage: `It did not start: ${reason}${untakenNote()}` };
+		}
+		contained = { helper: ready.helper, marker: runMarker(record.runId) };
+	}
 	// A run that edits gets its worktree as its Admission recorded it, before it waits for its turn.
 	if (workspace && !launch.sessionFile) {
 		try {
@@ -418,7 +459,7 @@ export async function executeRpcRun(
 	const turn = await startInTurn(
 		`${record.runId}/${record.generation}`,
 		record.parentSessionId,
-		host,
+		contained ? { ...host, contained } : host,
 		launch.recheck,
 		deps.slots,
 		AbortSignal.any([signal, deps.handOff]),
@@ -488,8 +529,10 @@ export async function executeRpcRun(
 	// Handed off: the run goes on, its Report kept on disk, and this instance of the session stores nothing more.
 	if (!ended() && !signal.aborted) return new Promise<never>(() => {});
 	if (!ended()) stopRpcHost(hostPid);
-	// The generation ends once nothing of it runs: its host, its pi, and whatever they started in the host's group.
-	const terminated = await endHostGroup(hostPid);
+	// The generation ends once nothing of it runs: its host, its pi, whatever they started in the host's group, and every
+	// process its commands started, wherever they went.
+	const terminated = await endHostGroup(hostPid, contained);
+	if (terminated && contained) rmSync(runShellTmp(record.runId), { recursive: true, force: true });
 	// Where it worked and what it changed there, as Git sees it rather than as the run says.
 	const workspaceLines = workspace ? await describeWorkspace(workspace) : [];
 	const workspaceNote = workspaceLines.length ? `\n${workspaceLines.join("\n")}` : "";
@@ -505,7 +548,7 @@ export async function executeRpcRun(
 		return {
 			status: "failed",
 			summaryText: report?.text ?? "",
-			errorMessage: `Its processes did not all end, even killed: process group ${hostPid} still runs. Nothing confirms its work stopped.${workspaceNote}`,
+			errorMessage: `Its processes did not all end, even killed: ${contained ? `process group ${hostPid}, or a process its commands started,` : `process group ${hostPid}`} still runs. Nothing confirms its work stopped.${workspaceNote}`,
 			transcriptPath: state?.sessionFile,
 		};
 	}
@@ -586,17 +629,20 @@ function until(done: () => boolean, signal: AbortSignal): Promise<boolean> {
 
 /**
  * Waits for the run's host's process group to empty: the host, its pi and whatever the pi started there. What is left
- * after {@link STOP_GRACE_MS} is killed. True once none of it runs; false when it still does even then.
+ * after {@link STOP_GRACE_MS} is killed. Then, for a run with a shell, every process its commands started is ended,
+ * found by its sandbox wherever it went. True once none of it runs; false when some still does even then.
  */
-async function endHostGroup(hostPid: number): Promise<boolean> {
+async function endHostGroup(hostPid: number, contained: RunContainment | undefined): Promise<boolean> {
 	const gone = () => !processGroupAlive(hostPid);
-	if (await until(gone, AbortSignal.timeout(STOP_GRACE_MS))) return true;
-	try {
-		process.kill(-hostPid, "SIGKILL");
-	} catch {
-		// Gone meanwhile.
+	if (!(await until(gone, AbortSignal.timeout(STOP_GRACE_MS)))) {
+		try {
+			process.kill(-hostPid, "SIGKILL");
+		} catch {
+			// Gone meanwhile.
+		}
+		if (!(await until(gone, AbortSignal.timeout(KILL_WAIT_MS)))) return false;
 	}
-	return until(gone, AbortSignal.timeout(KILL_WAIT_MS));
+	return contained ? endRunProcesses(contained) : true;
 }
 
 /** The usage of the run's session, from its file: what pi counted, once per entry. */

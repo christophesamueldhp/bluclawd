@@ -198,7 +198,7 @@ describe.skipIf(!hasTmux)("an RPC run's directory and role", () => {
 		]);
 		real.tmux.sendKeys(pane, ["again", "Enter"]);
 		const main = await real.waitForRequests("main", 4);
-		expect(lastToolResult(main[3])?.text).toMatch(/cannot have yet: bash/);
+		expect(lastToolResult(main[3])?.text).toMatch(/isolated Git worktree, and none can be made|gets no shell here/);
 		expect(real.requests("second")).toHaveLength(0);
 		expect(JSON.parse(readFileSync(snapshotFile, "utf8"))).toMatchObject(admitted);
 	});

@@ -12,6 +12,11 @@ export interface RunHostLaunch {
 	command: string[];
 	env: Record<string, string>;
 	cwd: string;
+	/**
+	 * For a run with a shell: the helper that finds and ends the processes its commands started, and the run's marker
+	 * (ext/sandbox/run-containment.ts). They may have left the host's group, and its slot is held until they end too.
+	 */
+	contained?: { helper: string; marker: string };
 }
 
 /** How long a claim waits for a slot before it is answered without one; the orchestrator then claims again. */
@@ -28,8 +33,11 @@ export interface RunQueueDeps {
 	now: () => number;
 	/** Starts a run's host detached, in a process group of its own; returns its pid, or throws. */
 	spawn: (launch: RunHostLaunch) => number;
-	/** Whether any process of the group led by `pid` still runs. */
-	running: (pid: number) => boolean;
+	/**
+	 * Whether any process of the group led by `pid` still runs, or, once none does, any process its commands started:
+	 * those are ended then, since nothing of the run is left to own them.
+	 */
+	running: (pid: number, contained: RunHostLaunch["contained"]) => boolean;
 }
 
 interface Entry {
@@ -41,6 +49,7 @@ interface Entry {
 	claimedAt: number;
 	grantedAt?: number;
 	pid?: number;
+	contained?: RunHostLaunch["contained"];
 }
 
 export class RunQueue {
@@ -99,6 +108,7 @@ export class RunQueue {
 			throw error;
 		}
 		entry.state = "active";
+		entry.contained = host.contained;
 		return entry.pid;
 	}
 
@@ -117,7 +127,7 @@ export class RunQueue {
 		for (const [run, entry] of this.entries) {
 			const ended =
 				entry.state === "active"
-					? entry.pid === undefined || !this.deps.running(entry.pid)
+					? entry.pid === undefined || !this.deps.running(entry.pid, entry.contained)
 					: entry.state === "granted"
 						? now - (entry.grantedAt ?? now) > LAUNCH_LEASE_MS
 						: !entry.answer && now - entry.claimedAt > UNCLAIMED_MS;

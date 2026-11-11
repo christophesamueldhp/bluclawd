@@ -132,7 +132,7 @@ describe.skipIf(!hasTmux)("an RPC run that edits", () => {
 
 		const w = real.requests("w");
 		expect(w).toHaveLength(5);
-		expect(systemPrompt(w[0])).toMatch(/You work in an isolated Git worktree, .*you have no shell/s);
+		expect(systemPrompt(w[0])).toMatch(/You work in an isolated Git worktree, .*You have no shell/s);
 		expect(lastToolResult(w[1])?.text).toBe("untracked\n");
 		// Ignored, so not copied: a secret stays where it was.
 		expect(lastToolResult(w[2])?.text).toMatch(/ENOENT|not found|No such file/i);

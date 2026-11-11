@@ -171,7 +171,7 @@ describe.skipIf(!hasTmux)("a read-only run on pi's RPC", () => {
 		expect(real.requests("slow")).toHaveLength(1);
 	});
 
-	it("refuses a role that names a shell before any child starts", async () => {
+	it("refuses a role that names a shell where it cannot work in a worktree of its own, before any child starts", async () => {
 		const real = await startOrchestrator();
 		pi = real;
 		const agent = {
@@ -187,7 +187,7 @@ describe.skipIf(!hasTmux)("a read-only run on pi's RPC", () => {
 		real.start(["--", "delegate"]);
 		const main = await real.waitForRequests("main", 2);
 
-		expect(lastToolResult(main[1])?.text).toMatch(/cannot have yet: bash/);
+		expect(lastToolResult(main[1])?.text).toMatch(/isolated Git worktree, and none can be made|gets no shell here/);
 		expect(real.requests("shelly")).toHaveLength(0);
 		expect(existsSync(join(real.agentDir, "bluclawd", "subagents"))).toBe(false);
 	});

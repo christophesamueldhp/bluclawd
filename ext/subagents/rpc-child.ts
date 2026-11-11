@@ -3,23 +3,33 @@
  * `subagent` or `schedule_wakeup` of its own. Its tools are fixed by a plain `--tools` list; every call, direct or
  * from a codemode script, is checked here as well against what the run was admitted with: one of its tools, and
  * none its orchestrator's or its workspace's deny rules refuse. A run that edits changes files only in its own
- * worktree, and is held there to the rules of the checkout it copies. This also closes the shell that pi's RPC `bash`
- * command runs outside the tool list. Every run also has its own `subagent_message`, which only returns what it
+ * worktree, and is held there to the rules of the checkout it copies. A run given `bash` runs each command in a
+ * sandbox of its own (run-shell.ts), never while another of its file tools runs, and each command's processes end with
+ * it. The shell that pi's RPC `bash` command runs outside the tool list stays closed. Every run also has its own `subagent_message`, which only returns what it
  * would send: the run's host reads that off pi's events and passes it on, so the run reaches nothing itself.
  */
 import { lstatSync, readFileSync, realpathSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, sep } from "node:path";
 import {
+	type BashOperations,
+	createBashToolDefinition,
 	createCodemodeExtension,
 	type ExtensionAPI,
+	type ExtensionUIContext,
+	getAgentDir,
+	SettingsManager,
 	type ToolCallEventResult,
 	type ToolResultEventResult,
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { resolveToCwd } from "../_shared/path-resolve.ts";
 import { evaluateToolCallDeny, filterDeniedGrepToolResult } from "../permissions/policy.ts";
+import { sandboxSetting } from "../sandbox/config.ts";
+import type { AskNetwork } from "../sandbox/runtime.ts";
 import { PARENT_MESSAGE_ADDRESS, SUBAGENT_MESSAGE_TOOL } from "./messages.ts";
+import { askRunApproval, NETWORK_ACCESS } from "./run-approvals.ts";
 import { RUN_MESSAGE_KINDS, type RunOutboxMessage } from "./run-mailbox.ts";
+import { createRunShell } from "./run-shell.ts";
 
 /** As large as a message from a run gets: anything longer belongs in its Report. */
 const MAX_MESSAGE_BYTES = 8192;
@@ -36,25 +46,40 @@ export interface RpcDenyRules {
 interface RunPolicy {
 	tools: string[];
 	deny: RpcDenyRules[];
-	/** A run that edits: its worktree's root, and the root of the checkout it copies; both real. */
-	workspace?: { root: string; source: string };
+	/** A run that edits: its worktree's root, the root of the checkout it copies, and the Git directory both share. */
+	workspace?: { root: string; source: string; gitDir: string };
+	/** A run given `bash`: its id and directory, which its shell's sandbox is named after and kept out of. */
+	shell?: { runId: string; runDir: string };
 }
+
+/** pi's tools that read or change files: none runs while a shell command of the run does. */
+const FILE_TOOLS = ["read", "grep", "find", "ls", "edit", "write"];
 
 /** pi's tools that change the file at their `path`. */
 const WRITE_TOOLS = ["edit", "write"];
 
 function readPolicy(path: unknown): RunPolicy | undefined {
 	try {
-		const { tools, deny, workspace } = JSON.parse(readFileSync(String(path), "utf8"));
+		const { tools, deny, workspace, shell } = JSON.parse(readFileSync(String(path), "utf8"));
 		const strings = (list: unknown) => Array.isArray(list) && list.every((item) => typeof item === "string");
 		const root = workspace?.root;
 		const source = workspace?.baseline?.source;
+		const gitDir = workspace?.baseline?.gitDir;
 		const valid =
 			strings(tools) &&
 			Array.isArray(deny) &&
 			deny.every((set) => typeof set?.cwd === "string" && strings(set.rules)) &&
-			(workspace === undefined || (typeof root === "string" && typeof source === "string"));
-		return valid ? { tools, deny, ...(workspace ? { workspace: { root, source } } : {}) } : undefined;
+			(workspace === undefined ||
+				(typeof root === "string" && typeof source === "string" && typeof gitDir === "string")) &&
+			(shell === undefined || (typeof shell.runId === "string" && typeof shell.runDir === "string"));
+		return valid
+			? {
+					tools,
+					deny,
+					...(workspace ? { workspace: { root, source, gitDir } } : {}),
+					...(shell ? { shell: { runId: shell.runId, runDir: shell.runDir } } : {}),
+				}
+			: undefined;
 	} catch {
 		return undefined;
 	}
@@ -143,13 +168,44 @@ export default function rpcChild(pi: ExtensionAPI): void {
 		return policy;
 	};
 
-	pi.on("tool_call", (event, ctx): ToolCallEventResult | undefined => {
+	/** A shell command running, and the file tools let through that have not ended: one excludes the other. */
+	let commandRunning: Promise<void> | undefined;
+	const fileToolsRunning = new Set<string>();
+	pi.on("tool_execution_end", (event) => {
+		fileToolsRunning.delete(event.toolCallId);
+	});
+	const shell = runShell(currentPolicy, async (run) => {
+		while (commandRunning) await commandRunning;
+		let done = () => {};
+		commandRunning = new Promise((resolve) => {
+			done = resolve;
+		});
+		try {
+			// A file tool checks its path before it runs: no command may change what that path leads to meanwhile.
+			while (fileToolsRunning.size > 0) await new Promise((resolve) => setTimeout(resolve, 10));
+			return await run();
+		} finally {
+			commandRunning = undefined;
+			done();
+		}
+	});
+
+	pi.on("tool_call", async (event, ctx): Promise<ToolCallEventResult | undefined> => {
 		const admitted = currentPolicy();
 		if (!admitted) return { block: true, reason: "Refused: this run's admitted tools could not be read." };
 		// Every run's own, granted by no role: it reaches nothing but its host, and acts on nothing.
 		if (event.toolName === SUBAGENT_MESSAGE_TOOL) return undefined;
+		const lost = shell.uncontained();
+		if (lost) return { block: true, reason: lost };
 		if (!admitted.tools.includes(event.toolName)) {
 			return { block: true, reason: `Refused: this run was not given ${event.toolName}.` };
+		}
+		if (admitted.shell && FILE_TOOLS.includes(event.toolName)) {
+			while (commandRunning) await commandRunning;
+			fileToolsRunning.add(event.toolCallId);
+		}
+		if (event.toolName === "bash" && (!admitted.shell || !admitted.workspace)) {
+			return { block: true, reason: "Refused: this run has no shell of its own." };
 		}
 		if (WRITE_TOOLS.includes(event.toolName)) {
 			const refused = unwritable(admitted.workspace, (event.input as { path?: unknown }).path, ctx.cwd);
@@ -243,7 +299,56 @@ export default function rpcChild(pi: ExtensionAPI): void {
 		},
 	});
 
+	pi.registerTool(shell.tool);
+
 	pi.on("user_bash", () => ({
 		result: { output: "Refused: a subagent run has no shell.", exitCode: 1, cancelled: false, truncated: false },
 	}));
+}
+
+/**
+ * The run's `bash`, pi's own with its commands run in the run's sandbox (run-shell.ts), one at a time and each through
+ * `exclusive`. Its network asks go to the user through the run's orchestrator, once per host and port.
+ */
+function runShell(policy: () => RunPolicy | undefined, exclusive: <T>(run: () => Promise<T>) => Promise<T>) {
+	let ui: Pick<ExtensionUIContext, "select"> | undefined;
+	const answers = new Map<string, Promise<boolean>>();
+	// pi's dialog replaces an open one without settling it, so one opens only after the last settled.
+	let asking: Promise<unknown> = Promise.resolve();
+	const ask: AskNetwork = ({ host, port }) => {
+		const target = port === undefined ? host : `${host}:${port}`;
+		let answer = answers.get(target);
+		if (!answer) {
+			answer = asking.then(
+				async () => ui !== undefined && !(await askRunApproval(ui, { action: NETWORK_ACCESS, target }, undefined)),
+			);
+			asking = answer.catch(() => {});
+			answers.set(target, answer);
+		}
+		return answer;
+	};
+	let shell: ReturnType<typeof createRunShell> | undefined;
+	const exec: BashOperations["exec"] = (command, cwd, options) => {
+		const admitted = policy();
+		if (!admitted?.shell || !admitted.workspace) throw new Error("Refused: this run has no shell of its own.");
+		const agentDir = getAgentDir();
+		shell ??= createRunShell(
+			{ ...admitted.shell, workspace: admitted.workspace, deny: admitted.deny },
+			{ agentDir, user: () => sandboxSetting(SettingsManager.create(cwd, agentDir)), ask },
+		);
+		const current = shell;
+		return exclusive(() => current.exec(command, cwd, options));
+	};
+	const base = createBashToolDefinition(process.cwd(), { operations: { exec } });
+	return {
+		tool: {
+			...base,
+			executionMode: "sequential" as const,
+			execute: ((toolCallId, params, signal, onUpdate, ctx) => {
+				ui = ctx.ui;
+				return base.execute(toolCallId, params, signal, onUpdate, ctx);
+			}) as typeof base.execute,
+		},
+		uncontained: () => shell?.uncontained(),
+	};
 }
