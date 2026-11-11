@@ -46,14 +46,27 @@ function firstTaskId(agentDir: string): string | false {
 	return false;
 }
 
+/** Whether watch's server has listened: its record, beside the fixture, has its port. */
+function listened(cwd: string): boolean {
+	try {
+		return JSON.parse(readFileSync(join(cwd, "..", "server.json"), "utf8")).port !== undefined;
+	} catch {
+		// Not written yet, or caught mid-write.
+		return false;
+	}
+}
+
+type Stop = { stop: true; after?: (cwd: string) => boolean };
+
 /**
  * One trial of `name` with the parent following `steps`. A step `{ stop: true }` is a `task_stop` of the first
- * background task, named once the parent has been told its ID: the step before it is held until then.
+ * background task, named once the parent has been told its ID and `after` holds for the trial's checkout: the step
+ * before it is held until then.
  */
-async function trial(name: string, steps: (FauxStep | { stop: true })[], timeoutMs = 2 * readinessMs) {
+async function trial(name: string, steps: (FauxStep | Stop)[], timeoutMs = 2 * readinessMs) {
 	const at = steps.findIndex((step) => "stop" in step);
 	const gate = (agentDir: string) => join(agentDir, "..", "stop.go");
-	let dirs: { agentDir: string } | undefined;
+	let dirs: { agentDir: string; cwd: string } | undefined;
 	const script = (agentDir: string, id?: string) =>
 		steps.map((step, i) =>
 			"stop" in step
@@ -77,11 +90,13 @@ async function trial(name: string, steps: (FauxStep | { stop: true })[], timeout
 		},
 	});
 	if (at >= 0 && dirs) {
-		const { agentDir } = dirs;
+		const { agentDir, cwd } = dirs;
+		const { after } = steps[at] as Stop;
 		try {
 			// waitFor returns only once it is not false.
 			const id = (await waitFor(() => firstTaskId(agentDir))) as string;
 			writeFileSync(join(fauxDir(agentDir), "main.json"), JSON.stringify(script(agentDir, id)));
+			if (after) await waitFor(() => after(cwd));
 		} finally {
 			// Released even if no ID was seen, so the trial ends, and with it all its processes.
 			writeFileSync(gate(agentDir), "");
@@ -128,11 +143,28 @@ describe("background shells in the delegation evaluation, on a scripted model", 
 		const result = await trial("watch", [
 			{ tool: "monitor", args: { command: "node server.js | tee server.log", description: "server readiness" } },
 			bash("sed -n 's/^READY port=//p' server.log > port.txt"),
-			{ stop: true },
+			// Held until the server has listened, so it is stopped while it is up but not yet ready.
+			{ tool: "read", args: { path: "server.js" } },
+			{ stop: true, after: listened },
 			{ text: "Done." },
 		]);
 		expectOutcome(result, false);
 		expect(result.checkFailure).toMatch(/^port\.txt holds ""/);
+	});
+
+	it("watch: tells a server stopped before it listened from one that never started", () => {
+		const base = mkdtempSync(join(tmpdir(), "bc-eval-watch-"));
+		try {
+			const cwd = join(base, "work");
+			mkdirSync(cwd);
+			const check = SCENARIOS.find((s) => s.name === "watch")!.check!;
+			expect(check(cwd)).toBe("the server never started");
+			// As server.js leaves its record when it is stopped between its start and its listen().
+			writeFileSync(join(base, "server.json"), "{}");
+			expect(check(cwd)).toBe("the server was stopped before it listened");
+		} finally {
+			rmSync(base, { recursive: true, force: true });
+		}
 	});
 
 	it("slow: passes with the limit given in milliseconds, and no bash call ends at its timeout", async () => {

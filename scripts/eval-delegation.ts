@@ -97,13 +97,15 @@ const BAR_TEST = testFile(
 );
 
 /**
- * A server on a port of the system's choosing, which it prints once ready. It records the port, and whether it gave
- * up waiting to be stopped, beside the fixture, out of the repository: `watch` is graded on that record.
+ * A server on a port of the system's choosing, which it prints once ready. It records that it started, then its port,
+ * and whether it gave up waiting to be stopped, beside the fixture, out of the repository: `watch` is graded on that
+ * record.
  */
 const SERVER = `import { writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 
 const record = new URL("../server.json", import.meta.url);
+writeFileSync(record, "{}");
 const server = createServer((_request, response) => response.end("ok"));
 server.listen(0, "127.0.0.1", () => {
 	const { port } = server.address();
@@ -121,6 +123,7 @@ function checkWatch(cwd: string): string | undefined {
 	const record = join(cwd, "..", "server.json");
 	if (!existsSync(record)) return "the server never started";
 	const { port, expired } = JSON.parse(readFileSync(record, "utf8"));
+	if (port === undefined) return "the server was stopped before it listened";
 	if (expired) return "the server was left running until it gave up";
 	const written = existsSync(join(cwd, "port.txt")) ? readFileSync(join(cwd, "port.txt"), "utf8").trim() : undefined;
 	return written === String(port) ? undefined : `port.txt holds ${JSON.stringify(written)}, not ${port}`;
