@@ -158,3 +158,9 @@ _Avoid_: MEMORY.md (its file, not the concept)
 **Project**:
 Whose Memory a session sees: the git repository the session's directory belongs to, shared by all its worktrees, or the directory itself outside git.
 _Avoid_: workspace, repo (alone), cwd
+
+### Prompt
+
+**Prompt footprint**:
+The text bluclawd adds to what a session's model reads with a request: its sections of the system prompt, its tool definitions with their parameter descriptions, and the reminders it attaches to a request. pi's own prompt and the conversation are not part of it; an orchestrator's and a run's are counted apart.
+_Avoid_: system prompt (for all of it), prompt size, context
