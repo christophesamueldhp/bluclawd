@@ -324,6 +324,10 @@ describe.skipIf(!hasTmux)("integrating an RPC run's changes", () => {
 		real.script("cw", [{ tool: "write", args: { path: "done.txt", content: "done\n" } }, { text: "Wrote." }]);
 		real.script("crev", [{ text: "Looks right." }]);
 		const pane = real.start(["--", "delegate"]);
+		// Each step's pi start gets a readiness wait of its own.
+		for (const step of ["hw", "hrev", "cw", "crev"]) {
+			await waitFor(() => expect(real.requests(step).length).toBeGreaterThan(0));
+		}
 		const first = await real.waitForRequests("main", 3);
 		const [halted, completed] = chainIds(first[2]);
 		expect([halted, completed].every(Boolean)).toBe(true);
