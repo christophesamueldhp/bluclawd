@@ -63,6 +63,7 @@ import {
 import { createAgentTaskSource } from "./task-source.ts";
 import { actAsRun, paneUp, RunReports, stopTurn } from "./tmux-runs.ts";
 import { createParentScopeViews, runStatus } from "./views.ts";
+import { registerWorkspaceCleanup } from "./workspace-cleanup.ts";
 
 export const SUBAGENT_NOTIFICATION_CUSTOM_TYPE = "subagent-notification";
 const SUBAGENT_REMINDER_CUSTOM_TYPE = "subagent-reminder";
@@ -683,6 +684,10 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 
 		// Collaboration between independent orchestrators: with runs on pi's RPC only, until they are the default.
 		if (!launchedBy && rpcRunsEnabled()) collaborateAsParent(pi, { agentDir: resolveAgentDir });
+		// Only runs on pi's RPC that edit have worktrees of their own; only the user removes one that holds changes.
+		if (!launchedBy && rpcRunsEnabled()) {
+			registerWorkspaceCleanup(pi, { agentDir: resolveAgentDir, scope: () => parentScope.current(), directory });
+		}
 
 		// Only with runs on pi's RPC, whose finished runs a message does not continue.
 		if (rpcRunsEnabled()) {
