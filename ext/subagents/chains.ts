@@ -8,6 +8,7 @@
  */
 
 import { randomUUID } from "node:crypto";
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 import {
 	type AdmissionContext,
@@ -26,7 +27,12 @@ import { NOT_APPROVAL } from "./messages.ts";
 import type { ParentScopeChecks } from "./parent-scope.ts";
 import { sanitizeReportText, truncateUtf8Safe } from "./results.ts";
 import { readRunDefinition, runDefinitionPath } from "./rpc-runs.ts";
-import { describeWorkspace, type IsolatedWorkspace, type RunBaseline } from "./run-worktree.ts";
+import {
+	describeWorkspace,
+	type IsolatedWorkspace,
+	type RunBaseline,
+	releaseUnchangedWorktree,
+} from "./run-worktree.ts";
 import type { SubagentRunRecord } from "./runs.ts";
 import { getSubagentsRootDir, storedRunReportTextPath, subagentRunDir, writeAtomicPrivateFile } from "./storage.ts";
 import type { RunReports } from "./tmux-runs.ts";
@@ -234,7 +240,7 @@ export async function runChain(
 		const resumed = run && "member" in run ? deps.getRun(run.member.record.runId) : undefined;
 		if (!resumed) return { ok: false, error: `${label(step.resume)} has no run to resume` };
 		const { model, thinkingLevel } = step;
-		return deps.admission.resume(resumed, () => `${own}${handoff}`, now, { model, thinkingLevel });
+		return deps.admission.resume(resumed, () => `${own}${handoff}`, now, { model, thinkingLevel, chainStep: true });
 	};
 
 	const drive = async () => {
@@ -265,7 +271,10 @@ export async function runChain(
 	};
 
 	const settle = async () => {
-		const lines = workspace ? await describeWorkspace(workspace) : [];
+		// Kept for each next step, even unchanged; once none runs in it, it goes like any run's worktree left unchanged.
+		const owner = { agentDir, runId: start.runId, runDir: firstDir };
+		if (workspace) await releaseUnchangedWorktree(workspace, owner);
+		const lines = workspace ? await describeWorkspace(workspace, firstDir) : [];
 		const completed = results.every(
 			(result) => result && "member" in result && memberOutcome(result.member).status === "completed",
 		);
@@ -424,9 +433,11 @@ function formatChainAggregate(
 		return `- ${stepLabel(steps, result, i, label)}: ${status}${why ? `: ${why}` : ""}`;
 	});
 	const verdict = workspace
-		? completed
-			? `Every step completed: the worktree holds the chain's work, ready for you to review and integrate; none of it is in your checkout.`
-			: `The chain halted: its worktree keeps the partial work for you to inspect. It is not ready to integrate, and none of it is in your checkout.`
+		? !existsSync(workspace.root)
+			? `The chain ${completed ? "completed" : "halted"}, and no step changed anything: there is nothing to integrate.`
+			: completed
+				? `Every step completed: the worktree holds the chain's work, ready for you to review and integrate; none of it is in your checkout.`
+				: `The chain halted: its worktree keeps the partial work for you to inspect. It is not ready to integrate, and none of it is in your checkout.`
 		: completed
 			? "Every step completed."
 			: "The chain halted.";

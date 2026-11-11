@@ -507,4 +507,49 @@ describe.skipIf(!hasTmux)("a chain of RPC runs", () => {
 		expect(recordOf(real, "b")).toBeUndefined();
 		expect(real.requests("b")).toEqual([]);
 	});
+
+	it("keeps the worktree a reading first step recorded, unchanged, for each step after it, and lets it go once the chain settles", async () => {
+		const real = await startOrchestrator();
+		pi = real;
+		const repo = real.cwd;
+		repository(repo, { "pkg/a.txt": "one\n" });
+		real.script("main", [
+			{
+				tool: "subagent",
+				args: {
+					chain: [
+						{ agent: "explorer", name: "look", cwd: "pkg", task: "Look at a.txt." },
+						{ agent: writer, name: "w", task: "Change nothing." },
+						{ agent: "reviewer", name: "rev", cwd: "pkg", task: "Review a.txt." },
+					],
+				},
+			},
+			{ text: "read the chain" },
+		]);
+		real.script("look", [{ tool: "read", args: { path: "local.txt" } }, { text: "Looked." }]);
+		real.script("w", [{ text: "Nothing to change." }]);
+		real.script("rev", [{ tool: "read", args: { path: "a.txt" } }, { text: "Fine as it is." }]);
+		real.start(["--", "delegate"]);
+		await started(real, "look");
+		await started(real, "w");
+		await started(real, "rev");
+		const main = await real.waitForRequests("main", 2);
+
+		// The first step only reads, yet works in the worktree its Admission recorded, the checkout's local state in it.
+		const look = real.requests("look");
+		expect(systemPrompt(look[0])).toMatch(/You read an isolated Git worktree/);
+		expect(toolResults(look[1])).toEqual(["uncommitted\n"]);
+		// Unchanged after the first two steps, it was still there for the third.
+		const rev = real.requests("rev");
+		expect(toolResults(rev[1])).toEqual(["one\n"]);
+		const [look1, w1, rev1] = ["look", "w", "rev"].map((name) => recordOf(real, name));
+		expect(rev1?.cwd).toBe(join(String(w1?.cwd), "pkg"));
+		expect(look1?.cwd).toBe(rev1?.cwd);
+
+		const [aggregate] = toolResults(main[1]);
+		expect(aggregate).toMatch(/Chain chain_\w+: 3 steps, all completed\./);
+		// Unchanged once the chain settled, it went, as any run's unchanged worktree does.
+		expect(aggregate).toMatch(/^Workspace: .+, removed: it held no change since its baseline/m);
+		expect(existsSync(String(w1?.cwd))).toBe(false);
+	});
 });

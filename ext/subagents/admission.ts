@@ -397,6 +397,8 @@ export interface ResumeChanges {
 	thinkingLevel?: string;
 	/** Set when the instruction is the user's own, given to the run directly, rather than its orchestrator's. */
 	from?: "user";
+	/** Set when the Resume is a step of the run's chain, which releases the worktree once the chain settles. */
+	chainStep?: true;
 }
 
 export interface RunAdmission {
@@ -702,6 +704,7 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 					projectTrusted: definition.projectTrusted,
 					sessionFile,
 					...(changes.from ? { taskFrom: changes.from } : {}),
+					...(changes.chainStep ? { keepWorktree: true } : {}),
 					...(definition.workspace ? { workspace: definition.workspace } : {}),
 					recheck: recheckRpc(current.runId, runDir, generation, { cwd: ctx.cwd, trusted: projectTrusted }),
 				},
@@ -973,7 +976,7 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 				runCwd = join(shared.root, relative(shared.baseline.source, cwd));
 				if (!existsSync(runCwd)) {
 					return reject(
-						`Subagent cwd ${cwd} has no counterpart in the worktree of its chain, ${shared.root}: it is ignored, or held no file when the chain began.`,
+						`Subagent cwd ${cwd} is not in the worktree of its chain, ${shared.root}: the worktree was removed, or the directory is ignored or held no file when the chain began.`,
 					);
 				}
 			} else if (writes || shared === "record") {
@@ -1058,6 +1061,7 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 								projectTrusted: childTrusted,
 								...(isolated ? { workspace: isolated } : {}),
 								...(typeof shared === "object" ? { worktreeMade: true } : {}),
+								...(chain ? { keepWorktree: true } : {}),
 								recheck: recheckRpc(runId, storage.runDir, 0, { cwd: ctx.cwd, trusted: projectTrusted }),
 							},
 						}

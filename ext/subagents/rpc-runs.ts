@@ -90,6 +90,8 @@ export interface RpcLaunch {
 	workspace?: IsolatedWorkspace;
 	/** Set when an earlier step of its chain made its worktree, handed on to it as it is. */
 	worktreeMade?: boolean;
+	/** Set on a step of a chain: its worktree is kept, even unchanged, for the steps after it; the chain releases it. */
+	keepWorktree?: boolean;
 	/**
 	 * Why the run may no longer start, asked once its turn comes: it may have waited in the queue since Admission. It
 	 * narrows what the run is held to, never widens it.
@@ -402,7 +404,7 @@ export async function executeRpcRun(
 	 * leaves no worktree or baseline behind either: there is nothing of it to resume.
 	 */
 	const untakenNote = () => {
-		if (workspace && !launch.sessionFile) {
+		if (workspace && !launch.sessionFile && !launch.worktreeMade) {
 			discardWorktree(workspace, { agentDir: launch.agentDir, runId: record.runId, runDir: launch.runDir });
 		}
 		const untaken = sealRunInbox(launch.runDir, record.generation).length;
@@ -507,7 +509,7 @@ export async function executeRpcRun(
 	// The generation ends once nothing of it runs: its host, its pi, and whatever they started in the host's group.
 	const terminated = await endHostGroup(hostPid);
 	// Once nothing of it runs, a worktree it left as it was made goes, a Resume making it again; any other stays.
-	if (workspace && terminated) {
+	if (workspace && terminated && !launch.keepWorktree) {
 		await releaseUnchangedWorktree(workspace, {
 			agentDir: launch.agentDir,
 			runId: record.runId,
