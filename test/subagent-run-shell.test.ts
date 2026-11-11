@@ -87,6 +87,7 @@ describe.skipIf(!supported)("a run's shell, on the operating system", () => {
 		writeFileSync(join(source, "locked.txt"), "locked\n");
 		mkdirSync(join(source, "keys"));
 		writeFileSync(join(source, "keys", "k.pem"), "PEM-SECRET\n");
+		writeFileSync(join(source, "keys", "id.txt"), "ID-SECRET\n");
 		git(source, "init", "-q");
 		git(source, "add", ".");
 		git(source, "commit", "-q", "-m", "start");
@@ -98,7 +99,9 @@ describe.skipIf(!supported)("a run's shell, on the operating system", () => {
 			runId,
 			runDir,
 			workspace: { root: worktree, source: captured.baseline.source, gitDir: captured.baseline.gitDir },
-			deny: [{ cwd: source, rules: ["Read(secret.txt)", "Read(**/*.pem)", "Edit(locked.txt)"] }],
+			deny: [
+				{ cwd: source, rules: ["Read(secret.txt)", "Read(**/*.pem)", "Read(keys/id.txt)", "Edit(locked.txt)"] },
+			],
 		};
 		// A private daemon's socket and a tmux server's, listening: outside the sandbox, both answer.
 		for (const name of ["daemon.sock", "tmux.sock"]) {
@@ -211,12 +214,18 @@ describe.skipIf(!supported)("a run's shell, on the operating system", () => {
 			"mv secret.txt moved.txt; cat moved.txt",
 			"ln secret.txt hard.txt; cat hard.txt",
 			"cp secret.txt copy.txt; cat copy.txt",
-			"mv keys keys2; cat keys2/k.pem",
+			"mv keys keys2; cat keys2/k.pem keys2/id.txt",
+			"cp -R keys keys3; cat keys3/id.txt",
 			"ln -s secret.txt soft.txt; cat soft.txt",
 		]) {
 			tried[command] = (await run(command)).output;
 		}
-		expect(Object.values(tried).join("\n")).not.toMatch(/TRACKED-SECRET|PEM-SECRET/);
+		expect(Object.values(tried).join("\n")).not.toMatch(/TRACKED-SECRET|PEM-SECRET|ID-SECRET/);
+		// Not one of them got a name the rules do not cover: renaming or linking a denied file is refused too.
+		for (const name of ["moved.txt", "hard.txt", "copy.txt", "keys2", "keys3/id.txt"]) {
+			expect(existsSync(join(worktree, name)), name).toBe(false);
+		}
+		expect(readFileSync(join(source, "keys", "id.txt"), "utf8")).toBe("ID-SECRET\n");
 	});
 
 	it("keeps its worktree's .git link where it is", async () => {

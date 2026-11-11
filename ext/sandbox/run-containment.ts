@@ -36,7 +36,7 @@ export function prepareRunContainment(platform: NodeJS.Platform = process.platfo
 		});
 	}
 	tested ??= selfTest().then((ready) => {
-		// Tried again next time: the Command Line Tools may be installed meanwhile.
+		// Tested again next time; a helper that could not be built is built again only in a new process (reaper.ts).
 		if (!ready.ok) tested = undefined;
 		return ready;
 	});

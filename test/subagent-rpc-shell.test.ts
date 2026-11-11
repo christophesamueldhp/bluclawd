@@ -156,6 +156,44 @@ describe.skipIf(!hasTmux || !contained)("a run's shell on pi's RPC", () => {
 		});
 	});
 
+	it("takes turns between its commands and its file tools, which a link its command made does not lead out of its worktree", async () => {
+		const real = await startOrchestrator();
+		pi = real;
+		const checkout = realpathSync(real.cwd);
+		writeFileSync(join(checkout, "secret.txt"), "TRACKED-SECRET\n");
+		git(checkout, "add", "secret.txt");
+		git(checkout, "commit", "-q", "-m", "secret");
+		const settings = join(real.agentDir, "settings.json");
+		writeFileSync(settings, JSON.stringify({ ...readJson(settings), permissions: { deny: ["Read(secret.txt)"] } }));
+		real.script("main", [
+			{ tool: "subagent", args: { agent: "general-purpose", name: "gp", task: "Mix them." } },
+			{ text: "done" },
+		]);
+		real.script("gp", [
+			{ tool: "bash", args: { command: `ln -s ${quote(checkout)} out` } },
+			{ tool: "write", args: { path: "out/x.txt", content: "escaped\n" } },
+			{ tool: "read", args: { path: "secret.txt" } },
+			{ tool: "write", args: { path: "ok.txt", content: "fine\n" } },
+			{ tool: "bash", args: { command: "cat ok.txt" } },
+			{ tool: "read", args: { path: "ok.txt" } },
+			{ text: "Mixed." },
+		]);
+		real.start(["--", "delegate"]);
+		await real.waitForRequests("main", 2);
+
+		const gp = real.requests("gp");
+		expect(gp).toHaveLength(7);
+		const [linked, escaped, secret, wrote, catted, read] = toolResults(gp[6]);
+		expect(linked).toBe("(no output)");
+		expect(escaped).toMatch(/outside this run's worktree/);
+		expect(existsSync(join(checkout, "x.txt"))).toBe(false);
+		expect(secret).toMatch(/Blocked by permission rule \(deny\): Read\(secret\.txt\)/);
+		expect(wrote).toMatch(/Successfully wrote/);
+		expect(catted).toBe("fine\n");
+		expect(read).toBe("fine\n");
+		expect(JSON.stringify(gp)).not.toContain("TRACKED-SECRET");
+	});
+
 	it("is stopped only once every process its command started has ended, wherever it went", async () => {
 		const real = await startOrchestrator();
 		pi = real;
