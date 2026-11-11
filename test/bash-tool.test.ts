@@ -51,11 +51,13 @@ describe("schema and prompt", () => {
 		expect(props.timeout.description).toBe("Optional timeout in milliseconds (max 600000)");
 		expect(props.run_in_background.description).toBeUndefined();
 		expect(props.description.description).toMatch(/^Clear, concise description of what this command does/);
-		expect(tool.promptGuidelines).toContain("`timeout` is in milliseconds: default 120000, max 600000.");
+		expect(tool.promptGuidelines).toContain("`timeout` defaults to 120000.");
 		expect(tool.promptGuidelines).toContain(
 			"`run_in_background` runs the command detached: it keeps running across turns and re-invokes you when it exits. No `&` needed.",
 		);
-		expect(tool.description).toContain("timeout in milliseconds");
+		// Milliseconds are said once, where the model fills the timeout.
+		expect(tool.description).not.toContain("timeout");
+		expect(tool.promptGuidelines?.join("\n")).not.toContain("milliseconds");
 	});
 
 	it("drops every background path when background tasks are disabled", () => {
@@ -69,7 +71,9 @@ describe("schema and prompt", () => {
 	it("honours BASH_DEFAULT_TIMEOUT_MS and never lets the max fall below it", () => {
 		vi.stubEnv("BASH_DEFAULT_TIMEOUT_MS", "900000");
 		const { tool } = makeTool(fakeOps().ops);
-		expect(tool.promptGuidelines).toContain("`timeout` is in milliseconds: default 900000, max 900000.");
+		const props = (tool.parameters as { properties: Record<string, { description?: string }> }).properties;
+		expect(props.timeout.description).toBe("Optional timeout in milliseconds (max 900000)");
+		expect(tool.promptGuidelines).toContain("`timeout` defaults to 900000.");
 	});
 });
 

@@ -146,10 +146,11 @@ export function createBackgroundBashTool(options: BackgroundBashOptions): ToolDe
 
 	return {
 		...base,
-		description: base.description.replace("timeout in seconds", "timeout in milliseconds"),
+		// The timeout's unit is said where the model fills it: pi's description names seconds.
+		description: base.description.replace(" Optionally provide a timeout in seconds.", ""),
 		promptGuidelines: [
 			...(base.promptGuidelines ?? []),
-			`\`timeout\` is in milliseconds: default ${defaultTimeoutMs()}, max ${maxTimeoutMs()}.`,
+			`\`timeout\` defaults to ${defaultTimeoutMs()}.`,
 			...(disabled
 				? []
 				: [
