@@ -100,8 +100,6 @@ const RPC_DELEGATION = [
 	"A run that only reads shares your checkout and needs no worktree. A run that edits works in a worktree of its own, made from your checkout as it was at the call: nothing reaches your checkout until you call `subagent_integrate` on it, or on a completed chain, with a `check` command that validates the combined result. Runs that only read may run side by side; runs that edit run one at a time unless their files are disjoint.",
 	"",
 	"Keep each task, and any inline role, short and self-contained: the goal, the files or area, and what to report. A brief states the objective, the output format, the boundaries and what done is. Do not paste the conversation or large file contents; name paths instead.",
-	"",
-	"A Report ends with what the runtime saw: its Outcome, its Checks (the commands it ran and their exit codes, or that none ran) and its Changes. The rest is the run's own claim.",
 ];
 
 export interface SubagentExtensionOptions {

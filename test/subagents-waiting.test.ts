@@ -63,7 +63,7 @@ describe("The orchestrator's Waiting", () => {
 		}
 	});
 
-	it("keeps delegation selective and points the model at batches, chains, Integration and Checks", async () => {
+	it("keeps delegation selective and points the model at batches, chains and Integration", async () => {
 		const { session, faux } = await createParentSessionWithSubagents({
 			cwd: makeTempDir("selective-cwd"),
 			agentDir: makeTempDir("selective-agent"),
@@ -88,7 +88,8 @@ describe("The orchestrator's Waiting", () => {
 			// Read-only work needs no worktree; edits come back only through Integration, validated by a check.
 			expect(description).toContain("A run that only reads shares your checkout and needs no worktree");
 			expect(description).toContain("`subagent_integrate`");
-			expect(description).toContain("Checks");
+			// A Report says itself what the runtime saw and what is the run's own claim.
+			expect(description).not.toContain("A Report ends with what the runtime saw");
 			expect(description).toContain("Do not paste the conversation or large file contents");
 			// What held only for runs in tmux, in the shared checkout, is not said any more.
 			expect(description).not.toContain("last write wins");
