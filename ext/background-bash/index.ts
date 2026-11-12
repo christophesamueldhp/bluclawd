@@ -341,7 +341,7 @@ const backgroundBash: InlineExtension = {
 					"- It must fall due between 1 minute and 24 hours from now; one due while you are working waits for your next turn",
 					"- Returns the wake-up's task id; cancel it with task_stop",
 					"- One-shot: to check again later, schedule the next one when you wake",
-					"- Use it to come back to something you are waiting on: CI, a deploy, a monitor, a follow-up",
+					"- Use it to come back to something you are waiting on: CI, a deploy, a follow-up",
 				].join("\n"),
 				parameters: Type.Object({
 					prompt: Type.String({ description: "What to do when it is due, written for yourself" }),

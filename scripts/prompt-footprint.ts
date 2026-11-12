@@ -61,7 +61,7 @@ const PROMPT_ENV = ["BASH_DEFAULT_TIMEOUT_MS", "BASH_MAX_TIMEOUT_MS", "BLUCLAWD_
 
 const CHARS_PER_TOKEN = 4;
 
-/** The tools a session declares, as the user picks them in pi: its `defaultTools` setting, or `--tools`. */
+/** The tools a session declares, as the user picks them in pi: its `defaultTools` setting, or `--tools`; pi's defaults when neither is set. */
 export interface Profile {
 	defaultTools?: string[];
 	tools?: string[];
@@ -131,11 +131,8 @@ async function loadExtensions(paths: readonly string[]): Promise<ExtensionFactor
 	);
 }
 
-interface SessionSpec {
+interface SessionSpec extends Profile {
 	extensions?: ExtensionFactory[];
-	defaultTools?: string[];
-	/** The tools it has, as pi's `--tools`; pi's defaults when absent. */
-	tools?: string[];
 	appendSystemPrompt?: string;
 	/** An orchestrator runs in pi's TUI, a run on its RPC. */
 	mode: "tui" | "rpc";
@@ -317,16 +314,11 @@ function runInstructions(definition: AgentDefinition, tools: string[]): string {
 export async function capturePrompt(
 	options: { extensions?: readonly string[]; role?: string } & Profile = {},
 ): Promise<CapturedPrompt> {
-	const { role } = options;
-	const extensions = await loadExtensions(options.extensions ?? (role ? RUN_EXTENSIONS : ORCHESTRATOR_EXTENSIONS));
+	const { role, extensions: paths, ...profile } = options;
+	const extensions = await loadExtensions(paths ?? (role ? RUN_EXTENSIONS : ORCHESTRATOR_EXTENSIONS));
 	return inScratch(async (scratch) => {
 		const piDefault = await firstRequest(scratch, { mode: "tui" });
-		let measuredSpec: SessionSpec = {
-			extensions,
-			defaultTools: options.defaultTools,
-			tools: options.tools,
-			mode: "tui",
-		};
+		let measuredSpec: SessionSpec = { extensions, ...profile, mode: "tui" };
 		let baselineSpec: SessionSpec | undefined;
 		let runTools: string[] | undefined;
 		if (role) {

@@ -6,10 +6,8 @@ import { ALL_TOOLS, capturePrefixes, capturePrompt } from "../scripts/prompt-foo
  * when this test was written: trimming lowers it, and nothing may raise it. Lower it when a change makes the footprint
  * smaller.
  */
-const CEILINGS = {
-	"the default profile": { profile: {}, ceiling: 19_251 },
-	"all tools declared": { profile: ALL_TOOLS, ceiling: 22_738 },
-};
+const PROFILES = { "the default profile": {}, "all tools declared": ALL_TOOLS };
+const CEILINGS = { "the default profile": 19_240, "all tools declared": 22_727 };
 
 /** Each bundled role's run footprint, held the same way. */
 const RUN_CEILINGS = { explorer: 2_789, "general-purpose": 3_858, reviewer: 2_989 };
@@ -23,10 +21,10 @@ afterEach(() => {
 describe("Prompt footprint", () => {
 	it.each(Object.entries(CEILINGS))(
 		"the orchestrator's in %s stays at or under its ceiling",
-		async (_name, { profile, ceiling }) => {
+		async (name, ceiling) => {
 			// The `subagent` description names the platform off darwin, which makes the footprint larger there.
 			Object.defineProperty(process, "platform", { value: "darwin" });
-			const { footprint } = await capturePrompt(profile);
+			const { footprint } = await capturePrompt(PROFILES[name as keyof typeof PROFILES]);
 			expect(footprint).toBeLessThanOrEqual(ceiling);
 		},
 	);
@@ -54,9 +52,9 @@ describe("Prompt footprint", () => {
 		expect(footprint).toBeLessThanOrEqual(ceiling);
 	});
 
-	it.each(Object.entries(CEILINGS))(
+	it.each(Object.entries(PROFILES))(
 		"keeps the system message and the tools byte-identical across consecutive requests in %s",
-		async (_name, { profile }) => {
+		async (_name, profile) => {
 			const [first, ...rest] = await capturePrefixes(profile);
 			expect(rest).toHaveLength(2);
 			for (const prefix of rest) expect(prefix).toBe(first);

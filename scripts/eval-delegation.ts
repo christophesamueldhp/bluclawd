@@ -197,7 +197,7 @@ export const SCENARIOS: readonly Scenario[] = [
 			"Start the server in server.js (`node server.js`) and keep it running in the background. Once it is up, which takes a few seconds, it prints a line with READY and its port. Tell me when that line appears: do not poll for it. Then write the port number alone to port.txt and stop the server.",
 		functions: [],
 		check: checkWatch,
-		// It measures `monitor`; an arm without it ignores the name.
+		// It measures `monitor`, which is off by default. pi ignores the name in an arm that does not load it.
 		tools: ["+monitor"],
 	},
 	{
