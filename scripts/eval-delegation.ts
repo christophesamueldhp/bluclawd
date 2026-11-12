@@ -240,6 +240,8 @@ export interface TrialResult {
 	toolCalls: Record<string, number>;
 	/** The parent's tool calls whose result was an error, of any kind. */
 	failedToolCalls: number;
+	/** Each failed call as its tool and the first line of its error, to tell what failed once the trial is gone. */
+	failedCalls: string[];
 	/**
 	 * The parent's `bash` calls that ended at their timeout: moved to the background, which is not an error, or
 	 * killed. A timeout given in seconds where milliseconds are meant shows here, even when the trial passes.
@@ -335,20 +337,24 @@ function toolOutcomes(messages: SessionLog["messages"]) {
 		}
 	}
 	let failedToolCalls = 0;
+	const failedCalls: string[] = [];
 	let bashTimeouts = 0;
 	for (const message of messages) {
 		if (message.role !== "toolResult") continue;
-		if (message.isError) failedToolCalls++;
+		const text = Array.isArray(message.content) ? message.content.map((block: any) => block.text ?? "").join("") : "";
+		if (message.isError) {
+			failedToolCalls++;
+			failedCalls.push(`${message.toolName}: ${text.trim().split("\n")[0]}`);
+		}
 		if (message.toolName !== "bash" || backgrounded.has(message.toolCallId ?? "")) continue;
 		// Read from the result's shape, not its wording, which the arms may word differently. Nobody presses Ctrl+B or
 		// sends a message mid-trial, so a foreground command that went to the background went at its timeout.
 		const moved = Boolean((message.details as { backgroundTaskId?: string } | undefined)?.backgroundTaskId);
-		const text = Array.isArray(message.content) ? message.content.map((block: any) => block.text ?? "").join("") : "";
 		// pi's own message, for a command killed at its timeout instead.
 		const killed = message.isError === true && /^Command timed out after /m.test(text);
 		if (moved || killed) bashTimeouts++;
 	}
-	return { toolCalls, failedToolCalls, bashTimeouts };
+	return { toolCalls, failedToolCalls, failedCalls, bashTimeouts };
 }
 
 function jsonl(path: string): any[] {

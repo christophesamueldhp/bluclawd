@@ -204,6 +204,7 @@ describe("background shells in the delegation evaluation, on a scripted model", 
 		const result = await trial("slow", [bash("sleep 1; node build.js", { timeout: 10 }), { text: "It timed out." }]);
 		expectOutcome(result, false);
 		expect(result).toMatchObject({ failedToolCalls: 1, bashTimeouts: 1 });
+		expect(result.failedCalls).toEqual([expect.stringMatching(/^bash: \S/)]);
 	});
 });
 
@@ -277,6 +278,7 @@ describe("the comparison's summary", () => {
 			conflicts: 0,
 			toolCalls: {},
 			failedToolCalls: 0,
+			failedCalls: [],
 			bashTimeouts: 0,
 			...fields,
 		}) as TrialResult;
