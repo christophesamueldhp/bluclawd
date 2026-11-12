@@ -734,6 +734,10 @@ const agentView: InlineExtension = {
 								pi.sendUserMessage(text, ctx.isIdle() ? undefined : { deliverAs: "followUp" }),
 							onStopSelf: () => ctx.abort(),
 							onRenameSelf: (name) => pi.setSessionName(name),
+							externalEditor: () =>
+								SettingsManager.create(ctx.cwd, undefined, {
+									projectTrusted: ctx.isProjectTrusted(),
+								}).getExternalEditorCommand(),
 							loadPastSessions,
 							loadViewMode: () => loadViewMode(getAgentDir()),
 							saveViewMode: (mode) => saveViewMode(getAgentDir(), mode),
