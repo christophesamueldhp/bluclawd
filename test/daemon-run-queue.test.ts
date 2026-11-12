@@ -45,12 +45,14 @@ function fixture(capacity: () => number | undefined = () => 4) {
 		live.set(run, pid);
 		return pid;
 	};
+	/** The run's processes are all gone, before the queue looked. */
+	const exit = (run: string) => live.delete(run);
 	/** The run's processes are all gone. */
 	const end = (run: string) => {
-		live.delete(run);
+		exit(run);
 		queue.check();
 	};
-	return { queue, spawned, claim, launch, end };
+	return { queue, spawned, claim, launch, exit, end };
 }
 
 /** Lets settled claims report. */
@@ -223,9 +225,9 @@ describe("the daemon's queue of runs", () => {
 		await settle();
 		expect(next.state.granted).toBe(true);
 		f.launch("a2");
-		f.end("a2");
+		f.exit("a2");
 
-		// A slot is free: it is granted, and its claim then is at once.
+		// A slot is free, though the queue's own look has not freed it yet: it is granted, and its claim then is at once.
 		expect(f.queue.claimNow("k/1", "beta")).toEqual({ granted: true, active: 1, capacity: 1 });
 		expect(await f.queue.claim("k/1", "beta")).toBe(true);
 		f.launch("k/1");

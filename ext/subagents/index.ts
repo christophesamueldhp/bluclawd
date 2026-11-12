@@ -468,14 +468,15 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			// No terminal would show a Resume that started later, after a wait in the queue: it takes a slot free now,
 			// or starts nothing (#353).
 			const key = runQueueKey(run.runId, run.generation + 1);
-			let slot: { granted: boolean; active: number; capacity: number } | undefined;
+			let slot: { granted: boolean; active: number; capacity: number };
 			try {
-				if (await slots.ensure()) slot = await slots.claimNow(key, run.parentSessionId);
-			} catch {
-				// The daemon did not answer: as when it is not running.
-			}
-			if (!slot) {
-				ctx.ui.notify(`Could not open ${label}: the daemon that queues runs is not running.`, "warning");
+				if (!(await slots.ensure())) throw new Error("the daemon that queues runs is not running");
+				slot = await slots.claimNow(key, run.parentSessionId);
+			} catch (error) {
+				ctx.ui.notify(
+					`Could not open ${label}: ${error instanceof Error ? error.message : String(error)}`,
+					"warning",
+				);
 				return;
 			}
 			if (!slot.granted) {

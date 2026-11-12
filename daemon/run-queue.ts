@@ -195,7 +195,8 @@ export class RunQueue {
 	 */
 	claimNow(run: string, parent: string): { granted: boolean; active: number; capacity: number } {
 		this.capacity = this.deps.capacity() ?? this.capacity;
-		this.schedule();
+		// Asked once, it is answered as things are, not as the timer last looked.
+		this.check();
 		const active = [...this.entries.values()].filter((entry) => entry.state !== "queued").length;
 		if (this.entries.has(run) || active >= this.capacity) return { granted: false, active, capacity: this.capacity };
 		const now = this.deps.now();
