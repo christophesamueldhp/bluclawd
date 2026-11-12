@@ -88,6 +88,9 @@ export type PaneChildState = Pick<RpcHostState, "sessionFile" | "sessionId" | "o
 	awaiting?: boolean;
 };
 
+/** Why a run in a pane stopped once its pane was ended from outside its pi. */
+export const PANE_ENDED = "its pane was ended";
+
 export const paneChildStatePath = (runDir: string) => join(runDir, "pane-child.json");
 
 export function readPaneChildState(runDir: string): PaneChildState | undefined {
@@ -575,6 +578,12 @@ async function paneHost(
 ): Promise<void> {
 	// Ctrl+C reaches the pane's process group while its pi does not hold the terminal: it is not the host's to act on.
 	process.on("SIGINT", () => {});
+	// Its pane ended from outside, as by tmux kill-session, hangs its process group up: the host stays to store how its
+	// pi ended.
+	let paneEnded = false;
+	process.on("SIGHUP", () => {
+		paneEnded = true;
+	});
 	// What an earlier generation's pi stored is not this one's.
 	rmSync(paneChildStatePath(runDir), { force: true });
 	let launched: Record<string, string>;
@@ -606,6 +615,8 @@ async function paneHost(
 		sealRunInbox(runDir, spec.generation);
 		child.kill("SIGTERM");
 	});
+	// The hang-up may reach the host alone, its pane's session leader: its pi ends on it as on its own.
+	process.on("SIGHUP", () => child.kill("SIGHUP"));
 	const exit = await exited;
 	const { sessionFile, sessionId, outcome, reportSeq, idle } = readPaneChildState(runDir) ?? {};
 	Object.assign(state, { sessionFile, sessionId, outcome, reportSeq, idle });
@@ -614,7 +625,12 @@ async function paneHost(
 		sealRunInbox(runDir, spec.generation);
 		state.outcome = stopped
 			? { status: "stopped", error: "its work was stopped" }
-			: { status: "failed", error: `its pi exited before its work settled (${exit.signal ?? `code ${exit.code}`})` };
+			: paneEnded
+				? { status: "stopped", error: PANE_ENDED }
+				: {
+						status: "failed",
+						error: `its pi exited before its work settled (${exit.signal ?? `code ${exit.code}`})`,
+					};
 		state.reportSeq = storeRunReport(runDir, {
 			text: "",
 			outcome: state.outcome,

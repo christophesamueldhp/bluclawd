@@ -491,6 +491,70 @@ describe.skipIf(!hasTmux)("a run in a pane of its own", () => {
 		expect(conversation(main[2]).at(-1)?.text).toContain("the user stopped its work in its pane");
 	});
 
+	it("ends as stopped when its pane is ended from outside: its orchestrator gets its Report, its changes are kept", async () => {
+		const real = await startOrchestrator();
+		pi = real;
+		writeFileSync(join(real.cwd, "a.txt"), "one\n");
+		for (const args of [
+			["init", "-q"],
+			["add", "."],
+			["commit", "-q", "-m", "start"],
+		]) {
+			spawnSync("git", ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.com", ...args], {
+				cwd: real.cwd,
+			});
+		}
+		const settings = join(real.agentDir, "settings.json");
+		writeFileSync(
+			settings,
+			JSON.stringify({ ...JSON.parse(readFileSync(settings, "utf8")), subagents: { maxActive: 1 } }),
+		);
+		const writer = { name: "writer", description: "Edits.", instructions: "Edit.", tools: ["read", "write"] };
+		const nextGo = join(real.cwd, "next.go");
+		real.script("main", [
+			{ tool: "subagent", args: { agent: writer, name: "edit", task: "Edit.", background: true } },
+			{
+				tool: "subagent",
+				args: { agent: "explorer", name: "next", task: "Look.", background: true },
+				until: nextGo,
+			},
+			...Array(4).fill({ text: "waiting" }),
+		]);
+		real.script("edit", [
+			{ tool: "write", args: { path: "new.txt", content: "new\n" } },
+			{ text: "Never.", until: join(real.cwd, "never") },
+		]);
+		real.script("next", [{ text: "Next." }]);
+		real.start(["--", "delegate"]);
+		await real.waitForRequests("edit", 2);
+		// Queued behind it.
+		writeFileSync(nextGo, "");
+		await waitFor(() =>
+			expect(
+				JSON.parse(readFileSync(join(runRecord(real.agentDir, "next").dir, "record.json"), "utf8")).status,
+			).toBe("starting"),
+		);
+		expect(real.requests("next")).toEqual([]);
+		const { runId, dir } = runRecord(real.agentDir, "edit");
+		const pane = runPaneSession(runId, 0);
+
+		expect(spawnSync("tmux", ["-S", real.tmux.socket, "kill-session", "-t", `=${pane}`]).status).toBe(0);
+		const told = () =>
+			real
+				.requests("main")
+				.flatMap(conversation)
+				.find(({ text }) => text.includes("Outcome: stopped"))?.text;
+		await waitFor(() => expect(told()).toBeDefined());
+		const report = told() ?? "";
+		expect(report).toContain("Outcome: stopped: its pane was ended.");
+		expect(report).toMatch(/^Changes since its baseline: A new\.txt$/m);
+		const workspace = /^Workspace: (.+?), an isolated Git worktree/m.exec(report)?.[1] ?? "";
+		expect(readFileSync(join(workspace, "new.txt"), "utf8")).toBe("new\n");
+		expect(JSON.parse(readFileSync(join(dir, "record.json"), "utf8"))).toMatchObject({ status: "closed" });
+		// Its slot is free.
+		await real.waitForRequests("next", 1);
+	});
+
 	it("gives its model the same system prompt and tools as a run of the same role on RPC, byte for byte", async () => {
 		const real = await startOrchestrator();
 		pi = real;
