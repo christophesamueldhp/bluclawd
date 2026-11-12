@@ -8,7 +8,7 @@ import { capturePrefixes, capturePrompt } from "../scripts/prompt-footprint.ts";
 const CEILING = 22_738;
 
 /** Each bundled role's run footprint, held the same way. */
-const RUN_CEILINGS = { explorer: 2_972, "general-purpose": 4_030, reviewer: 3_281 };
+const RUN_CEILINGS = { explorer: 2_781, "general-purpose": 3_850, reviewer: 2_981 };
 
 const platform = Object.getOwnPropertyDescriptor(process, "platform");
 
