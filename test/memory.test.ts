@@ -44,8 +44,11 @@ function systemText(context: { messages: Array<{ role: string }> }): string {
 const textOf = (content: unknown) =>
 	(content as Array<{ type: string; text?: string }>).map((part) => part.text ?? "").join("\n");
 
-/** A pi session on a faux model with the memory extension; each prompt records the system prompt the model saw. */
-async function startSession(cwd: string, agentDir: string) {
+/**
+ * A pi session on a faux model with the memory extension; each prompt records the system prompt the model saw. Unless
+ * `memoryTool` is false, pi's `--tools +memory` turns the memory tool on.
+ */
+async function startSession(cwd: string, agentDir: string, memoryTool = true) {
 	const modelRuntime = await ModelRuntime.create({
 		authPath: join(agentDir, "auth.json"),
 		modelsPath: join(agentDir, "models.json"),
@@ -77,6 +80,7 @@ async function startSession(cwd: string, agentDir: string) {
 		model: faux.getModel("faux-main"),
 		thinkingLevel: "low",
 		noTools: "builtin",
+		tools: memoryTool ? ["+memory"] : undefined,
 		resourceLoader,
 		sessionManager: SessionManager.inMemory(cwd),
 		settingsManager,
@@ -205,6 +209,15 @@ describe("memory", () => {
 		expect(on.session.getActiveToolNames()).toContain("memory");
 		expect(on.seen[0]).toContain("Memory index");
 		on.session.dispose();
+	});
+
+	it("declares neither the memory tool nor its section unless --tools or defaultTools turns the tool on", async () => {
+		const s = await startSession(gitRepo(), makeTempDir("agent"), false);
+		await s.prompt([fauxAssistantMessage("Hi.")]);
+		expect(s.session.getActiveToolNames()).not.toContain("memory");
+		expect(s.seen[0]).not.toContain("Memory index");
+		expect(s.seen[0]).not.toContain("# Memory");
+		s.session.dispose();
 	});
 
 	it("keeps the session's system prompt unchanged after a save mid-session", async () => {
@@ -401,5 +414,42 @@ describe("/memory", () => {
 		const on = await startSession(gitRepo(), agentDir);
 		expect(on.session.getActiveToolNames()).toContain("memory");
 		on.session.dispose();
+	});
+
+	it("turned on, applies from the next session only: /reload does not give back a tool left out at its start", async () => {
+		const agentDir = makeTempDir("agent");
+		saveMemoryEnabled(agentDir, false);
+		const s = await startSession(gitRepo(), agentDir);
+		await s.command(option("Turn memory on"));
+		expect(s.notices.at(-1)).toMatch(/next session/i);
+		expect(s.notices.at(-1)).not.toMatch(/\/reload/);
+		await s.session.reload();
+		expect(s.session.getActiveToolNames()).not.toContain("memory");
+		s.session.dispose();
+	});
+
+	it("says plainly when the memory tool is off, and how to turn it on, and still lists the Memories", async () => {
+		const repo = gitRepo();
+		const agentDir = makeTempDir("agent");
+		const first = await startSession(repo, agentDir);
+		await first.prompt([
+			save({ name: "tabs", description: "The user prefers tabs", type: "feedback", body: "Tabs." }),
+			fauxAssistantMessage("Saved."),
+		]);
+		first.session.dispose();
+
+		const s = await startSession(repo, agentDir, false);
+		await s.command(() => undefined);
+		const [list] = s.selects;
+		expect(list.title).toMatch(/memory tool is off/i);
+		expect(list.title).toContain('"defaultTools": ["+memory"]');
+		expect(list.title).toContain("--tools +memory");
+		expect(list.options).toContain("tabs (feedback) — The user prefers tabs");
+
+		await s.command(option("Turn memory off"));
+		expect(s.notices.at(-1)).not.toMatch(/memory tool is off/i);
+		await s.command(option("Turn memory on"));
+		expect(s.notices.at(-1)).toMatch(/memory tool is off/i);
+		s.session.dispose();
 	});
 });

@@ -34,7 +34,10 @@ describe.skipIf(!hasTmux)("a pi that ends with a wake-up pending", () => {
 
 	/** A pane whose session scheduled a wake-up ten minutes out; its session file. */
 	async function scheduled() {
-		const real = await startRealPi({ extensions: [...DEFAULT_EXTENSIONS, "background-bash"] });
+		const real = await startRealPi({
+			extensions: [...DEFAULT_EXTENSIONS, "background-bash"],
+			defaultTools: ["+schedule_wakeup"],
+		});
 		pi = real;
 		real.script("main", [
 			{ tool: "schedule_wakeup", args: { prompt: "Check CI.", delay: 600 } },
@@ -108,7 +111,10 @@ describe.skipIf(!hasTmux)("the daemon's hold on a session's wake-ups", () => {
 		existsSync(heldFile()) ? (JSON.parse(readFileSync(heldFile(), "utf8")) as HeldWakeups[]) : [];
 
 	it("is handed a wake-up when it is scheduled, starting the daemon if it is not running", async () => {
-		const real = await startRealPi({ extensions: [...DEFAULT_EXTENSIONS, "background-bash"] });
+		const real = await startRealPi({
+			extensions: [...DEFAULT_EXTENSIONS, "background-bash"],
+			defaultTools: ["+schedule_wakeup"],
+		});
 		pi = real;
 		await real.client.shutdownDaemon();
 		real.script("main", [
@@ -147,7 +153,10 @@ describe.skipIf(!hasTmux)("the daemon's hold on a session's wake-ups", () => {
 	}
 
 	it("cancels a crashed session's wake-up when its row is deleted: the daemon reopens nothing, and a /resume revives none", async () => {
-		const real = await startRealPi({ extensions: [...DEFAULT_EXTENSIONS, "background-bash"] });
+		const real = await startRealPi({
+			extensions: [...DEFAULT_EXTENSIONS, "background-bash"],
+			defaultTools: ["+schedule_wakeup"],
+		});
 		pi = real;
 		const { sessionFile } = await crashed(real);
 		overdue(sessionFile);
@@ -169,7 +178,10 @@ describe.skipIf(!hasTmux)("the daemon's hold on a session's wake-ups", () => {
 	});
 
 	it("cancels a live session's wake-up when its row is deleted, though its killed pi recorded nothing", async () => {
-		const real = await startRealPi({ extensions: [...DEFAULT_EXTENSIONS, "background-bash"] });
+		const real = await startRealPi({
+			extensions: [...DEFAULT_EXTENSIONS, "background-bash"],
+			defaultTools: ["+schedule_wakeup"],
+		});
 		pi = real;
 		real.script("main", [
 			{ tool: "schedule_wakeup", args: { prompt: "Check CI.", delay: 600 } },
@@ -198,7 +210,10 @@ describe.skipIf(!hasTmux)("the daemon's hold on a session's wake-ups", () => {
 	});
 
 	it("fires one that fell due while the daemon was down, once it is back", async () => {
-		const real = await startRealPi({ extensions: [...DEFAULT_EXTENSIONS, "background-bash"] });
+		const real = await startRealPi({
+			extensions: [...DEFAULT_EXTENSIONS, "background-bash"],
+			defaultTools: ["+schedule_wakeup"],
+		});
 		pi = real;
 		const { sessionFile } = await crashed(real);
 		await real.client.shutdownDaemon();
@@ -213,7 +228,10 @@ describe.skipIf(!hasTmux)("the daemon's hold on a session's wake-ups", () => {
 	});
 
 	it("reopens the session of a pi a signal ended once its wake-up falls due, and the turn starts there", async () => {
-		const real = await startRealPi({ extensions: [...DEFAULT_EXTENSIONS, "background-bash"] });
+		const real = await startRealPi({
+			extensions: [...DEFAULT_EXTENSIONS, "background-bash"],
+			defaultTools: ["+schedule_wakeup"],
+		});
 		pi = real;
 		const { pane, sessionFile } = await crashed(real);
 		overdue(sessionFile);
