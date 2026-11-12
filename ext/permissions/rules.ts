@@ -31,11 +31,12 @@ const VERB: Record<string, string> = {
 	subagent: "Subagent",
 };
 
-/** pi shortens an MCP tool name past 64 characters to its first 55, `_` and 8 hex of a hash. */
+/** pi shortens an over-long or colliding MCP tool name to its first 55, `_` and 8 hex of a hash. */
 const HASHED_MCP_TOOL_NAME = /^mcp__.{50}_[0-9a-f]{8}$/;
 
+/** pi accepts an MCP tool with an empty name, so nothing is required after the server's `__`. */
 function isMcpToolName(tool: string): boolean {
-	return /^mcp__.+__.+$/.test(tool) || HASHED_MCP_TOOL_NAME.test(tool);
+	return /^mcp__.+__/.test(tool) || HASHED_MCP_TOOL_NAME.test(tool);
 }
 
 /**
@@ -45,7 +46,7 @@ function isMcpToolName(tool: string): boolean {
  */
 function hashedMcpToolNames(ruleSubject: string): RegExp[] {
 	const prefix = ruleSubject.slice(0, -1);
-	if (!ruleSubject.endsWith("__*") || prefix.includes("*") || prefix.length <= 55) return [];
+	if (!ruleSubject.endsWith("__*") || prefix.slice(0, 55).includes("*") || prefix.length <= 55) return [];
 	return [new RegExp(`^${prefix.slice(0, 55)}_[0-9a-f]{8}$`)];
 }
 

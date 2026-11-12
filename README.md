@@ -617,8 +617,8 @@ pi gives an over-long or colliding name a hash suffix: an exact-tool rule or a t
 that tool. A server-level rule (`mcp__server`, `mcp__server__*`, `Mcp(server)`, `Mcp(server:*)`)
 and a bare `Mcp` still block it, even once the spelled server name reaches 50 characters and the
 shortened name loses the `__` after it; such a server rule then also blocks any server whose spelled
-name shares those first 50 characters. A server glob (`mcp__*`, `Mcp(long-*)`) does not cover
-pi's hashed names; only a bare `Mcp` does. A server-level rule also covers that server's resources: pi's
+name shares those first 50 characters. A server glob (`mcp__*`, `Mcp(long-*)`) covers hashed names
+only if its `*` comes after those first 50 characters; otherwise only a bare `Mcp` does. A server-level rule also covers that server's resources: pi's
 `list_mcp_resources`, `list_mcp_resource_templates` and `read_mcp_resource` with a `server` are
 judged as `mcp__server__<that tool>`, and a list without `server`, which lists every server, is
 blocked while a rule denies a whole server or names that listing tool (the model is told to pass

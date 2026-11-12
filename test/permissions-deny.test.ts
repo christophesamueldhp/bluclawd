@@ -116,7 +116,7 @@ describe("deniedBy", () => {
 		const hashedName = (server: string) => {
 			const name = createMcpToolName(server, "a_tool_long_enough_to_be_hashed");
 			expect(name).toHaveLength(64);
-			expect(name.startsWith(createMcpToolName(server, ""))).toBe(false);
+			expect(name.startsWith(`mcp__${server.replace(/[^A-Za-z0-9_]/g, "_")}__`)).toBe(false);
 			return name;
 		};
 
@@ -158,6 +158,18 @@ describe("deniedBy", () => {
 			expect(denied([`Mcp(${server}:a_tool_long_enough_to_be_hashed)`], name, {})).toBe(false);
 			expect(denied([`mcp__${server}__a_tool_*`], name, {})).toBe(false);
 		});
+
+		it("is blocked by a server glob whose `*` comes after the first 50 spelled characters", () => {
+			const name = hashedName(longServer(60));
+			expect(denied([`Mcp(${longServer(55)}*)`], name, {})).toBe(true);
+			expect(denied([`Mcp(${longServer(40)}*)`], name, {})).toBe(false);
+		});
+	});
+
+	it("a rule for an MCP server covers its tool with an empty name", () => {
+		for (const rule of ["mcp__srv", "mcp__srv__*", "Mcp"]) {
+			expect(denied([rule], "mcp__srv__", {}), rule).toBe(true);
+		}
 	});
 
 	it("reads `Mcp(server:tool)` around spaces", () => {
