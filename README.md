@@ -607,12 +607,14 @@ arguments; `*` stays within a path segment and `**` crosses them; `Edit(...)`
 also covers write and `Read(...)` also covers grep, find and ls; `//path` is
 absolute, `~/path` is home, anything else is relative to the working directory;
 `WebFetch(domain:x.com)`, `WebSearch(...)`, `Subagent` or `Subagent(explorer)`, and MCP tools as `mcp__server`,
-`mcp__server__*`, `mcp__server__tool` or `Mcp(server:tool)` — the web rules apply
+`mcp__server__*`, `mcp__server__tool`, `Mcp(server:*)` or `Mcp(server:tool)` — the web rules apply
 to bluclawd's own `websearch` and `webfetch` (each of a fetch's URLs is checked), and the MCP
 rules to the tools of the servers pi connects: MCP is pi's own (`mcp.json`, `/mcp`), every MCP call
 goes through `tool_call`, a `codemode` script's included, and bluclawd adds no MCP tools of its own.
-Name the server as its tools are named, where pi turns any character other than a letter, digit or
-`_` into `_` (`dev-radius` → `mcp__dev_radius__*`); `dir/**` covers
+Server and tool are matched the way pi names the tools, any character other than a letter, digit or
+`_` turned into `_`, so `mcp__dev-radius__*` as written in `mcp.json` blocks `mcp__dev_radius__search`.
+pi gives an over-long or colliding name a hash suffix: an exact-tool rule can miss that tool, while
+`mcp__server__*` still holds. `dir/**` covers
 `dir` itself too. A bash rule also matches the command behind wrappers (`sudo`,
 `timeout`, `nice`, `env`, `xargs`, `sh -c '…'`, `eval`, …), shell keywords,
 quoting (`'rm'`, `\rm`), `/bin/…`, `$(…)`, and any part of a `&&`/`;`/`|` chain.

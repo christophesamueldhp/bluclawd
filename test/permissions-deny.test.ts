@@ -5,6 +5,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getAgentDir, type SettingsManager } from "@earendil-works/pi-coding-agent";
+import { createMcpToolName } from "@earendil-works/pi-mcp";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { denyRules, invalidDenyScopes } from "../ext/_shared/settings.ts";
 import permissions, { TRUST_CHANGED, trustStatusText } from "../ext/permissions/index.ts";
@@ -84,6 +85,29 @@ describe("deniedBy", () => {
 		expect(denied(["Mcp(github:get_me)"], "mcp__github__get_me", {})).toBe(true);
 		expect(denied(["mcp__github"], "mcp__gitlab__get_me", {})).toBe(false);
 		expect(denied(["WebFetch(domain:*.evil.com)"], "webfetch", { url: "https://a.evil.com/x" })).toBe(true);
+	});
+
+	it("names an MCP server or tool as written in mcp.json, the way pi names its tools", () => {
+		for (const [server, tool] of [
+			["dev-radius", "search"],
+			["my.server", "list"],
+			["a--b", "run"],
+			["github", "get-me"],
+		]) {
+			const name = createMcpToolName(server, tool);
+			for (const rule of [
+				`mcp__${server}`,
+				`mcp__${server}__*`,
+				`mcp__${server}__${tool}`,
+				`Mcp(${server}:*)`,
+				`Mcp(${server}:${tool})`,
+			]) {
+				expect(denied([rule], name, {}), `${rule} vs ${name}`).toBe(true);
+			}
+		}
+		expect(createMcpToolName("a--b", "run")).toBe("mcp__a__b__run");
+		expect(denied(["mcp__dev-radius__*"], "mcp__dev_radiusx__search", {})).toBe(false);
+		expect(denied(["Mcp(github:get-me)"], "mcp__github__get_mex", {})).toBe(false);
 	});
 
 	it("leaves a longer command name alone, and ungoverned tools", () => {
