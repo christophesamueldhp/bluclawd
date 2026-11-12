@@ -51,6 +51,24 @@ function crash(real: RealPi, pane: string): void {
 	process.kill(pid, "SIGKILL");
 }
 
+/**
+ * Starts the host of the run in `runDir` in its pane `pane` ahead of the daemon, which launches the run into that pane
+ * as it finds it: the host waits there until `gate` exists.
+ */
+function gatedHost(real: RealPi, pane: string, runDir: string, gate: string): void {
+	real.tmux.startRunHost(pane, runDir, [
+		"/bin/sh",
+		"-c",
+		`while [ ! -e '${gate}' ]; do sleep 0.05; done; exec "$@"`,
+		"sh",
+		process.execPath,
+		"--import",
+		join(ROOT, "daemon/pi-resolve-hook.mjs"),
+		join(ROOT, "ext/subagents/rpc-host.ts"),
+		runDir,
+	]);
+}
+
 /** An orchestrator pane whose runs run in panes of their own (ADR-0013), loading the faux provider as it does. */
 async function startOrchestrator(extensions?: string[]): Promise<RealPi> {
 	vi.stubEnv("BLUCLAWD_RPC_PROVIDER_EXTENSIONS", FAUX);
@@ -297,20 +315,7 @@ describe.skipIf(!hasTmux)("a run in a pane of its own", () => {
 
 		// Its host waits in its pane until the daemon that launched it is gone and another runs.
 		const { runId, dir } = runRecord(real.agentDir, "look");
-		const host = [
-			process.execPath,
-			"--import",
-			join(ROOT, "daemon/pi-resolve-hook.mjs"),
-			join(ROOT, "ext/subagents/rpc-host.ts"),
-			dir,
-		];
-		real.tmux.startRunHost(runPaneSession(runId, 0), dir, [
-			"/bin/sh",
-			"-c",
-			`while [ ! -e '${hostGo}' ]; do sleep 0.05; done; exec "$@"`,
-			"sh",
-			...host,
-		]);
+		gatedHost(real, runPaneSession(runId, 0), dir, hostGo);
 		writeFileSync(holdGo, "");
 		await waitFor(() => expect(record("look").status).toBe("running"));
 		writeFileSync(nextGo, "");
@@ -564,6 +569,40 @@ describe.skipIf(!hasTmux)("a run in a pane of its own", () => {
 		// Its slot is free.
 		await real.waitForRequests("next", 1);
 	});
+
+	it("leaves a Resume as it was when the daemon has no environment for its host", async () => {
+		const real = await startOrchestrator();
+		pi = real;
+		const resume = join(real.cwd, "resume.go");
+		const hostGo = join(real.cwd, "host.go");
+		real.script("main", [
+			{ tool: "subagent", args: { agent: "explorer", name: "kept", task: "Remember PELICAN." } },
+			{ tool: "subagent_resume", args: { agent: "kept", task: "Look again." }, until: resume },
+			...Array(3).fill({ text: "waiting" }),
+		]);
+		real.script("kept", [{ text: "Remembered." }, { text: "Looked again." }]);
+		real.start(["--", "delegate"]);
+		await real.waitForRequests("kept", 1);
+		const { runId, dir } = runRecord(real.agentDir, "kept");
+		const record = () => JSON.parse(readFileSync(join(dir, "record.json"), "utf8"));
+		await waitFor(() => expect(record()).toMatchObject({ status: "closed", generation: 0 }));
+		const pane = runPaneSession(runId, 1);
+		gatedHost(real, pane, dir, hostGo);
+		writeFileSync(resume, "");
+		await waitFor(() => expect(record()).toMatchObject({ status: "running", generation: 1 }));
+
+		// Taken before its host asks, as a daemon started since would not have it.
+		await real.client.takeRunEnv(pane);
+		writeFileSync(hostGo, "");
+		await waitFor(() =>
+			expect(record()).toMatchObject({
+				status: "closed",
+				generation: 1,
+				errorMessage: expect.stringMatching(/^It did not start: the daemon restarted/),
+			}),
+		);
+		expect(real.requests("kept")).toHaveLength(1);
+	}, 60_000);
 
 	it("gives its model the same system prompt and tools as a run of the same role on RPC, byte for byte", async () => {
 		const real = await startOrchestrator();
