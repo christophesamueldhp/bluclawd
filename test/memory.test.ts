@@ -165,9 +165,6 @@ async function resumedAfterDefaultTools(repo: string, agentDir: string) {
 	return resumed;
 }
 
-const RESUMED_HINT =
-	'Your "defaultTools" setting has it, but this session was started without it, so it applies from a new session. For this session, resume it with pi --tools +memory.';
-
 const save = (memory: { name: string; description: string; type: string; body: string }) =>
 	fauxAssistantMessage([fauxToolCall("memory", { action: "save", ...memory })], { stopReason: "toolUse" });
 
@@ -307,7 +304,7 @@ describe("memory", () => {
 	it("in a session resumed without the tool, tells the user that a defaultTools entry they have applies from a new session", async () => {
 		const s = await resumedAfterDefaultTools(gitRepo(), makeTempDir("agent"));
 		expect(s.notices).toEqual([
-			`This Project has Memories, but this session was started without the memory tool, so it neither loads nor saves them. ${RESUMED_HINT}`,
+			'This Project has Memories, but this session was started without the memory tool, so it neither loads nor saves them. Your "defaultTools" setting has it, so it applies from a new session. For this session, resume it with pi --tools +memory.',
 		]);
 		s.session.dispose();
 	});
@@ -580,7 +577,7 @@ describe("/memory", () => {
 		await s.command(() => undefined);
 		const [list] = s.selects;
 		expect(list.title).toContain(
-			`The memory tool is off, so this session neither loads nor saves Memories. ${RESUMED_HINT}`,
+			'The memory tool is off, so this session neither loads nor saves Memories. Your "defaultTools" setting has it, but this session was started without it, so it applies from a new session. For this session, resume it with pi --tools +memory.',
 		);
 		expect(list.title).not.toContain('Turn it on with "defaultTools"');
 		s.session.dispose();

@@ -47,18 +47,16 @@ const TIDY_UP = "Merge related Memories or delete stale ones.";
  * that setting, so a session without the tool needs a new session or `--tools` even then.
  */
 const namesMemory = ({ settings }: StartupSettings) => settings.getDefaultTools()?.includes("memory") === true;
-const memoryHint = (named: boolean) =>
-	named
-		? 'Your "defaultTools" setting has it, but this session was started without it, so it applies from a new session. For this session, resume it with pi --tools +memory.'
-		: turnOnHint("memory");
 const toolOff = (named: boolean) =>
-	`The memory tool is off, so this session neither loads nor saves Memories. ${memoryHint(named)}`;
-const memoriesUnread = (named: boolean) =>
-	`${
+	`The memory tool is off, so this session neither loads nor saves Memories. ${
 		named
-			? "This Project has Memories, but this session was started without the memory tool, so it neither loads nor saves them."
-			: "This Project has Memories, but the memory tool is off by default now, so this session neither loads nor saves them."
-	} ${memoryHint(named)}`;
+			? 'Your "defaultTools" setting has it, but this session was started without it, so it applies from a new session. For this session, resume it with pi --tools +memory.'
+			: turnOnHint("memory")
+	}`;
+const memoriesUnread = (named: boolean) =>
+	named
+		? 'This Project has Memories, but this session was started without the memory tool, so it neither loads nor saves them. Your "defaultTools" setting has it, so it applies from a new session. For this session, resume it with pi --tools +memory.'
+		: `This Project has Memories, but the memory tool is off by default now, so this session neither loads nor saves them. ${turnOnHint("memory")}`;
 /**
  * The sessions the user's `defaultTools` or `--tools` gave the memory tool. A /reload loads this extension anew,
  * and keeps the tool left out when `/memory` was off at the session's start.
