@@ -614,7 +614,10 @@ goes through `tool_call`, a `codemode` script's included, and bluclawd adds no M
 Server and tool are matched the way pi names the tools, any character other than a letter, digit or
 `_` turned into `_`, so `mcp__dev-radius__*` as written in `mcp.json` blocks `mcp__dev_radius__search`.
 pi gives an over-long or colliding name a hash suffix: an exact-tool rule can miss that tool, while
-`mcp__server__*` still holds. `dir/**` covers
+`mcp__server__*` still holds. A server-level rule also covers that server's resources: pi's
+`list_mcp_resources`, `list_mcp_resource_templates` and `read_mcp_resource` with a `server` are
+judged as `mcp__server__<that tool>`, and a list without `server`, which lists every server, is
+blocked while such a rule exists (the model is told to pass `server`). `dir/**` covers
 `dir` itself too. A bash rule also matches the command behind wrappers (`sudo`,
 `timeout`, `nice`, `env`, `xargs`, `sh -c '…'`, `eval`, …), shell keywords,
 quoting (`'rm'`, `\rm`), `/bin/…`, `$(…)`, and any part of a `&&`/`;`/`|` chain.
@@ -638,7 +641,7 @@ Deliberately not ported, because pi already has them: **bash mode** (pi's `!cmd`
 runs a command and sends its output to the model, `!!cmd` runs it without
 sending), **prompt stash** (↑/↓ on the prompt browse earlier prompts, as in
 bluclawd), **MCP** (pi's own: servers in `mcp.json`, managed with `/mcp`; deny
-rules cover their tools). Also not ported: **PDF input** (would mean reimplementing four
+rules cover their tools and resources). Also not ported: **PDF input** (would mean reimplementing four
 provider wire formats behind `before_provider_request` — a shared-type change
 in pi's own `packages/ai`, not reachable through the extension API at all).
 

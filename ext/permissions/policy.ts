@@ -1,6 +1,13 @@
 import type { ToolCallEventResult, ToolResultEventResult } from "@earendil-works/pi-coding-agent";
 import { monitorSource } from "../_shared/monitor-source.ts";
-import { deniedBy, displayRule, grepOutputWithoutDenied, searchQueries } from "./rules.ts";
+import {
+	deniedBy,
+	deniesMcpToolOnSomeServer,
+	displayRule,
+	grepOutputWithoutDenied,
+	mcpNamePart,
+	searchQueries,
+} from "./rules.ts";
 
 export interface SubagentDelegationDenyResult {
 	readonly blocked: boolean;
@@ -20,11 +27,18 @@ export function governedToolCall(
 		return source.kind === "ws" ? { tool: "webfetch", input: { url: source.url } } : { tool: "bash", input };
 	}
 	if (tool === "powershell") return { tool: "bash", input };
-	if (tool === "mcp_read_resource" || tool === "mcp_list_resources") {
-		const server = typeof input.server === "string" ? input.server : "";
-		if (server) return { tool: `mcp__${server}__${tool.slice("mcp_".length)}`, input };
-	}
+	const server = mcpResourceServer(tool, input);
+	if (server) return { tool: `mcp__${mcpNamePart(server)}__${tool}`, input };
 	return { tool, input };
+}
+
+/** pi's MCP resource tools; the list ones without a `server` list every server. */
+const MCP_RESOURCE_TOOLS = new Set(["list_mcp_resources", "list_mcp_resource_templates", "read_mcp_resource"]);
+
+/** The server a resource call names, trimmed as pi reads it; "" when it names none. */
+function mcpResourceServer(tool: string, input: Record<string, unknown>): string {
+	if (!MCP_RESOURCE_TOOLS.has(tool)) return "";
+	return typeof input.server === "string" ? input.server.trim() : "";
 }
 
 export function evaluateToolCallDeny(
@@ -34,6 +48,17 @@ export function evaluateToolCallDeny(
 	cwd: string,
 ): ToolCallEventResult | undefined {
 	const deny = [...denyRules];
+	// Listing every server would show a denied one's resources too; pi's truncation saves the
+	// whole listing to a file, so it cannot be filtered after the call.
+	if (toolName.startsWith("list_") && MCP_RESOURCE_TOOLS.has(toolName) && !mcpResourceServer(toolName, rawInput)) {
+		const rule = deny.find((r) => deniesMcpToolOnSomeServer(r, toolName));
+		if (rule !== undefined) {
+			return {
+				block: true,
+				reason: `Blocked by permission rule (deny): ${displayRule(rule)}. Pass \`server\` to list one server's resources.`,
+			};
+		}
+	}
 	const { tool, input } = governedToolCall(toolName, rawInput);
 	// A batch is judged item by item: each query of a websearch, each url of a webfetch.
 	const urls = tool === "webfetch" && Array.isArray(input.urls) ? input.urls.filter((u) => typeof u === "string") : [];

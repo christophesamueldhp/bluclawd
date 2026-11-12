@@ -435,6 +435,53 @@ describe("the extension", () => {
 		expect(await call("powershell", { command: "Get-ChildItem" })).toBeUndefined();
 	});
 
+	it("judges a resource call on a server as that server's MCP tool", async () => {
+		const resourceTools = ["list_mcp_resources", "list_mcp_resource_templates", "read_mcp_resource"];
+		for (const rule of ["mcp__dev-radius", "mcp__dev-radius__*", "Mcp(dev-radius:*)"]) {
+			const { handlers, ctx, call } = load({ permissions: { deny: [rule] } });
+			await handlers.session_start({}, ctx);
+			for (const tool of resourceTools) {
+				expect(await call(tool, { server: " dev-radius ", uri: "x://a" }), `${rule} vs ${tool}`).toEqual({
+					block: true,
+					reason: `Blocked by permission rule (deny): ${rule}`,
+				});
+				expect(await call(tool, { server: "github", uri: "x://a" }), `${rule} vs ${tool}`).toBeUndefined();
+			}
+		}
+	});
+
+	it("blocks listing every server's resources while a rule denies a whole server", async () => {
+		for (const rule of [
+			"mcp__dev-radius",
+			"mcp__dev-radius__*",
+			"Mcp(dev-radius:*)",
+			"Mcp(dev-radius)",
+			"Mcp",
+			"mcp__*",
+		]) {
+			const { handlers, ctx, call } = load({ permissions: { deny: [rule] } });
+			await handlers.session_start({}, ctx);
+			for (const tool of ["list_mcp_resources", "list_mcp_resource_templates"]) {
+				for (const input of [{}, { server: "" }, { server: "  " }]) {
+					expect(await call(tool, input), `${rule} vs ${tool} ${JSON.stringify(input)}`).toEqual({
+						block: true,
+						reason: `Blocked by permission rule (deny): ${rule}. Pass \`server\` to list one server's resources.`,
+					});
+				}
+			}
+		}
+		// A rule on the listing tool itself denies that server's listing too.
+		const listing = load({ permissions: { deny: ["Mcp(dev-radius:list_mcp_resources)"] } });
+		await listing.handlers.session_start({}, listing.ctx);
+		expect((await listing.call("list_mcp_resources", {}))?.block).toBe(true);
+		expect(await listing.call("list_mcp_resource_templates", {})).toBeUndefined();
+		for (const deny of [[], ["mcp__github__delete_*"], ["Mcp(github:get_me)"], ["Bash(rm *)"]]) {
+			const { handlers, ctx, call } = load({ permissions: { deny } });
+			await handlers.session_start({}, ctx);
+			expect(await call("list_mcp_resources", {}), JSON.stringify(deny)).toBeUndefined();
+		}
+	});
+
 	it("leaves a Read-denied file's lines out of a folder grep", async () => {
 		const { handlers, ctx } = load({ permissions: { deny: ["Read(**/.env*)"] } });
 		mkdirSync(join(dir, "sub"));

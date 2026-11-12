@@ -57,7 +57,7 @@ function ruleVerbCovers(ruleVerb: string, verb: string): boolean {
  * pi's spelling of an MCP name part (`createMcpToolName`): anything but a letter, digit or
  * `_` becomes `_`. `*` is kept as a glob.
  */
-function mcpNamePart(s: string): string {
+export function mcpNamePart(s: string): string {
 	return s.replace(/[^A-Za-z0-9_*]/g, "_");
 }
 
@@ -68,20 +68,24 @@ function mcpNamePart(s: string): string {
  * `server:tool` split, since spelling can create a new `__` (`a--b` → `a__b`).
  */
 function ruleParts(rule: string): { verb: string; subject: string } | undefined {
-	const mcp = /^mcp__(.+?)(?:__(.+))?$/.exec(rule);
-	if (mcp) return { verb: "mcp", subject: mcpToolGlob(mcp[1], mcp[2]) };
+	const mcp = mcpRuleNames(rule);
+	if (mcp) return { verb: "mcp", subject: `mcp__${mcpNamePart(mcp.server)}__${mcpNamePart(mcp.tool ?? "*")}` };
 	const m = /^(\w+)(?:\((.*)\))?$/.exec(rule);
 	if (!m) return undefined;
-	const verb = m[1].toLowerCase();
-	if (verb === "mcp" && m[2] !== undefined) {
-		const [, server, tool] = /^([^:]*)(?::(.*))?$/.exec(m[2]) ?? [];
-		return { verb, subject: mcpToolGlob(server, tool) };
-	}
-	return { verb, subject: m[2] ?? "**" };
+	return { verb: m[1].toLowerCase(), subject: m[2] ?? "**" };
 }
 
-function mcpToolGlob(server: string, tool: string | undefined): string {
-	return `mcp__${mcpNamePart(server)}__${mcpNamePart(tool ?? "*")}`;
+/** The server and tool an MCP rule names, as written; undefined for a bare `Mcp` or any other rule. */
+function mcpRuleNames(rule: string): { server: string; tool?: string } | undefined {
+	const [, server, tool] = /^mcp__(.+?)(?:__(.+))?$/.exec(rule) ?? /^mcp\(([^:]*)(?::(.*))?\)$/i.exec(rule) ?? [];
+	return server === undefined ? undefined : { server, tool };
+}
+
+/** Whether a rule denies the MCP tool `tool` on some server: a bare `Mcp`, `mcp__srv`, `Mcp(srv:*)`, `Mcp(srv:tool)`. */
+export function deniesMcpToolOnSomeServer(rule: string, tool: string): boolean {
+	if (/^mcp$/i.test(rule)) return true;
+	const mcp = mcpRuleNames(rule);
+	return mcp !== undefined && globToRegExp(mcpNamePart(mcp.tool ?? "*")).test(tool);
 }
 
 const REGEX_META = new Set([".", "+", "^", "$", "{", "}", "(", ")", "|", "[", "]", "\\", "?"]);
