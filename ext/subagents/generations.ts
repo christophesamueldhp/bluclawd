@@ -18,6 +18,7 @@ import { inParentScope, type ParentScope, type ParentScopeChecks, type ScopedRun
 import { buildSubagentResultEnvelope, MAX_PARENT_REPORT_BYTES, type SubagentResultDetails } from "./results.ts";
 import { executeRpcRun, type RunSlots } from "./rpc-runs.ts";
 import { NETWORK_ACCESS, type RunApprovalAnswer, type RunApprovalRequest } from "./run-approvals.ts";
+import { userInstructionNote } from "./run-intervention.ts";
 import { postToRun, whenGiven } from "./run-mailbox.ts";
 import { type RpcRunSender, rpcRunMessageText } from "./run-messages.ts";
 import { isTerminalSubagentStatus, type SubagentRunRecord, SubagentRunScheduler } from "./runs.ts";
@@ -241,6 +242,22 @@ export function createGenerations(deps: GenerationDeps) {
 								});
 							// The orchestrator holds it once its session does: before, it may be only in its pi's memory.
 							return (): boolean => sibling || deps.scope.holds(id);
+						},
+						typed: (text) => {
+							const record = scheduler.getRun(runId);
+							if (!record || !deps.scope.inScope(record)) return;
+							try {
+								deps.pi.sendMessage(
+									{
+										customType: SUBAGENT_MESSAGE_CUSTOM_TYPE,
+										content: [{ type: "text", text: userInstructionNote(record, text) }],
+										display: true,
+									},
+									{ deliverAs: "steer", triggerTurn: false },
+								);
+							} catch {
+								// The orchestrator's session was replaced meanwhile.
+							}
 						},
 						approve: (request, signal) => approve(runId, request, signal),
 					});

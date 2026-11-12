@@ -57,6 +57,10 @@ export function runConversation(sessionFile: string | undefined): string[] {
 	return lines.length > 0 ? lines.slice(-SHOWN_MESSAGES) : ["(nothing in its session yet)"];
 }
 
+/** What the orchestrator is told of an instruction the user gave its run directly (ADR-0005). */
+export const userInstructionNote = (run: Pick<SubagentRunRecord, "name" | "runId">, text: string) =>
+	`The user instructed subagent ${formatRunLabel(run)} directly: ${oneLine(text, NOTED_CHARS)}`;
+
 export interface RunInterventionDeps {
 	scheduler: Pick<SubagentRunScheduler<RunExecutionContext>, "getRun" | "whenFinal">;
 	admission: Pick<RunAdmission, "resume">;
@@ -73,8 +77,7 @@ export function createRunIntervention(deps: RunInterventionDeps) {
 	const sessionFile = (run: Readonly<SubagentRunRecord>) =>
 		readRpcHostState(runDirOf(run))?.sessionFile ?? run.transcriptPath;
 
-	const noteFor = (run: Readonly<SubagentRunRecord>, text: string) =>
-		deps.note(`The user instructed subagent ${formatRunLabel(run)} directly: ${oneLine(text, NOTED_CHARS)}`);
+	const noteFor = (run: Readonly<SubagentRunRecord>, text: string) => deps.note(userInstructionNote(run, text));
 
 	return {
 		/** What the user sees of the run: who it is, how it is, and its latest messages. */

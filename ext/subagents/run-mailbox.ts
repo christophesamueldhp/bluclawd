@@ -30,6 +30,15 @@ export interface RunOutboxMessage {
 	content: string;
 }
 
+/** A prompt the user typed in the run's pane (ADR-0013), which its orchestrator is told of. */
+export interface RunTypedNote {
+	seq: number;
+	kind: "typed";
+	text: string;
+}
+
+export type RunOutboxEntry = RunOutboxMessage | RunTypedNote;
+
 let posted = 0;
 
 const inboxPath = (runDir: string, generation: number) => join(runDir, "inbox", String(generation));
@@ -161,12 +170,12 @@ export async function whenGiven(runDir: string, generation: number, id: string, 
 	}
 }
 
-export function writeRunOutbox(runDir: string, generation: number, message: RunOutboxMessage): void {
+export function writeRunOutbox(runDir: string, generation: number, message: RunOutboxEntry): void {
 	writeAtomicPrivateFile(join(outboxPath(runDir, generation), `${message.seq}.json`), JSON.stringify(message));
 }
 
 /** What the run's generation sent after `seq`, in order. */
-export function readRunOutbox(runDir: string, generation: number, seq: number): RunOutboxMessage[] {
+export function readRunOutbox(runDir: string, generation: number, seq: number): RunOutboxEntry[] {
 	let seqs: number[];
 	try {
 		seqs = readdirSync(outboxPath(runDir, generation)).flatMap((file) => {
@@ -176,7 +185,7 @@ export function readRunOutbox(runDir: string, generation: number, seq: number): 
 	} catch {
 		return [];
 	}
-	const read: RunOutboxMessage[] = [];
+	const read: RunOutboxEntry[] = [];
 	for (const next of seqs.sort((a, b) => a - b)) {
 		// Numbered in order, so one not readable yet holds back those after it.
 		if (next !== seq + read.length + 1) break;

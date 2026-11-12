@@ -478,6 +478,8 @@ export interface RpcRunDeps {
 	 * its recipient holds it for good yet, or refused it for good.
 	 */
 	relay(message: RunOutboxMessage): () => boolean;
+	/** A prompt the user typed in the run's pane: its orchestrator is told, without a turn. */
+	typed(text: string): void;
 	/** An approval the run asks for, answered by the user or blocked; `signal` aborts once it takes no answer. */
 	approve(request: RunApprovalRequest, signal: AbortSignal): Promise<RunApprovalAnswer>;
 }
@@ -527,6 +529,11 @@ export async function executeRpcRun(
 		const pending = readRunOutbox(launch.runDir, record.generation, relayed);
 		for (const message of pending) {
 			if (handed.has(message.seq)) continue;
+			if (message.kind === "typed") {
+				deps.typed(message.text);
+				handed.set(message.seq, () => true);
+				continue;
+			}
 			if (message.kind === "progress") controller.updateProgress(message.content);
 			handed.set(message.seq, message.kind === "progress" ? () => true : deps.relay(message));
 		}
