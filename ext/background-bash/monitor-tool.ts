@@ -42,25 +42,20 @@ const minutes = (ms: number) => `${Math.round(ms / 60_000)} minutes`;
 const MONITOR_DESCRIPTION = `Start a background monitor: each stdout line of a long-running command is an event. You keep working and events arrive in the chat as notifications; they are not replies from the user, even if one lands while you're waiting for the user to answer a question.
 
 Pick by how many notifications you need:
-- **One** ("tell me when the server is ready / the build finishes") → not monitor: **bash with \`run_in_background\`** and a command that exits when the condition is true, e.g. \`until grep -q "Ready in" dev.log; do sleep 0.5; done\`. An unbounded command (\`tail -f\`, \`inotifywait -m\`, \`while true\`) stays armed until the timeout, and \`tail -f log | grep -m 1 ...\` hangs too once the log goes quiet.
+- **One** ("tell me when the build finishes") → not monitor: **bash with \`run_in_background\`** and a command that exits when the condition is true, e.g. \`until grep -q "Ready in" dev.log; do sleep 0.5; done\`. An unbounded command (\`tail -f\`, \`while true\`) stays armed until the timeout, and \`tail -f log | grep -m 1 ...\` hangs too once the log goes quiet.
 - **One per occurrence** → monitor, with an unbounded command (\`tail -f app.log | grep --line-buffered "ERROR"\`) or a poll loop that prints each new result and exits at a known end (e.g. one line per finished CI check, \`break\` when none is pending).
 
 Script rules:
 - Every pipe stage must flush per line or matches sit in its buffer unseen: \`grep\` needs \`--line-buffered\`, \`awk\` needs \`fflush()\`; \`| head -N\` delivers nothing until N lines accumulate.
-- Only stdout is the event stream. Stderr goes to the output file (readable via read); for a command you run directly, merge it with \`2>&1\` so its failures reach your filter.
+- Only stdout is the event stream; stderr goes to the output file (readable via read). For a command you run directly, merge it with \`2>&1\` so its failures reach your filter.
 - Poll loops: handle transient failures (\`curl ... || true\`), and sleep 30s+ for remote APIs, 0.5-1s for local checks.
-- **Silence is not success.** The filter must match every terminal state, not just the happy path: \`grep -E --line-buffered "elapsed_steps=|Traceback|Error|FAILED|Killed|OOM"\`, not only the success marker, and a poll loop emits on \`succeeded|failed|cancelled|timeout\`. Before arming, ask: if this process crashed right now, would my filter emit anything? If unsure, widen it — extra noise beats a missed crashloop.
+- **Silence is not success.** The filter must match every terminal state, not just the happy path: \`grep -E --line-buffered "Traceback|Error|FAILED|Killed|OOM"\` beside the success marker, and a poll loop emits on \`succeeded|failed|cancelled|timeout\`. Before arming, ask: if this process crashed right now, would my filter emit anything? If unsure, widen it.
 - Stay selective all the same: every line is a conversation message. Never pipe raw logs. A monitor that produces too many events is stopped automatically; restart it with a tighter filter.
-- Write a specific \`description\` — it appears in every notification ("errors in deploy.log" not "watching logs").
 
-Stdout lines within 200ms are batched into a single notification. The script runs in the same shell environment as bash. Exit ends the watch (exit code is reported). Every monitor expires after \`timeout_ms\` (default ${minutes(DEFAULT_TIMEOUT_MS)}, at most ${minutes(CAP_TIMEOUT_MS)}): it is killed and you get one notice with the event count. Re-arm it if you still need the watch; for a long watch (PR monitoring, log tails) set \`timeout_ms\` to the maximum and re-arm on each expiry, and widen the filter if an expiry with no events was unexpected. Use task_stop to cancel early.
-
-**ws source** — pass \`ws: {url, protocols?}\` instead of \`command\`: each incoming text frame is one event (a multiline frame stays one), a binary frame is reported as \`[binary frame, N bytes]\`, and socket close ends the watch with the close code surfaced. Same rate limiting, so subscribe to a filtered feed where one exists. Prefer it over \`command: 'websocat wss://…'\`; use a command when frames need transforming with shell tools first.`;
+The script runs in the same shell environment as bash. Exit ends the watch and reports its exit code. Every monitor expires after \`timeout_ms\` (default ${minutes(DEFAULT_TIMEOUT_MS)}, at most ${minutes(CAP_TIMEOUT_MS)}): it is killed and you get one notice with the event count. Re-arm it if you still need the watch; for a long watch set \`timeout_ms\` to the maximum and re-arm on each expiry, and widen the filter if an expiry with no events was unexpected. Use task_stop to cancel early.`;
 
 const monitorSchema = Type.Object({
-	command: Type.Optional(
-		Type.String({ description: "Shell command or script. Each stdout line is an event; exit ends the watch." }),
-	),
+	command: Type.Optional(Type.String({ description: "Shell command or script." })),
 	ws: Type.Optional(
 		Type.Object(
 			{
@@ -69,12 +64,13 @@ const monitorSchema = Type.Object({
 			},
 			{
 				description:
-					"WebSocket to open. Each text frame is an event; binary frames are reported as a placeholder line. Socket close ends the watch. Cannot be combined with command.",
+					"In place of `command`, a WebSocket to watch: each text frame is one event (a multiline frame stays one), a binary frame is reported as `[binary frame, N bytes]`, and its close ends the watch with the close code. Subscribe to a filtered feed where one exists. Prefer it over `websocat`; use a command when frames need shell tools first.",
 			},
 		),
 	),
 	description: Type.String({
-		description: "Short human-readable description of what you are monitoring (shown in notifications).",
+		description:
+			'What you are monitoring, specific: it appears in every notification ("errors in deploy.log", not "watching logs").',
 	}),
 	// Optional, not required-with-a-default: pi validates arguments but never applies
 	// schema defaults, so a required field would make omitting it an error rather than
@@ -84,7 +80,7 @@ const monitorSchema = Type.Object({
 			minimum: 1000,
 			maximum: MAX_TIMEOUT_MS,
 			default: DEFAULT_TIMEOUT_MS,
-			description: `Kill the monitor after this deadline. Default ${DEFAULT_TIMEOUT_MS}ms. Deadlines above ${CAP_TIMEOUT_MS}ms are capped to ${CAP_TIMEOUT_MS}ms. You are notified at expiry and can re-arm.`,
+			description: `Milliseconds; above ${CAP_TIMEOUT_MS} it is capped to ${CAP_TIMEOUT_MS}.`,
 		}),
 	),
 });

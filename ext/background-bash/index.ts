@@ -384,11 +384,12 @@ const backgroundBash: InlineExtension = {
 			].join("\n"),
 			parameters: Type.Object({
 				task_id: Type.Optional(Type.String({ description: "The ID of the background task to stop" })),
-				shell_id: Type.Optional(Type.String({ description: "Deprecated: use task_id instead" })),
 			}),
 			execute: async (_toolCallId, params, _signal, _onUpdate, toolCtx) => {
-				// A model fills an optional string with "": empty is absent.
-				const id = (params.task_id?.trim() || params.shell_id?.trim()) ?? "";
+				// A model fills an optional string with "": empty is absent. shell_id is no longer declared, and still
+				// accepted from calls made before.
+				const { shell_id } = params as { shell_id?: string };
+				const id = (params.task_id?.trim() || shell_id?.trim()) ?? "";
 				if (!id) throw new Error("Missing required parameter: task_id");
 				const callerOwner = toolCtx?.sessionManager?.getSessionId();
 				if (isAgentTaskId(id)) {

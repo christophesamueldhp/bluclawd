@@ -259,6 +259,28 @@ describe("monitor tool", () => {
 		expect(call(1000)).not.toThrow();
 	});
 
+	it("states each of its rules once: in its description, or where the parameter is filled", () => {
+		const { tool } = harness(() => new Promise(() => {}));
+		const { properties } = tool.parameters;
+		for (const rule of [
+			"they are not replies from the user",
+			"**bash with `run_in_background`**",
+			"Every pipe stage must flush per line",
+			"merge it with `2>&1`",
+			"**Silence is not success.** The filter must match every terminal state",
+			"Never pipe raw logs",
+			"Use task_stop to cancel early",
+		]) {
+			expect(tool.description).toContain(rule);
+		}
+		expect(properties.description.description).toContain("it appears in every notification");
+		expect(properties.ws.description).toContain("Prefer it over `websocat`");
+		expect(properties.timeout_ms.description).toContain("Milliseconds");
+		// Said once, where the model fills it.
+		expect(tool.description).not.toContain("Write a specific `description`");
+		expect(tool.description).not.toContain("**ws source**");
+	});
+
 	it("carries no persistent parameter: every monitor expires", () => {
 		const { tool } = harness(() => new Promise(() => {}));
 		expect(Object.keys(tool.parameters.properties)).toEqual(["command", "ws", "description", "timeout_ms"]);

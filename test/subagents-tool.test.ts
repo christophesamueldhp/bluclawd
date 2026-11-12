@@ -193,6 +193,34 @@ describe("The subagent tool", () => {
 		expect(readPersistedRunRecord(t.agentDir, t.session.sessionId, runId)).toMatchObject({ backend: "rpc" });
 	});
 
+	it("no longer declares confirmProjectAgents, and still launches a call that sends it", async () => {
+		const t = await createSubagentTui({ outsideTmux: true });
+		tui = t;
+		let declared: string[] = [];
+		t.script([
+			(context) => {
+				const tool = getCurrentTools(context.messages).find((candidate) => candidate.name === "subagent");
+				declared = Object.keys((tool?.parameters as { properties: object }).properties);
+				return fauxAssistantMessage(
+					fauxToolCall(
+						"subagent",
+						{ agent: "explorer", name: "scout", task: "Scout.", background: true, confirmProjectAgents: true },
+						{ id: "call_scout" },
+					),
+				);
+			},
+			() => fauxAssistantMessage("Waiting for scout."),
+		]);
+		await t.session.prompt("Scout.", { expandPromptTemplates: false });
+		await t.started("scout");
+
+		expect(declared).toContain("agentScope");
+		expect(declared).not.toContain("confirmProjectAgents");
+		const { result, text } = toolResultText(t.session, "call_scout");
+		expect(result?.isError).toBeFalsy();
+		expect(text).toContain("Background subagent launched: scout");
+	});
+
 	it("leaves a run in tmux from before running when it is reopened outside tmux, and says so", async () => {
 		const t = await createSubagentTui({ outsideTmux: true });
 		tui = t;

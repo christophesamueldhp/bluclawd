@@ -26,12 +26,7 @@ const PARAMETERS = Type.Object(
 		action: Type.Union([Type.Literal("save"), Type.Literal("read"), Type.Literal("delete")]),
 		name: Type.String({ description: "Kebab-case slug naming the Memory; saving an existing name replaces it." }),
 		description: Type.Optional(Type.String({ description: "save: one line for the Memory index." })),
-		type: Type.Optional(
-			Type.Union(
-				MEMORY_TYPES.map((type) => Type.Literal(type)),
-				{ description: `save: one of ${MEMORY_TYPES.join(", ")}.` },
-			),
-		),
+		type: Type.Optional(Type.Union(MEMORY_TYPES.map((type) => Type.Literal(type)))),
 		body: Type.Optional(Type.String({ description: "save: the fact." })),
 	},
 	{ additionalProperties: false },

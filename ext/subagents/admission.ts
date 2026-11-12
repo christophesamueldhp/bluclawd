@@ -148,12 +148,6 @@ const RUN_PARAMETERS = Type.Object({
 				'Which saved roles `agent` may name: "user" (yours and the bundled ones), "project" (the project\'s), or "both" (the default). Project roles need the user\'s trust in their project either way.',
 		}),
 	),
-	confirmProjectAgents: Type.Optional(
-		Type.Boolean({
-			description:
-				"Accepted for compatibility, and ignored: whether a project's roles may run is the user's trust in that project, which no call can change.",
-		}),
-	),
 	model: Type.Optional(
 		Type.String({
 			description:
@@ -277,9 +271,9 @@ export function subagentInvocation(params: SubagentCallParams): SubagentInvocati
 			error: `\`${shape}\` and ${conflicting.join(", ")} are alternative shapes: set ${conflicting.join(", ")} in each entry of \`${shape}\` instead, or leave \`${shape}\` out.`,
 		};
 	}
-	const { agentScope, confirmProjectAgents, background } = call;
+	const { agentScope, background } = call;
 	if (tasks !== undefined) {
-		return { ok: true, tasks: tasks.map((entry) => ({ ...entry, agentScope, confirmProjectAgents, background })) };
+		return { ok: true, tasks: tasks.map((entry) => ({ ...entry, agentScope, background })) };
 	}
 	const steps: ChainStep[] = [];
 	for (const [i, { resume, ...step }] of (chain ?? []).entries()) {
@@ -287,7 +281,7 @@ export function subagentInvocation(params: SubagentCallParams): SubagentInvocati
 			if (step.agent === undefined) {
 				return { ok: false, error: `chain[${i}]: give a step either \`agent\` or \`resume\`.` };
 			}
-			steps.push({ run: { ...step, agent: step.agent, agentScope, confirmProjectAgents, background } });
+			steps.push({ run: { ...step, agent: step.agent, agentScope, background } });
 			continue;
 		}
 		const extra = (["agent", "name", "cwd"] as const).filter((key) => step[key] !== undefined);

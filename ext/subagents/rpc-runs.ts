@@ -368,7 +368,7 @@ function rpcArgs(launch: RpcLaunch, instructionsFile: string, definitionFile: st
 /** How much of the orchestrator's context a run's Report takes: some 2,000 tokens at most, however long its text. */
 const MAX_RUN_REPORT_BYTES = 8 * 1024;
 /** What a run is told of its Report, which nothing summarizes for it: its orchestrator gets it as it is, bounded. */
-const REPORT_INSTRUCTIONS = [
+export const REPORT_INSTRUCTIONS = [
 	"",
 	"",
 	"## Your Report",
