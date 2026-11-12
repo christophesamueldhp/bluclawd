@@ -405,6 +405,42 @@ describe.skipIf(!hasTmux)("integrating an RPC run's changes", () => {
 		expect(existsSync(join(repo, "locked.txt"))).toBe(false);
 	});
 
+	it("runs the check after pi's shellCommandPrefix, as its bash does, and holds it to deny rules as the model wrote it", async () => {
+		const real = await startOrchestrator();
+		pi = real;
+		const repo = real.cwd;
+		repository(repo, { "a.txt": SEVEN });
+		const gate = join(repo, "..", "prefixed");
+		const check = 'test "$PFX" = applied';
+		real.script("main", [
+			{ tool: "subagent", args: { agent: writer, name: "w1", task: "Write." } },
+			{ tool: "subagent_integrate", args: { agent: "w1", check } },
+			{ tool: "subagent", args: { agent: writer, name: "w2", task: "Write." }, until: gate },
+			{ tool: "subagent_integrate", args: { agent: "w2", check } },
+			{ text: "done" },
+		]);
+		real.script("w1", [{ tool: "write", args: { path: "one.txt", content: "1\n" } }, { text: "Wrote." }]);
+		real.script("w2", [{ tool: "write", args: { path: "two.txt", content: "2\n" } }, { text: "Wrote." }]);
+		real.start(["--", "delegate"]);
+		await real.waitForRequests("main", 3);
+		// A rule the prefixed command would match, but the model's command does not.
+		const settings = join(real.agentDir, "settings.json");
+		writeFileSync(
+			settings,
+			JSON.stringify({
+				...JSON.parse(readFileSync(settings, "utf8")),
+				shellCommandPrefix: "export PFX=applied",
+				permissions: { deny: ["Bash(export *)"] },
+			}),
+		);
+		writeFileSync(gate, "");
+
+		const main = await real.waitForRequests("main", 5);
+		const [, without, , prefixed] = toolResults(main[4]);
+		expect(without).toContain(`Validation: \`${check}\` exited with code 1`);
+		expect(prefixed).toContain(`Validation: \`${check}\` exited with code 0`);
+	});
+
 	it("runs no check for an orchestrator that may not run bash itself, and says why", async () => {
 		const real = await startOrchestrator();
 		pi = real;

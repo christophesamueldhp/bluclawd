@@ -1,15 +1,18 @@
 import { validateToolArguments } from "@earendil-works/pi-ai";
+import { createLocalBashOperations } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { type BackgroundExec, BackgroundJobRegistry } from "../ext/background-bash/background-bash.ts";
 import { createMonitorTool, stdoutOnly, websocketExec } from "../ext/background-bash/monitor-tool.ts";
+import { waitFor } from "./helpers/wait-for.ts";
 
-function harness(exec: BackgroundExec) {
+function harness(exec: BackgroundExec, commandPrefix?: () => string | undefined) {
 	const sent: { message: any; options: any }[] = [];
 	const registry = new BackgroundJobRegistry();
 	const tool = createMonitorTool({
 		sendMessage: (message, options) => sent.push({ message, options }),
 		cwd: "/",
 		exec,
+		commandPrefix,
 		registry,
 		rateLimit: { capacity: 2, refillMs: 60_000, maxSuppressMs: 500 },
 	}) as any;
@@ -355,5 +358,39 @@ describe("monitor sources", () => {
 		} finally {
 			vi.unstubAllGlobals();
 		}
+	});
+});
+
+describe("monitor tool with pi's shellCommandPrefix", () => {
+	const shell: BackgroundExec = (command, cwd, options) => createLocalBashOperations().exec(command, cwd, options);
+	const watch = async (command: string, commandPrefix?: () => string | undefined) => {
+		const { tool, sent, registry } = harness(shell, commandPrefix);
+		await tool.execute("c1", { command, description: "d" }, undefined as any, undefined);
+		await waitFor(() => expect(sent).toHaveLength(1));
+		return { content: sent[0].message.content as string, job: registry.list()[0] };
+	};
+
+	it("runs the command after the prefix, and lists it as the model wrote it", async () => {
+		const { content, job } = await watch("echo $PFX", () => "export PFX=applied");
+		expect(content).toContain("<event>applied</event>");
+		expect(job.command).toBe("echo $PFX");
+	});
+
+	it("runs the command as written when the setting is absent", async () => {
+		// Its one line is empty, and an empty line is no event.
+		const { content } = await watch("echo $PFX", () => undefined);
+		expect(content).toContain('<summary>Monitor "d" stream ended</summary>');
+		expect(content).not.toContain("<event>");
+	});
+
+	it("keeps the prefix's stderr out of the events, as the command's own", async () => {
+		const { content } = await watch("echo $PFX", () => "echo noise >&2; export PFX=applied");
+		expect(content).toContain("<event>applied</event>");
+		expect(content).not.toContain("noise");
+	});
+
+	it("lets the command use aliases the prefix defines, as pi's alias recipe does", async () => {
+		const { content } = await watch("hi", () => "shopt -s expand_aliases\nalias hi='echo aliased'");
+		expect(content).toContain("<event>aliased</event>");
 	});
 });

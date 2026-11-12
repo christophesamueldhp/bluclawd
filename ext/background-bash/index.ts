@@ -236,6 +236,7 @@ const backgroundBash: InlineExtension = {
 				sendMessage: (message, options) => deliverOrHold(() => mainSession.sendMessage(message, options)),
 				cwd: localCwd,
 				exec: operations.exec,
+				commandPrefix: () => commandPrefix,
 			}),
 		);
 

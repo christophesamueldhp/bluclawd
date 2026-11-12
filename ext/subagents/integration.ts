@@ -27,6 +27,7 @@ import { createLocalBashOperations, type ExtensionAPI, SettingsManager } from "@
 import { Type } from "typebox";
 import { processAlive, processGroupAlive } from "../../daemon/processes.ts";
 import { runMarker } from "../../daemon/run-members.ts";
+import { withCommandPrefix } from "../_shared/command-prefix.ts";
 import { evaluateToolCallDeny } from "../permissions/policy.ts";
 import { prepareRunContainment, runProcesses } from "../sandbox/run-containment.ts";
 import { sandboxStatus, sandboxWraps, wrapExec } from "../sandbox/runtime.ts";
@@ -684,12 +685,13 @@ async function runCheck(
 	const shellPath = settings.getShellPath();
 	const local = createLocalBashOperations({ shellPath }).exec;
 	const exec = sandboxed ? wrapExec(local, () => shellPath) : local;
+	const prefix = settings.getShellCommandPrefix();
 	const chunks: Buffer[] = [];
 	const started = Date.now();
 	const timeout = AbortSignal.timeout(CHECK_TIMEOUT_MS);
 	let exitCode: number | null;
 	try {
-		({ exitCode } = await exec(command, where, {
+		({ exitCode } = await exec(withCommandPrefix(prefix, command), where, {
 			onData: (data) => chunks.push(data),
 			signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
 		}));

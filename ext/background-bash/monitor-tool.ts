@@ -5,6 +5,7 @@
 
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import { withCommandPrefix } from "../_shared/command-prefix.ts";
 import { monitorSource } from "../_shared/monitor-source.ts";
 import {
 	type BackgroundExec,
@@ -96,13 +97,19 @@ type MonitorParams = {
 const shellQuote = (s: string) => `'${s.replace(/'/g, "'\\''")}'`;
 
 /**
- * Stdout alone is the event stream: the command's stderr is appended to the job's
- * output file by the shell itself, so it never reaches the line sink. Without an
- * output file both streams stay events.
+ * Stdout alone is the event stream: the stderr of the command, and of pi's command prefix,
+ * is appended to the job's output file by the shell itself, so it never reaches the line
+ * sink. Without an output file both streams stay events.
  */
-export function stdoutOnly(exec: BackgroundExec): BackgroundExec {
-	return (command, cwd, options) =>
-		exec(options.outputFile ? `{ ${command}\n} 2>>${shellQuote(options.outputFile)}` : command, cwd, options);
+export function stdoutOnly(exec: BackgroundExec, prefix?: string): BackgroundExec {
+	return (command, cwd, options) => {
+		const { outputFile } = options;
+		if (!outputFile) return exec(withCommandPrefix(prefix, command), cwd, options);
+		const group = (text: string) => `{ ${text}\n} 2>>${shellQuote(outputFile)}`;
+		// The prefix in a group of its own: bash parses a whole group before running it, so an alias the prefix
+		// defines would not reach a command in the same group.
+		return exec(withCommandPrefix(prefix && group(prefix), group(command)), cwd, options);
+	};
 }
 
 /** A WebSocket as a job: each text frame is output, close is exit. Runs in this process, so the permission layer judges its host as a fetch. */
@@ -159,6 +166,8 @@ export interface MonitorToolDeps {
 	sendMessage: (message: OutgoingMessage<unknown>, options: EventDelivery) => void;
 	cwd: string;
 	exec: BackgroundExec;
+	/** pi's `shellCommandPrefix`, read per command: the settings are read after the tool is built. */
+	commandPrefix?: () => string | undefined;
 	registry?: BackgroundJobRegistry;
 	rateLimit?: { capacity: number; refillMs: number; maxSuppressMs: number };
 }
@@ -244,7 +253,10 @@ export function createMonitorTool(deps: MonitorToolDeps): ToolDefinition<typeof 
 			current = registry.start({
 				command: source.kind === "ws" ? source.url : source.command,
 				cwd: deps.cwd,
-				exec: source.kind === "ws" ? websocketExec(source.url, source.protocols) : stdoutOnly(deps.exec),
+				exec:
+					source.kind === "ws"
+						? websocketExec(source.url, source.protocols)
+						: stdoutOnly(deps.exec, deps.commandPrefix?.()),
 				owner: ctx?.sessionManager?.getSessionId(),
 				idPrefix: command === undefined ? "s" : "b",
 				description: params.description,
