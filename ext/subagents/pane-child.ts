@@ -2,7 +2,8 @@
  * Inside a run's pi in a pane (ADR-0013), what its host does over pi's RPC (rpc-host.ts): it gives the pi its task and
  * the messages posted to it, passes on what it sends, and stores its Report once its work settles with nothing pending,
  * then ends the pi. The user watches and may type meanwhile; work they stop with Esc, and a Resume they opened to type
- * in, wait for them, and end once they leave the pane. The host takes what this stores once the pi exits.
+ * in, wait for them, and end once they leave the pane. An approval waits for the user too, unless its orchestrator is
+ * gone and no one watches the pane: then it is blocked. The host takes what this stores once the pi exits.
  */
 
 import { realpathSync } from "node:fs";
@@ -12,6 +13,7 @@ import { RUN_PANE_ENV, Tmux } from "../../daemon/tmux.ts";
 import { SUBAGENT_MESSAGE_TOOL } from "./messages.ts";
 import { textOf } from "./results.ts";
 import { type PaneChildState, paneChildStatePath, readRpcHostSpec } from "./rpc-host.ts";
+import { paneApprovalsUnanswerable } from "./run-approvals.ts";
 import {
 	markGiven,
 	type RunInboxMessage,
@@ -32,6 +34,8 @@ const SHOWN_CHECK_MS = 500;
  * orchestrator switches the terminal to it as soon as its pane is up, which a check may come before.
  */
 const OPEN_GRACE_MS = 2000;
+/** How long an approval waits once its orchestrator is gone and no one watches its pane: as on pi's RPC. */
+const ORPHAN_BLOCK_MS = 5000;
 
 export default function paneChild(pi: ExtensionAPI): void {
 	const runDir = process.env[RUN_PANE_ENV];
@@ -127,6 +131,37 @@ export default function paneChild(pi: ExtensionAPI): void {
 		}
 	};
 
+	/** Aborted to block the approvals it waits on; one aborted is replaced, so a later ask may be answered again. */
+	let unanswerable = new AbortController();
+	paneApprovalsUnanswerable.set(unanswerable.signal);
+	let orphanedSince: number | undefined;
+	/**
+	 * An approval waits for the user while its orchestrator's panel can say so. Once that orchestrator's pane is gone
+	 * and no terminal shows this one for {@link ORPHAN_BLOCK_MS}, it is blocked, as its host would on pi's RPC.
+	 */
+	const checkOrphaned = () => {
+		if (done || !state.awaiting) {
+			orphanedSince = undefined;
+			return;
+		}
+		let parentGone = false;
+		try {
+			parentGone = tmux?.hasSession(pane.parent) === false;
+		} catch {
+			// tmux did not answer: checked again next time.
+		}
+		if (!parentGone || isShown() !== false) {
+			orphanedSince = undefined;
+			return;
+		}
+		orphanedSince ??= Date.now();
+		if (Date.now() - orphanedSince < ORPHAN_BLOCK_MS) return;
+		orphanedSince = undefined;
+		unanswerable.abort();
+		unanswerable = new AbortController();
+		paneApprovalsUnanswerable.set(unanswerable.signal);
+	};
+
 	/** Work the user holds, or a Resume they never typed in, ends once they leave its pane. */
 	const checkLeft = () => {
 		if (done || (working && !held)) return;
@@ -165,7 +200,10 @@ export default function paneChild(pi: ExtensionAPI): void {
 			setInterval(() => {
 				if (!done) give(readRunInbox(runDir, generation));
 			}, CHECK_MS),
-			setInterval(checkLeft, SHOWN_CHECK_MS),
+			setInterval(() => {
+				checkLeft();
+				checkOrphaned();
+			}, SHOWN_CHECK_MS),
 		];
 	});
 

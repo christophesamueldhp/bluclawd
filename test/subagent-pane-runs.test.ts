@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import { readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -118,6 +119,45 @@ describe.skipIf(!hasTmux)("a run in a pane of its own", () => {
 		const main = await real.waitForRequests("main", 2);
 		expect(conversation(main[1]).at(-1)?.text).toContain("It says OSPREY.");
 	});
+
+	it("keeps an approval waiting while its orchestrator is there, and blocks it once that orchestrator is gone", async () => {
+		const real = await startOrchestrator();
+		pi = real;
+		vi.stubEnv("BLUCLAWD_RPC_PROVIDER_EXTENSIONS", [FAUX, GATE].join(":"));
+		writeFileSync(join(real.cwd, "secret.gated"), "OSPREY\n");
+		real.script("main", [
+			{ tool: "subagent", args: { agent: "explorer", name: "look", task: "Read secret.gated.", background: true } },
+			{ text: "waiting" },
+		]);
+		real.script("look", [{ tool: "read", args: { path: "secret.gated" } }, { text: "It was blocked." }]);
+		const orchestrator = real.start(["--", "Delegate the look."]);
+		await real.waitForRequests("look", 1);
+		const { runId, dir } = runRecord(real.agentDir, "look");
+		const pane = runPaneSession(runId, 0);
+		await waitFor(() => expect(real.tmux.capture(pane, 200).join("\n")).toContain("Allow this subagent read"));
+
+		// No one watches its pane, but its orchestrator's panel says it needs input: it waits, past RPC's 5 s.
+		await new Promise((resolve) => setTimeout(resolve, 7000));
+		expect(real.requests("look")).toHaveLength(1);
+		expect(real.tmux.capture(pane, 200).join("\n")).toContain("Allow this subagent read");
+
+		// Its orchestrator crashed, and its pane with it: no one is left to answer, so it is blocked, and the run goes on.
+		const pid = Number(
+			spawnSync(
+				"tmux",
+				["-S", real.tmux.socket, "display-message", "-p", "-t", `=${orchestrator}:`, "#{pane_pid}"],
+				{
+					encoding: "utf8",
+				},
+			).stdout.trim(),
+		);
+		expect(pid).toBeGreaterThan(0);
+		process.kill(pid, "SIGKILL");
+		const look = await real.waitForRequests("look", 2);
+		expect(conversation(look[1]).at(-1)?.text).toContain("Blocked: read");
+		await waitFor(() => expect(real.tmux.hasSession(pane)).toBe(false));
+		expect(JSON.parse(readFileSync(join(dir, "reports", "1.json"), "utf8")).outcome).toEqual({ status: "completed" });
+	}, 60_000);
 
 	it("stops when its orchestrator stops it: its pane closes, and its work so far is its Report", async () => {
 		const real = await startOrchestrator();

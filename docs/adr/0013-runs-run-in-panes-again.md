@@ -22,6 +22,6 @@ Old runs in tmux, from before ADR-0010, are still only followed until they end.
 - Esc in a run's pane holds its work for the user. The run ends as stopped once the user leaves the pane without going on; a stop from its orchestrator ends it at once.
 - Startup costs a little more. From Admission to the run's first model request, measured on faux pi over six runs in two rounds on 2026-11-12: RPC took a median of 523–589 ms and a pane 606–737 ms.
 
-## Open
+## Approvals no one can answer
 
-- **A pane run nobody attends to can wait for good.** On RPC, an approval no orchestrator sees is blocked after 5 s. In a pane, a dialog waits for the user. If the orchestrator is gone, the run is no row and sits in no panel, yet it holds a slot. Neither a parent pane that is gone nor a timeout ends it yet.
+Decided 2026-11-12 (#345). While the run's orchestrator is there, an approval in its pane waits for the user with no timeout: the orchestrator's panel says the run needs input, as any pi waits for its user. Once the orchestrator's pane is gone (a crash: a quit stops its runs) and no terminal shows the run's pane for 5 s, the approval is blocked, as its host blocks one on pi's RPC. The run goes on and names the blocker in its Report (ADR-0008). A reopened orchestrator in another pane is not noticed: its run's approvals are blocked too, unless the user opens the run's pane.

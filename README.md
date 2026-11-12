@@ -493,7 +493,8 @@ subagents` for 30 s. Runs also show in `/tasks` with the finished runs of the se
 prompt moves into the panel, where `x` stops a run. Enter on a run, there or in `/tasks`, switches the
 terminal to its pane, and ← comes back. A finished run resumes in a new pane for you to type its next
 instruction in; leaving it without typing ends it with nothing done. A run in a pane asks for its
-approvals there, and its panel row says `needs input` meanwhile. A run on pi's RPC has no pane: Enter
+approvals there, and its panel row says `needs input` meanwhile; once its orchestrator has crashed and no
+terminal shows its pane, an approval is blocked after 5 s, as on pi's RPC. A run on pi's RPC has no pane: Enter
 shows its latest conversation and asks for an instruction (Esc only looks): a working run takes it at
 its next safe point, a finished one resumes with it, and the orchestrator is told without starting its turn.
 
