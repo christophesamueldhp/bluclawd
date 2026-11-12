@@ -128,7 +128,7 @@ export function registerIntegration(pi: ExtensionAPI, deps: IntegrationDeps): vo
 		exposure: "model-only",
 		annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
 		description:
-			"Integrate what a finished subagent that edits, or a completed chain, changed in its worktree into your checkout: only its own changes since its baseline are applied, onto your checkout as it is now, and every change made there meanwhile is kept. Nothing is staged, committed or pushed, and its worktree stays. Work that is still running, did not complete, or whose processes may still run is refused. On a conflict nothing is applied: resolve a routine one within what the user asked by editing your own file, then call again with that path in `keep`; a conflict whose resolution would change what the user or the run meant is for the user: ask them, and do not choose.",
+			"Integrate what a finished subagent that edits changed in its worktree, by name or run ID, or what a completed chain changed, by its ID (chain_…), into your checkout: only its own changes since its baseline are applied, onto your checkout as it is now, and every change made there meanwhile is kept. Nothing is staged, committed or pushed, and its worktree stays. Work that is still running, did not complete, or whose processes may still run is refused. On a conflict nothing is applied: resolve a routine one within what the user asked by editing your own file, then call again with that path in `keep`; a conflict whose resolution would change what the user or the run meant is for the user: ask them, and do not choose. `preview` shows its changes and what would conflict, applying nothing. `check` is a shell command run in the checkout once applied, as your own bash runs it and only while you have bash, to validate the combined result; its exit code and output are reported, and nothing is undone when it fails.",
 		parameters: Type.Object(
 			{
 				agent: Type.String({ description: "The finished subagent's name or run ID (sub_…), or a chain's ID." }),
@@ -143,8 +143,7 @@ export function registerIntegration(pi: ExtensionAPI, deps: IntegrationDeps): vo
 				),
 				check: Type.Optional(
 					Type.String({
-						description:
-							"A shell command to validate the combined result, run in the checkout's root once applied, as your own bash runs it and only while you have bash. Its exit code and output are reported; nothing is undone when it fails.",
+						description: "A shell command to validate the combined result, run in the checkout's root.",
 					}),
 				),
 			},
