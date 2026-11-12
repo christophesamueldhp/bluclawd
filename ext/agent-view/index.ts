@@ -677,9 +677,10 @@ const agentView: InlineExtension = {
 					new Promise<undefined>((resolve) => setTimeout(resolve, PRELOAD_MS)),
 				]);
 				await ctx.ui.custom<void>(
-					(tui, _theme, _keybindings, done) => {
+					(tui, _theme, keybindings, done) => {
 						const view = new AgentView({
 							ui: tui,
+							keybindings,
 							client,
 							appName: "bluclawd",
 							version: VERSION,

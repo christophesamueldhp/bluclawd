@@ -3,7 +3,14 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Theme } from "@earendil-works/pi-coding-agent";
-import { type AutocompleteProvider, parseColor, styleText, type TUI } from "@earendil-works/pi-tui";
+import {
+	type AutocompleteProvider,
+	KeybindingsManager,
+	type KeyId,
+	parseColor,
+	styleText,
+	type TUI,
+} from "@earendil-works/pi-tui";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
 	currentDaemonBuildId,
@@ -163,6 +170,7 @@ function makeView(
 		listModels?: () => Array<{ provider: string; id: string }>;
 		instances?: InstanceSummary[];
 		externalEditor?: () => string;
+		keybindings?: KeybindingsManager;
 	} = {},
 ) {
 	const calls: Calls = [];
@@ -195,6 +203,7 @@ function makeView(
 		listModels: opts.listModels,
 		instances,
 		externalEditor: opts.externalEditor ?? (() => "true"),
+		keybindings: opts.keybindings,
 	});
 	const flush = () => new Promise((r) => setTimeout(r, 0));
 	return {
@@ -837,6 +846,72 @@ describe("AgentView keys", () => {
 		for (const ch of "draft") view.handleInput(ch);
 		view.handleInput("\x07");
 		await waitFor(() => expect(text().join("\n")).toContain("❯ from the editor"));
+	});
+
+	describe("pi's external-editor key", () => {
+		/** pi's app keybindings, with `app.editor.external` as the user's keybindings.json sets it. */
+		const editorKey = (key?: KeyId) =>
+			new KeybindingsManager(
+				{ "app.editor.external": { defaultKeys: "ctrl+g" } },
+				key ? { "app.editor.external": key } : {},
+			);
+		/** Counts editor launches: the view reads the editor command as it launches it. */
+		const counted = (editor: string) => {
+			const launches = { count: 0 };
+			return {
+				launches,
+				externalEditor: () => {
+					launches.count++;
+					return editor;
+				},
+			};
+		};
+		const openPeek = (view: AgentView) => {
+			for (let i = 0; i < 4; i++) view.handleInput(DOWN);
+			view.handleInput(" ");
+		};
+
+		it("rebound to ctrl+e, ctrl+e opens the editor and ctrl+g does not", async () => {
+			const { launches, externalEditor } = counted(editorScript(`printf 'from the editor' > "$1"`));
+			const { view, text } = makeView({ externalEditor, keybindings: editorKey("ctrl+e") });
+			for (const ch of "draft") view.handleInput(ch);
+			view.handleInput("\x07");
+			expect(launches.count).toBe(0);
+			view.handleInput("\x05");
+			expect(launches.count).toBe(1);
+			await waitFor(() => expect(text().join("\n")).toContain("❯ from the editor"));
+		});
+
+		it.each([
+			{ name: "Ctrl+G by default", keybindings: editorKey(), key: "\x07" },
+			{ name: "the rebound key", keybindings: editorKey("ctrl+e"), key: "\x05" },
+		])("$name closes the peek without opening the editor", ({ keybindings, key }) => {
+			const { launches, externalEditor } = counted("true");
+			const { view, text } = makeView({ externalEditor, keybindings });
+			openPeek(view);
+			expect(text().join("\n")).toContain("╭");
+			view.handleInput(key);
+			expect(text().join("\n")).not.toContain("╭");
+			expect(launches.count).toBe(0);
+		});
+
+		it("bound to ctrl+s, ctrl+s keeps agent view's meaning: it switches to the directory view", () => {
+			const { launches, externalEditor } = counted("true");
+			const { view, text } = makeView({ externalEditor, keybindings: editorKey("ctrl+s") });
+			const directoryBand = /~\/proj\/here\n.*sound effects/;
+			expect(text().join("\n")).not.toMatch(directoryBand);
+			view.handleInput(CTRL_S);
+			expect(launches.count).toBe(0);
+			expect(text().join("\n")).toMatch(directoryBand);
+		});
+
+		it("bound to ctrl+f, ctrl+f keeps agent view's meaning: it starts a name search", () => {
+			const { launches, externalEditor } = counted("true");
+			const { view, text } = makeView({ externalEditor, keybindings: editorKey("ctrl+f") });
+			view.handleInput("\x06");
+			expect(launches.count).toBe(0);
+			expect(text().join("\n")).toContain("❯ n:");
+		});
 	});
 
 	it("Ctrl+G with an editor that cannot start says so and keeps the prompt", async () => {

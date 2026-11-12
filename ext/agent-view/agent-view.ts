@@ -19,6 +19,7 @@ import {
 	fuzzyFilter,
 	getKeybindings,
 	Input,
+	type KeybindingsManager,
 	type KeyId,
 	matchesKey,
 	parseColor,
@@ -100,8 +101,10 @@ export interface AgentViewOptions {
 	panes: PaneOps;
 	/** A peek reply to this window's own session: sent as its next prompt once the view closes. */
 	onSelfReply?: (text: string) => void;
-	/** ctrl+g's editor command, as pi resolves it: `externalEditor`, else $VISUAL / $EDITOR, else its default. */
+	/** The external editor's command, as pi resolves it: `externalEditor`, else $VISUAL / $EDITOR, else its default. */
 	externalEditor: () => string;
+	/** pi's app keybindings, for its external-editor key (`app.editor.external`); without them, ctrl+g. */
+	keybindings?: KeybindingsManager;
 	/** Clipboard IO is separate from the view so asynchronous paste never blocks rendering. */
 	readClipboard?: () => Promise<AgentClipboard>;
 	/** `/resume`: this repository's past sessions, newest first. */
@@ -250,7 +253,7 @@ export class AgentView implements Component, Focusable {
 	private readonly insertIntoComposer: (text: string) => void;
 	private pasting = false;
 	private draftVersion = 0;
-	/** True while ctrl+g's editor owns the terminal. */
+	/** True while the external editor owns the terminal. */
 	private editing = false;
 	private readonly reply = new Input();
 	private readonly renameInput = new Input();
@@ -491,7 +494,7 @@ export class AgentView implements Component, Focusable {
 		}
 	}
 
-	/** ctrl+g: edit the dispatch prompt in the editor pi's own ctrl+g opens. */
+	/** pi's external-editor key (ctrl+g by default): edit the dispatch prompt in the editor that key opens in pi. */
 	private async editExternally(): Promise<void> {
 		const command = this.opts.externalEditor();
 		const dir = mkdtempSync(join(tmpdir(), "pi-agents-"));
@@ -1434,6 +1437,12 @@ export class AgentView implements Component, Focusable {
 		return getKeybindings().matches(data, "tui.select.down") || matchesKey(data, "ctrl+n");
 	}
 
+	private isEditorKey(data: string): boolean {
+		return this.opts.keybindings
+			? this.opts.keybindings.matches(data, "app.editor.external")
+			: matchesKey(data, "ctrl+g");
+	}
+
 	private isNewline(data: string): boolean {
 		return (
 			getKeybindings().matches(data, "tui.input.newLine") ||
@@ -1560,12 +1569,6 @@ export class AgentView implements Component, Focusable {
 			this.startRename();
 			return true;
 		}
-		if (matchesKey(data, "ctrl+g")) {
-			if (peek) this.closePeek();
-			else void this.editExternally();
-			this.render_();
-			return true;
-		}
 		if (!peek && (matchesKey(data, "shift+up") || matchesKey(data, "shift+down"))) {
 			this.reorder(matchesKey(data, "shift+up") ? -1 : 1);
 			return true;
@@ -1674,6 +1677,12 @@ export class AgentView implements Component, Focusable {
 			return;
 		}
 		if (matchesKey(data, "ctrl+v") || matchesKey(data, "tab")) return;
+		// Checked after agent view's own keys, which win when pi's editor key is bound to one of them.
+		if (this.isEditorKey(data)) {
+			this.closePeek();
+			this.render_();
+			return;
+		}
 		this.reply.handleInput(data);
 		this.replyError = undefined;
 		this.render_();
@@ -1754,6 +1763,12 @@ export class AgentView implements Component, Focusable {
 				}
 				return;
 			}
+		}
+		// Checked after agent view's own keys, which win when pi's editor key is bound to one of them.
+		if (this.isEditorKey(data)) {
+			void this.editExternally();
+			this.render_();
+			return;
 		}
 		this.composer.handleInput(data);
 		this.afterComposerEdit(text);
