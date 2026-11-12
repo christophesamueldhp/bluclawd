@@ -39,7 +39,25 @@ docker exec bc390-linux su dev -c 'cd /work/bluclawd && LANG=C.UTF-8 npx vitest 
 docker exec bc390-linux su dev -c 'cd /work/bluclawd && LANG=C.UTF-8 BLUCLAWD_PANE_PROBE=switching npx vitest run test/pane-run-probe.test.ts --silent=false --reporter=verbose'
 ```
 
-A test that hangs in `send-keys` blocks vitest's worker in `spawnSync`, so no test timeout ends it. A watchdog in the container killed every process of `dev` once a `send-keys` was older than 60 s. `sleep infinity` as PID 1 reaps nothing, so ended tmux servers and pis stay as zombies until the container goes; no result below depends on one.
+A test that hangs in `send-keys` blocks vitest's worker in `spawnSync`, so no test timeout ends it. While the tests ran, a watchdog in the container, as root, killed every process of `dev` once a `send-keys` was older than 60 s:
+
+```sh
+while true; do
+  for p in $(pgrep -u dev -f send-keys); do
+    [ "$(ps -o etimes= -p $p | tr -d ' ')" -gt 60 ] && pkill -KILL -u dev
+  done
+  sleep 5
+done
+```
+
+Each test of `subagent-pane-runs` ran alone, by its name (`-t`, regex characters escaped), with `pkill -KILL -u dev; rm -rf /tmp/bc-real-*` in the container after each. For the "line 7 deleted" column, the line was removed from the container's copy only, then the three files ran together:
+
+```sh
+docker exec bc390-linux sed -i '/extended-keys-format/d' /work/bluclawd/daemon/tmux.ts
+docker exec bc390-linux su dev -c 'cd /work/bluclawd && LANG=C.UTF-8 npx vitest run test/subagent-pane-runs.test.ts test/subagent-pane-child.test.ts test/daemon-run-queue.test.ts --reporter=verbose'
+```
+
+ `sleep infinity` as PID 1 reaps nothing, so ended tmux servers and pis stay as zombies until the container goes; no result below depends on one.
 
 ### The pane-run tests
 
@@ -67,6 +85,8 @@ The tests that pass as shipped either attach no terminal, so no client is shown 
 Reproduced without pi, as `dev` in the container, with the config `daemon/tmux.ts` writes:
 
 ```
+$ D=$(mktemp -d); cd /work/bluclawd
+$ node -e 'process.stdout.write(require("fs").readFileSync("daemon/tmux.ts","utf8").match(/const CONFIG = `([^`]*)`/)[1])' > $D/tmux.conf
 $ tmux -S $D/s.sock -f $D/tmux.conf new-session -d -s main -x 80 -y 24 cat
 $ tmux -S $D/s.sock show -gv history-limit; tmux -S $D/s.sock show -gv window-size; tmux -S $D/s.sock show -gv extended-keys
 10000
@@ -85,7 +105,7 @@ $ tmux -S $D/t.sock capture-pane -p
 ```
 
 - The server starts without a client (`new-session -d`), as agent view's launcher (`ext/agent-view/launch.ts`: `newSession`, then `attach`) and the tests start it. The first client to attach gets the config's errors.
-- `history-limit`, set after line 7, is applied, so the rest of the config holds. Deleting the line changes nothing but the error. tmux 3.4 then encodes extended keys in its default format, and pi took Left, Escape and Enter in that format in every test above.
+- `history-limit`, set after line 7, is applied, so the rest of the config holds. Deleting the line removes the error; tmux 3.4 then encodes modified keys in its default extended-key format. The tests above send only unmodified keys (Left, Down, Escape, Enter and text), so they do not show that pi reads modified keys, such as Shift+Enter, in that format.
 - The real `pi` launch was not run in the container. That it shows the same error rests on the launcher starting the server the same way.
 
 ### Switching and pane size
@@ -140,7 +160,10 @@ BLUCLAWD_PANE_PROBE=memory BLUCLAWD_PANE_PROBE_SAMPLES=8 BLUCLAWD_PANE_PROBE_SET
 - **What is summed:** `ps -o rss` of the run's host (`hostPid` in `rpc-host.json`) and every descendant. In every sample that was two processes: the host (`node --import … rpc-host.ts`) and the run's pi (`childPid`). The orchestrator, the daemon and tmux are not counted.
 - **Order:** pane and RPC alternate (pane first in odd samples, RPC first in even ones), so drift in the machine's load falls on both.
 - **Machine state:** the load average (`os.loadavg()`) and `memory_pressure`'s free percentage are printed with each sample. Three other agents ran tests on this machine at the time.
-- **Caveats:** RSS counts shared pages in both processes. macOS compresses idle pages under memory pressure, which lowers RSS. One host read 8.6 MiB in round 1, which is compression, not a small host.
+- **Caveats:**
+  - RSS counts shared pages in both processes.
+  - macOS compresses idle pages under memory pressure, which lowers RSS. One host read 8.6 MiB in round 1, most likely compressed rather than small.
+  - `HOME` is a temporary directory, so the user's pistatusline, which a pane run loads when the user has it (ADR-0013), was not loaded. A user's pane run may be larger.
 
 ### Round 1: 2026-11-12 23:29–23:32, 8 samples each
 
@@ -161,11 +184,11 @@ RSS in MiB, host / pi / sum, with the 1-minute load average and memory free when
 | **Median** | **128.7 / 132.4 / 259.9** | | **119.6 / 86.8 / 195.8** | |
 | Range | 8.6–155.8 / 50.8–158.0 / 59.4–313.8 | | 47.5–155.9 / 63.7–117.9 / 111.3–273.8 | |
 
-The pane run's pi had more RSS than the RPC run's pi in 7 of the 8 pairs; the exception is sample 3, whose pane run was compressed.
+The pane run's pi had more RSS than the RPC run's pi in 7 of the 8 pairs. The exception is sample 3, whose pane run read low in both processes, most likely from compression.
 
 ### Round 2: 2026-11-13 00:18–00:21, 8 samples each
 
-Started once the 1-minute load average fell under 20 (on 10 cores). Load 17.7 at the first sample and 5.5 at the last; memory free 56–71%. Other agents still ran on the machine, but more lightly than in round 1.
+Started once the 1-minute load average fell under 20 (on 10 cores). Load 17.7 at the first sample and 5.8 at the last; memory free 56–71%. Other agents still ran on the machine, but more lightly than in round 1.
 
 | Sample | Pane run | Load, free | RPC run | Load, free |
 |---|---|---|---|---|
@@ -180,15 +203,15 @@ Started once the 1-minute load average fell under 20 (on 10 cores). Load 17.7 at
 | **Median** | **156.0 / 156.8 / 313.9** | | **156.6 / 116.8 / 272.2** | |
 | Range | 154.3–158.0 / 154.9–160.1 / 309.2–316.1 | | 121.3–158.2 / 80.1–120.7 / 201.4–278.9 | |
 
-RPC sample 2 is low in both processes, as round 1's outliers were: compressed pages, not a smaller run. Without it the RPC medians barely move (156.8 / 119.5 / 273.5).
+RPC sample 2 is low in both processes, as round 1's outliers were, most likely from compression rather than a smaller run. Without it the RPC medians barely move (156.8 / 119.5 / 273.5).
 
 ### Reading the two rounds
 
-Round 2 is the figure to quote: **a pane run takes a median of 313.9 MiB, an RPC run 272.2 MiB, so a pane run costs about 42 MiB more.** The whole difference is in the run's pi (156.8 against 116.8 MiB); the host is the same size for both. Linux agrees on the shape (below: +32 MiB in pi, host equal). Round 1, under a load of up to 92, saw the same direction with a lot of noise and is kept only as the record of what was run. The machine was not idle in round 2 either, so an idle rerun could move these by a few MiB; with round 2's spread under 7 MiB for a pane run, a rerun is not needed to conclude that the cost is about 40 MiB a run.
+Round 2 is the figure to quote: **a pane run takes a median of 313.9 MiB, an RPC run 272.2 MiB, so a pane run costs about 42 MiB more.** The whole difference is in the run's pi (156.8 against 116.8 MiB); the host is the same size for both. Linux agrees on the shape (below: +32 MiB in pi, host equal). Round 1, under a load of up to 92, saw the same direction with a lot of noise and is kept only as the record of what was run. The machine was not idle in round 2 either, so an idle rerun could move these by a few MiB; with round 2's spread under 7 MiB for a pane run, a rerun is not needed to conclude that the cost is about 42 MiB a run.
 
 ### Linux, for comparison
 
-The same probe in the container, 5 samples each, 8 s settle: `BLUCLAWD_PANE_PROBE=memory BLUCLAWD_PANE_PROBE_SAMPLES=5 BLUCLAWD_PANE_PROBE_SETTLE_MS=8000`. The VM had 13.6 GiB, 12.3 GiB of it available, and its own load average stayed under 0.9. Linux does not compress pages, so these numbers vary far less than macOS's. They come from a different OS and are not the brief's macOS figure.
+The same probe in the container, 5 samples each, 8 s settle: `BLUCLAWD_PANE_PROBE=memory BLUCLAWD_PANE_PROBE_SAMPLES=5 BLUCLAWD_PANE_PROBE_SETTLE_MS=8000`. The VM had 13.6 GiB, 12.3 GiB of it available after the runs, and its own load average stayed under 0.9. These numbers vary far less than macOS's. They come from a different OS and are not the brief's macOS figure.
 
 | | Host | pi | Sum |
 |---|---|---|---|
@@ -199,10 +222,14 @@ The host is the same size for both kinds. The pane run's pi had more RSS than th
 
 ## Open
 
-- **To file, not filed yet:** "Agent view on tmux 3.4: the private server's config error covers the first pane". The draft is in #390's hand-off. Link the issue here once it exists.
+- **To file, not filed yet.** Link the issue here once it exists. Draft:
+  - **Title:** Agent view on tmux 3.4: the private server's config error covers the first pane and takes its keys
+  - **Body:** tmux 3.4, Ubuntu 24.04's, refuses `set -g extended-keys-format csi-u` in the private server's config (`daemon/tmux.ts`). The rest of the config applies. tmux shows the error (`tmux.conf:7: invalid option: extended-keys-format`) to the first client that attaches, in view mode over the pane. Until the user presses `q`, keys go to view mode, not pi; a `send-keys` of `/` opens view mode's search and never returns. 5 of the 10 tests in `test/subagent-pane-runs.test.ts` fail or hang there; all pass with the line removed. Evidence and repro: `docs/research/pane-runs-linux-and-memory.md`, "Why: tmux 3.4 and `extended-keys-format`".
+  - **Acceptance:** on tmux 3.4, the first terminal to attach shows pi, not view mode; `test/subagent-pane-runs.test.ts` passes in an Ubuntu 24.04 container; macOS keeps `csi-u`.
+  - **Not shown, to settle in the issue:** whether pi reads modified keys (such as Shift+Enter) in tmux 3.4's default extended-key format; whether the real `pi` launch shows the error (expected, as it starts the server the same way, but not run); tmux versions other than 3.4 and 3.6b; whether the README should state a minimum tmux version (none is documented).
 - Optional: re-measure memory on an idle machine (see [Reading the two rounds](#reading-the-two-rounds)).
 - The real-provider check stays with #359.
 
 ## Clean-up
 
-The container `bc390-linux` was removed; `ubuntu:24.04` was already on the machine and stays. Each probe and test run ends its own daemon, panes and `bc-real-*` directory (`startRealPi`'s `stop`). Afterwards `ps` showed no process under this worktree's path, and no `bc-real-*` directory of these runs remained.
+The container `bc390-linux` was removed with `docker rm -f`; `ubuntu:24.04` was already on the machine and stays. Each probe and test run on macOS ends its own daemon, panes and `bc-real-*` directory (`startRealPi`'s `stop`). Afterwards, `docker ps -a --filter name=bc390` listed nothing, and neither `ps -axww -o pid=,command=` nor `ps eww -ax` (which shows each process's environment, so a `pi` or a tmux server started from this worktree) matched `bluclawd-390`. The `bc-real-*` directories of the two probe runs that failed on macOS were gone.
