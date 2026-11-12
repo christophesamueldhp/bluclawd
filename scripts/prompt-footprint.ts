@@ -68,7 +68,7 @@ export interface Profile {
 }
 
 /** Every tool bluclawd registers inactive turned on, except `collaborator_message`, which a collaboration turns on. */
-export const ALL_TOOLS: Profile = { defaultTools: ["+monitor"] };
+export const ALL_TOOLS: Profile = { defaultTools: ["+monitor", "+schedule_wakeup", "+memory"] };
 
 export interface Contribution {
 	name: string;

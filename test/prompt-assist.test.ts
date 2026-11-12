@@ -293,7 +293,7 @@ describe("prompt suggestions", () => {
 	it("does not call the model for commands, shell input, paste tokens, or autocomplete menus", async () => {
 		vi.useFakeTimers();
 		const { editor, assist, generate } = makeEditor();
-		for (const text of ["/model", "!ls", "[Pasted text #1 +4 lines]", "[Image #1]"]) {
+		for (const text of ["/model", "!ls", "[paste #1 +11 lines]", "[Image #1]"]) {
 			editor.setText(text);
 			assist.schedule();
 			await vi.advanceTimersByTimeAsync(700);
@@ -366,11 +366,11 @@ describe("prompt suggestions", () => {
 
 	it("keeps collapsed paste expansion intact", () => {
 		const { editor } = makeEditor();
-		const text = "one\ntwo\nthree\nfour\nfive";
+		const text = Array.from({ length: 11 }, (_, i) => `line ${i + 1}`).join("\n");
 		const submit = vi.fn();
 		editor.onSubmit = submit;
 		editor.handleInput(`\x1b[200~${text}\x1b[201~`);
-		expect(editor.getText()).toContain("[Pasted text");
+		expect(editor.getText()).toContain("[paste #");
 		editor.handleInput("\r");
 		expect(submit).toHaveBeenCalledWith(text);
 	});
