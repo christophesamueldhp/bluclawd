@@ -617,7 +617,7 @@ pi gives an over-long or colliding name a hash suffix: an exact-tool rule can mi
 `mcp__server__*` still holds. A server-level rule also covers that server's resources: pi's
 `list_mcp_resources`, `list_mcp_resource_templates` and `read_mcp_resource` with a `server` are
 judged as `mcp__server__<that tool>`, and a list without `server`, which lists every server, is
-blocked while such a rule exists (the model is told to pass `server`). `dir/**` covers
+blocked while a rule denies that listing on any server (the model is told to pass `server`). `dir/**` covers
 `dir` itself too. A bash rule also matches the command behind wrappers (`sudo`,
 `timeout`, `nice`, `env`, `xargs`, `sh -c '…'`, `eval`, …), shell keywords,
 quoting (`'rm'`, `\rm`), `/bin/…`, `$(…)`, and any part of a `&&`/`;`/`|` chain.

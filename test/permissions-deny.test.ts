@@ -458,6 +458,9 @@ describe("the extension", () => {
 			"Mcp(dev-radius)",
 			"Mcp",
 			"mcp__*",
+			// A server name can hold `__`, or gain one when spelled (`a--b`).
+			"mcp__a__b__*",
+			"Mcp(a--b:*)",
 		]) {
 			const { handlers, ctx, call } = load({ permissions: { deny: [rule] } });
 			await handlers.session_start({}, ctx);

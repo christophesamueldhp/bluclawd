@@ -68,24 +68,33 @@ export function mcpNamePart(s: string): string {
  * `server:tool` split, since spelling can create a new `__` (`a--b` → `a__b`).
  */
 function ruleParts(rule: string): { verb: string; subject: string } | undefined {
-	const mcp = mcpRuleNames(rule);
-	if (mcp) return { verb: "mcp", subject: `mcp__${mcpNamePart(mcp.server)}__${mcpNamePart(mcp.tool ?? "*")}` };
+	const mcp = /^mcp__(.+?)(?:__(.+))?$/.exec(rule);
+	if (mcp) return { verb: "mcp", subject: mcpToolGlob(mcp[1], mcp[2]) };
 	const m = /^(\w+)(?:\((.*)\))?$/.exec(rule);
 	if (!m) return undefined;
-	return { verb: m[1].toLowerCase(), subject: m[2] ?? "**" };
+	const verb = m[1].toLowerCase();
+	if (verb === "mcp" && m[2] !== undefined) {
+		const [, server, tool] = /^([^:]*)(?::(.*))?$/.exec(m[2]) ?? [];
+		return { verb, subject: mcpToolGlob(server, tool) };
+	}
+	return { verb, subject: m[2] ?? "**" };
 }
 
-/** The server and tool an MCP rule names, as written; undefined for a bare `Mcp` or any other rule. */
-function mcpRuleNames(rule: string): { server: string; tool?: string } | undefined {
-	const [, server, tool] = /^mcp__(.+?)(?:__(.+))?$/.exec(rule) ?? /^mcp\(([^:]*)(?::(.*))?\)$/i.exec(rule) ?? [];
-	return server === undefined ? undefined : { server, tool };
+function mcpToolGlob(server: string, tool: string | undefined): string {
+	return `mcp__${mcpNamePart(server)}__${mcpNamePart(tool ?? "*")}`;
 }
 
-/** Whether a rule denies the MCP tool `tool` on some server: a bare `Mcp`, `mcp__srv`, `Mcp(srv:*)`, `Mcp(srv:tool)`. */
+/**
+ * Whether a rule denies the MCP tool `tool` on some server: a bare `Mcp`, `mcp__srv`,
+ * `Mcp(srv:*)`, `Mcp(srv:tool)`. A server name can hold `__`, so each `__` of the rule is
+ * tried as where the server ends.
+ */
 export function deniesMcpToolOnSomeServer(rule: string, tool: string): boolean {
-	if (/^mcp$/i.test(rule)) return true;
-	const mcp = mcpRuleNames(rule);
-	return mcp !== undefined && globToRegExp(mcpNamePart(mcp.tool ?? "*")).test(tool);
+	const parts = ruleParts(rule);
+	if (parts?.verb !== "mcp") return false;
+	const pattern = globToRegExp(parts.subject);
+	const ends = [...parts.subject.matchAll(/(?=__)/g)].map((m) => parts.subject.slice(0, m.index));
+	return ["mcp__x", ...ends].some((server) => pattern.test(`${server.replace(/\*/g, "x")}__${tool}`));
 }
 
 const REGEX_META = new Set([".", "+", "^", "$", "{", "}", "(", ")", "|", "[", "]", "\\", "?"]);
