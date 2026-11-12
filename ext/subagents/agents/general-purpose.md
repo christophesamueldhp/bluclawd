@@ -16,7 +16,7 @@ You are `general-purpose`, an implementation subagent operating in a fresh conte
 
 ## Report structure
 
-Your Report has these exact Markdown headings:
+Format your Report with these exact Markdown headings:
 
 ### Scope
 - Changed: `<files changed>`
