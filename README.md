@@ -73,11 +73,11 @@ test/           vitest suites, self-contained — no monorepo, no fixture files
 | `accounts` | `/accounts`, `--models`, `--scoped`; named OAuth/API-key accounts and Active model selection in one chooser |
 | `paste` | bluclawd's paste in the prompt and agent view's composer: a paste over 800 characters or 2 lines shows as `[Pasted text #N +L lines]`, a ctrl+v image as `[Image #N]` (sent as an image), and pasting the same thing again right after shows the text or the image's file |
 
-Prompt assistance defaults to **OpenCode Go / MiMo-V2.6-Flash**, independently of your coding model.
+Prompt assistance defaults to **OpenCode Go / Claude Haiku 5.5**, independently of your coding model.
 Use **`/prompt-assist`** to open the built-in Pi TUI picker, showing the current enabled state
 and model. Its first option turns assistance on or off; the remaining options select any available,
 authenticated Pi chat model, including custom providers. The toggle remains available without model credentials. **`/prompt-assist provider/model`** selects one directly (Tab completes IDs), and
-**`/prompt-assist default`** returns to MiMo. **`/prompt-assist off`** disables both prompt
+**`/prompt-assist default`** returns to Haiku 5.5. **`/prompt-assist off`** disables both prompt
 suggestions and automatic session naming; **`/prompt-assist on`** enables them again. Disabling
 cancels pending assistance requests and clears ghost text, without changing your draft or an
 existing session name. Model selection does not implicitly enable assistance. Both the enabled

@@ -13,7 +13,7 @@ import {
 const directory = () => mkdtempSync(join(tmpdir(), "prompt-assist-"));
 
 describe("prompt assist preferences", () => {
-	it("defaults to MiMo without configuration", () => {
+	it("defaults to Haiku 5.5 without configuration", () => {
 		expect(loadAssistModel(directory())).toBe(DEFAULT_MODEL);
 	});
 
@@ -47,7 +47,7 @@ describe("prompt assist preferences", () => {
 		});
 	});
 
-	it("falls back to MiMo for corrupt or invalid preferences", () => {
+	it("falls back to Haiku 5.5 for corrupt or invalid preferences", () => {
 		const dir = directory();
 		saveAssistModel(dir, DEFAULT_MODEL);
 		for (const value of [
