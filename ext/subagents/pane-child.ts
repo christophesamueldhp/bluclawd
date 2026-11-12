@@ -9,10 +9,11 @@
 import { realpathSync } from "node:fs";
 import { dirname } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { RUN_PANE_ENV, Tmux } from "../../daemon/tmux.ts";
+import { PARENT_ENV, RUN_PANE_ENV, Tmux } from "../../daemon/tmux.ts";
+import { BLOCKING_PROMPT_KINDS } from "../agent-view/self-registration.ts";
 import { SUBAGENT_MESSAGE_TOOL } from "./messages.ts";
 import { textOf } from "./results.ts";
-import { type PaneChildState, paneChildStatePath, readRpcHostSpec } from "./rpc-host.ts";
+import { type PaneChildState, paneChildStatePath, paneParent, readRpcHostSpec } from "./rpc-host.ts";
 import { paneApprovalsUnanswerable } from "./run-approvals.ts";
 import {
 	markGiven,
@@ -131,6 +132,13 @@ export default function paneChild(pi: ExtensionAPI): void {
 		}
 	};
 
+	/** Its orchestrator's pane, which ← goes back to: another once a reopened session took the run over. */
+	let parent = pane.parent;
+	const followParent = () => {
+		parent = paneParent(runDir, generation, pane);
+		process.env[PARENT_ENV] = parent;
+	};
+
 	/** Aborted to block the approvals it waits on; one aborted is replaced, so a later ask may be answered again. */
 	let unanswerable = new AbortController();
 	paneApprovalsUnanswerable.set(unanswerable.signal);
@@ -146,7 +154,7 @@ export default function paneChild(pi: ExtensionAPI): void {
 		}
 		let parentGone = false;
 		try {
-			parentGone = tmux?.hasSession(pane.parent) === false;
+			parentGone = tmux?.hasSession(parent) === false;
 		} catch {
 			// tmux did not answer: checked again next time.
 		}
@@ -201,6 +209,7 @@ export default function paneChild(pi: ExtensionAPI): void {
 				if (!done) give(readRunInbox(runDir, generation));
 			}, CHECK_MS),
 			setInterval(() => {
+				followParent();
 				checkLeft();
 				checkOrphaned();
 			}, SHOWN_CHECK_MS),
@@ -256,11 +265,13 @@ export default function paneChild(pi: ExtensionAPI): void {
 		settle();
 	});
 
-	pi.on("ui_prompt_start", () => {
+	pi.on("ui_prompt_start", (event) => {
+		if (!BLOCKING_PROMPT_KINDS.has(event.kind)) return;
 		state.awaiting = true;
 		save();
 	});
-	pi.on("ui_prompt_end", () => {
+	pi.on("ui_prompt_end", (event) => {
+		if (!BLOCKING_PROMPT_KINDS.has(event.kind)) return;
 		state.awaiting = false;
 		save();
 	});

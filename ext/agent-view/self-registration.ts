@@ -108,7 +108,7 @@ function readSession(source: SessionSource): SessionReading {
 
 /** Blocking prompt kinds: a `custom` overlay (agent view itself, /diff, …) is a view, not a
  *  question waiting on the user. */
-const BLOCKING_PROMPT_KINDS: ReadonlySet<string> = new Set(["select", "confirm", "input", "editor"]);
+export const BLOCKING_PROMPT_KINDS: ReadonlySet<string> = new Set(["select", "confirm", "input", "editor"]);
 
 /**
  * Derives the foreground session's activity (daemon/activity.ts), which its heartbeat reports,

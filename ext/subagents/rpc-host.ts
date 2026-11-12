@@ -56,6 +56,7 @@ export interface RpcHostSpec {
 	/**
 	 * Set for a generation that runs as an interactive pi in a pane of agent view's tmux (ADR-0013): the pane's tmux
 	 * session, which the daemon starts the host in, and its orchestrator's, where a terminal showing it goes back to.
+	 * A session that takes the run over stores its own pane as the orchestrator's ({@link paneParent}).
 	 */
 	pane?: { session: string; parent: string };
 }
@@ -81,7 +82,7 @@ export interface RpcHostState {
 
 /** What a run's pi in a pane stores of its work (pane-child.ts), which its host takes into its state once it exits. */
 export type PaneChildState = Pick<RpcHostState, "sessionFile" | "sessionId" | "outcome" | "reportSeq" | "idle"> & {
-	/** Whether it waits on a dialog of its own, an approval among them, which the user answers in its pane. */
+	/** Whether it waits on a blocking dialog of its own, an approval among them, which the user answers in its pane. */
 	awaiting?: boolean;
 };
 
@@ -168,13 +169,25 @@ export function readRpcHostState(runDir: string): RpcHostState | undefined {
 	}
 }
 
-/** The spec the run's latest generation was launched with, as stored before it queued. */
+/**
+ * The spec the run's latest generation was launched with, as stored before it queued; a session that took the run
+ * over since rewrote its orchestrator's pane.
+ */
 export function readRpcHostSpec(runDir: string): RpcHostSpec | undefined {
 	try {
 		return JSON.parse(readFileSync(specPath(runDir), "utf8")) as RpcHostSpec;
 	} catch {
 		return undefined;
 	}
+}
+
+/**
+ * The orchestrator pane of a run's generation in `pane` now: a session that took the run over after a crash runs in
+ * another pane, which it stores in the run's spec. A spec stored since for another generation is not this one's.
+ */
+export function paneParent(runDir: string, generation: number, pane: NonNullable<RpcHostSpec["pane"]>): string {
+	const spec = readRpcHostSpec(runDir);
+	return (spec?.generation === generation && spec.pane?.parent) || pane.parent;
 }
 
 /** The pid of the host that took generation `generation` of the run, once one did. */
@@ -604,7 +617,10 @@ async function paneHost(
 	const socket = process.env.TMUX?.split(",")[0];
 	if (!socket) return;
 	try {
-		new Tmux(dirname(socket), undefined, { timeoutMs: 2000 }).moveClients(spec.pane.session, spec.pane.parent);
+		new Tmux(dirname(socket), undefined, { timeoutMs: 2000 }).moveClients(
+			spec.pane.session,
+			paneParent(runDir, spec.generation, spec.pane),
+		);
 	} catch {
 		// Its orchestrator's pane is gone, or tmux did not answer: tmux shows another session once this one ends.
 	}

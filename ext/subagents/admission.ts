@@ -382,7 +382,10 @@ export interface RunAdmissionDeps {
 	agentDir: () => string;
 	parentThinkingLevel: () => string;
 	scope: ParentScopeChecks;
-	/** The orchestrator's tmux session, which takes over its runs in tmux from before runs ran on pi's RPC. */
+	/**
+	 * The orchestrator's tmux session, which takes over its runs in tmux from before runs ran on pi's RPC, and becomes the
+	 * orchestrator pane of the runs in panes it recovers.
+	 */
 	pane: () => string | undefined;
 	/** The orchestrator's tmux session when its runs run in panes of their own (ADR-0013); none runs them on pi's RPC. */
 	runPane: () => string | undefined;
@@ -1014,6 +1017,8 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 			const spec = readRpcHostSpec(runDir);
 			if (!definition || spec?.generation !== run.generation) return false;
 			const { workspace } = definition;
+			// A run in a pane follows its orchestrator to the pane its session runs in now (ADR-0008): its spec says which.
+			const pane = spec.pane && { ...spec.pane, parent: deps.pane() ?? spec.pane.parent };
 			deps.scheduler.takeOver(
 				{ ...run, sessionEpoch: scope.sessionEpoch },
 				{
@@ -1035,8 +1040,8 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 							? { workspace, ...(basename(workspace.root) !== run.runId ? { worktreeMade: true } : {}) }
 							: {}),
 						...(run.chain ? { keepWorktree: true } : {}),
-						...(spec.pane ? { parentPane: spec.pane.parent } : {}),
-						recovered: spec,
+						...(pane ? { parentPane: pane.parent } : {}),
+						recovered: pane ? { ...spec, pane } : spec,
 						// Not yet started, it starts only once the session that returned may still start it, as at any turn.
 						recheck: recheckRpc(run.runId, runDir, run.generation, {
 							cwd: ctx.cwd,
