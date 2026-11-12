@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatStatus } from "../ext/help/diagnostics.ts";
+import { formatContext, formatStatus, toolDefinitionChars } from "../ext/help/diagnostics.ts";
 
 const plain = { bold: (s: string) => s, fg: (_c: string, s: string) => s };
 
@@ -74,5 +74,38 @@ describe("/status report", () => {
 		expect(lines).toContain("Model: none selected");
 		expect(lines).toContain("Effort: off (/thinking)");
 		expect(lines).toContain("Auth: not configured");
+	});
+});
+
+describe("/context report", () => {
+	const usage = { model: "anthropic/claude", contextWindow: 200_000, tokens: 20_000, percent: 10 };
+
+	it("shows tool definitions on their own line, outside messages and tool results", () => {
+		const lines = formatContext({ ...usage, systemPromptChars: 4_000, toolDefinitionChars: 24_000 }, plain);
+		expect(lines).toContain("  System prompt incl. project context & skills (est.): ~1.0k");
+		expect(lines).toContain("  Tool definitions (est.): ~6.0k");
+		expect(lines).toContain("  Messages & tool results (est.): ~13.0k");
+	});
+
+	it("omits the tool definitions line for entries recorded before they were measured", () => {
+		const lines = formatContext({ ...usage, systemPromptChars: 4_000 }, plain);
+		expect(lines.join("\n")).not.toContain("Tool definitions");
+		expect(lines).toContain("  Messages & tool results (est.): ~19.0k");
+	});
+
+	it("never shows negative messages when the estimates exceed the total", () => {
+		const lines = formatContext({ ...usage, systemPromptChars: 40_000, toolDefinitionChars: 60_000 }, plain);
+		expect(lines).toContain("  Messages & tool results (est.): ~0");
+	});
+});
+
+describe("tool definition size", () => {
+	it("counts each tool's name, description and schema, not its prompt guidelines", () => {
+		const tools = [
+			{ name: "ab", description: "cde", parameters: { type: "object" }, promptGuidelines: ["in the system prompt"] },
+			{ name: "f", description: "gh", parameters: {} },
+		];
+		// "ab" + "cde" + '{"type":"object"}', then "f" + "gh" + "{}"
+		expect(toolDefinitionChars(tools)).toBe(27);
 	});
 });

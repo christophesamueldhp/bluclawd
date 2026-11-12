@@ -11,6 +11,7 @@
  * `ctx.ui.notify` (which dims everything and does not persist in the session).
  */
 
+import { getCurrentTools } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { getAgentDir, SettingsManager, VERSION } from "@earendil-works/pi-coding-agent";
 import { commandBlock } from "../_shared/command-block.ts";
@@ -57,12 +58,15 @@ export function formatStatus(
 
 const BAR_WIDTH = 20;
 
-interface ContextData {
+/** Snapshot rendered by `/context`. Plain data so it survives in the session file. */
+export interface ContextData {
 	model?: string;
 	contextWindow?: number;
 	tokens?: number | null;
 	percent?: number | null;
 	systemPromptChars?: number;
+	/** Absent in entries written before tool definitions were measured. */
+	toolDefinitionChars?: number;
 }
 
 function formatTokens(value: number): string {
@@ -71,40 +75,77 @@ function formatTokens(value: number): string {
 	return String(value);
 }
 
+interface ToolDefinitionText {
+	name: string;
+	description: string;
+	parameters: unknown;
+}
+
+/**
+ * Characters of one tool definition, also used by `scripts/prompt-footprint.ts`. Prompt
+ * guidelines are left out: they are part of the system prompt.
+ */
+export function toolChars(tool: ToolDefinitionText): number {
+	return tool.name.length + tool.description.length + JSON.stringify(tool.parameters).length;
+}
+
+export function toolDefinitionChars(tools: readonly ToolDefinitionText[]): number {
+	return tools.reduce((sum, tool) => sum + toolChars(tool), 0);
+}
+
+/** Exported pure for tests; `theme` is the only styling dependency. */
+export function formatContext(
+	data: ContextData | undefined,
+	theme: { bold(s: string): string; fg(color: "dim", s: string): string },
+): string[] {
+	const lines: string[] = [theme.bold("Context")];
+
+	if (!data?.model || data.contextWindow === undefined) {
+		lines.push("Context usage is unknown (no model selected or the model has no context window).");
+		return lines;
+	}
+
+	lines.push(`${theme.fg("dim", "Window:")} ${formatTokens(data.contextWindow)}`);
+
+	if (data.tokens === null || data.tokens === undefined || data.percent === null || data.percent === undefined) {
+		lines.push(`${theme.fg("dim", "In context:")} unknown until the next assistant response`);
+		return lines;
+	}
+
+	const filled = Math.min(BAR_WIDTH, Math.max(0, Math.round((data.percent / 100) * BAR_WIDTH)));
+	const bar = `[${"█".repeat(filled)}${"░".repeat(BAR_WIDTH - filled)}]`;
+	lines.push(`${theme.fg("dim", "In context:")} ${formatTokens(data.tokens)} (${data.percent.toFixed(1)}%) ${bar}`);
+
+	// Four characters per token, pi's own rough estimate: a hint, not an accounting figure.
+	const systemPromptEstimate = Math.round((data.systemPromptChars ?? 0) / 4);
+	const toolDefinitionsEstimate = Math.round((data.toolDefinitionChars ?? 0) / 4);
+	lines.push(
+		`  ${theme.fg("dim", "System prompt incl. project context & skills (est.):")} ~${formatTokens(systemPromptEstimate)}`,
+	);
+	if (data.toolDefinitionChars !== undefined) {
+		lines.push(`  ${theme.fg("dim", "Tool definitions (est.):")} ~${formatTokens(toolDefinitionsEstimate)}`);
+	}
+	lines.push(
+		`  ${theme.fg("dim", "Messages & tool results (est.):")} ~${formatTokens(Math.max(data.tokens - systemPromptEstimate - toolDefinitionsEstimate, 0))}`,
+	);
+	lines.push(
+		`${theme.fg("dim", "Free:")} ${formatTokens(Math.max(data.contextWindow - data.tokens, 0))} (${(100 - data.percent).toFixed(1)}%)`,
+	);
+	return lines;
+}
+
 export function registerDiagnostics(pi: ExtensionAPI): void {
-	pi.registerEntryRenderer<ContextData>("bluclawd:context", (entry, _options, theme) => {
-		const data = entry.data;
-		const lines: string[] = [theme.bold("Context")];
-
-		if (!data?.model || data.contextWindow === undefined) {
-			lines.push("Context usage is unknown (no model selected or the model has no context window).");
-			return commandBlock(lines);
-		}
-
-		lines.push(`${theme.fg("dim", "Window:")} ${formatTokens(data.contextWindow)}`);
-
-		if (data.tokens === null || data.tokens === undefined || data.percent === null || data.percent === undefined) {
-			lines.push(`${theme.fg("dim", "In context:")} unknown until the next assistant response`);
-			return commandBlock(lines);
-		}
-
-		const filled = Math.min(BAR_WIDTH, Math.max(0, Math.round((data.percent / 100) * BAR_WIDTH)));
-		const bar = `[${"█".repeat(filled)}${"░".repeat(BAR_WIDTH - filled)}]`;
-		lines.push(`${theme.fg("dim", "In context:")} ${formatTokens(data.tokens)} (${data.percent.toFixed(1)}%) ${bar}`);
-
-		// Four characters per token, pi's own rough estimate: a hint, not an accounting figure.
-		const systemPromptEstimate = Math.round((data.systemPromptChars ?? 0) / 4);
-		lines.push(
-			`  ${theme.fg("dim", "System prompt incl. project context & skills (est.):")} ~${formatTokens(systemPromptEstimate)}`,
-		);
-		lines.push(
-			`  ${theme.fg("dim", "Messages & tool results (est.):")} ~${formatTokens(Math.max(data.tokens - systemPromptEstimate, 0))}`,
-		);
-		lines.push(
-			`${theme.fg("dim", "Free:")} ${formatTokens(Math.max(data.contextWindow - data.tokens, 0))} (${(100 - data.percent).toFixed(1)}%)`,
-		);
-		return commandBlock(lines);
+	// The tools as the last request declared them, after loadout hooks rewrote their descriptions,
+	// so they match the request `getContextUsage()` reports on. Pi hides codemode-only declarations
+	// after this event, so in that mode they are still counted.
+	let declaredToolChars: number | undefined;
+	pi.on("context_with_system", (event) => {
+		declaredToolChars = toolDefinitionChars(getCurrentTools(event.messages));
 	});
+
+	pi.registerEntryRenderer<ContextData>("bluclawd:context", (entry, _options, theme) =>
+		commandBlock(formatContext(entry.data, theme)),
+	);
 
 	pi.registerEntryRenderer<StatusData>("bluclawd:status", (entry, _options, theme) =>
 		commandBlock(entry.data ? formatStatus(entry.data, theme) : []),
@@ -145,12 +186,17 @@ export function registerDiagnostics(pi: ExtensionAPI): void {
 		handler: async (_args, ctx) => {
 			const model = ctx.model;
 			const usage = ctx.getContextUsage();
+			// Before this process sends a request (a resumed session), the active tools as registered.
+			const active = new Set(pi.getActiveTools());
+			const registeredToolChars = () =>
+				toolDefinitionChars(pi.getAllTools().filter((tool) => active.has(tool.name)));
 			pi.appendEntry<ContextData>("bluclawd:context", {
 				model: model ? `${model.provider}/${model.id}` : undefined,
 				contextWindow: usage?.contextWindow,
 				tokens: usage?.tokens,
 				percent: usage?.percent,
 				systemPromptChars: ctx.getSystemPrompt().length,
+				toolDefinitionChars: declaredToolChars ?? registeredToolChars(),
 			});
 		},
 	});
