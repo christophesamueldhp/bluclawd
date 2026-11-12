@@ -613,8 +613,9 @@ rules to the tools of the servers pi connects: MCP is pi's own (`mcp.json`, `/mc
 goes through `tool_call`, a `codemode` script's included, and bluclawd adds no MCP tools of its own.
 Server and tool are matched the way pi names the tools, any character other than a letter, digit or
 `_` turned into `_`, so `mcp__dev-radius__*` as written in `mcp.json` blocks `mcp__dev_radius__search`.
-pi gives an over-long or colliding name a hash suffix: an exact-tool rule can miss that tool, while
-`mcp__server__*` still holds. A server-level rule also covers that server's resources: pi's
+pi gives an over-long or colliding name a hash suffix: an exact-tool rule can miss that tool, and so
+can `mcp__server__*` once the spelled server name reaches 50 characters, as the shortened name then
+loses the `__` after it. A server-level rule also covers that server's resources: pi's
 `list_mcp_resources`, `list_mcp_resource_templates` and `read_mcp_resource` with a `server` are
 judged as `mcp__server__<that tool>`, and a list without `server`, which lists every server, is
 blocked while a rule denies that listing on any server (the model is told to pass `server`). `dir/**` covers

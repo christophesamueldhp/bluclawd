@@ -17,7 +17,7 @@ import { existsSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { resolveToCwd } from "../_shared/path-resolve.ts";
 
-/** Lowercase tool name → rule verb. MCP tools map to `Mcp(server:tool)` in `verbFor()`. */
+/** Lowercase tool name → rule verb. MCP tools get `Mcp` in `verbFor()`, matched by their whole name. */
 const VERB: Record<string, string> = {
 	bash: "Bash",
 	read: "Read",
@@ -54,11 +54,11 @@ function ruleVerbCovers(ruleVerb: string, verb: string): boolean {
 }
 
 /**
- * pi's spelling of an MCP name part (`createMcpToolName`): anything but a letter, digit or
- * `_` becomes `_`. `*` is kept as a glob.
+ * An MCP tool's name as pi spells it (`createMcpToolName`): anything but a letter, digit or
+ * `_` becomes `_`. `*` is kept as a glob, so a rule compiles through this too.
  */
-export function mcpNamePart(s: string): string {
-	return s.replace(/[^A-Za-z0-9_*]/g, "_");
+export function mcpToolName(server: string, tool = "*"): string {
+	return `mcp__${server}__${tool}`.replace(/[^A-Za-z0-9_*]/g, "_");
 }
 
 /**
@@ -69,32 +69,33 @@ export function mcpNamePart(s: string): string {
  */
 function ruleParts(rule: string): { verb: string; subject: string } | undefined {
 	const mcp = /^mcp__(.+?)(?:__(.+))?$/.exec(rule);
-	if (mcp) return { verb: "mcp", subject: mcpToolGlob(mcp[1], mcp[2]) };
+	if (mcp) return { verb: "mcp", subject: mcpToolName(mcp[1], mcp[2]) };
 	const m = /^(\w+)(?:\((.*)\))?$/.exec(rule);
 	if (!m) return undefined;
 	const verb = m[1].toLowerCase();
 	if (verb === "mcp" && m[2] !== undefined) {
-		const [, server, tool] = /^([^:]*)(?::(.*))?$/.exec(m[2]) ?? [];
-		return { verb, subject: mcpToolGlob(server, tool) };
+		const colon = m[2].indexOf(":");
+		if (colon === -1) return { verb, subject: mcpToolName(m[2].trim()) };
+		return { verb, subject: mcpToolName(m[2].slice(0, colon).trim(), m[2].slice(colon + 1).trim()) };
 	}
 	return { verb, subject: m[2] ?? "**" };
 }
 
-function mcpToolGlob(server: string, tool: string | undefined): string {
-	return `mcp__${mcpNamePart(server)}__${mcpNamePart(tool ?? "*")}`;
-}
-
 /**
- * Whether a rule denies the MCP tool `tool` on some server: a bare `Mcp`, `mcp__srv`,
- * `Mcp(srv:*)`, `Mcp(srv:tool)`. A server name can hold `__`, so each `__` of the rule is
- * tried as where the server ends.
+ * Whether a rule denies pi's resource tool `resourceTool` on some server, i.e. matches
+ * `mcp__<server>__<resourceTool>` for some spelled server name: `mcp__srv`, `Mcp(*:x*)` and
+ * `Mcp(srv:list_mcp_resources)` do for `list_mcp_resources`, `Mcp(srv:get_me)` does not.
  */
-export function deniesMcpToolOnSomeServer(rule: string, tool: string): boolean {
+export function deniesResourceToolOnSomeServer(rule: string, resourceTool: string): boolean {
 	const parts = ruleParts(rule);
 	if (parts?.verb !== "mcp") return false;
 	const pattern = globToRegExp(parts.subject);
-	const ends = [...parts.subject.matchAll(/(?=__)/g)].map((m) => parts.subject.slice(0, m.index));
-	return ["mcp__x", ...ends].some((server) => pattern.test(`${server.replace(/\*/g, "x")}__${tool}`));
+	// No server list is at hand, so sample one name per way the glob can end the server part:
+	// each prefix of it, with `x` standing in for every `*`. `mcp__x` serves a bare `Mcp` (`**`).
+	const prefixes = [...parts.subject].map((_, i) => parts.subject.slice(0, i + 1).replace(/\*/g, "x"));
+	return ["mcp__x", ...prefixes]
+		.filter((serverPrefix) => /^mcp__\w+$/.test(serverPrefix))
+		.some((serverPrefix) => pattern.test(`${serverPrefix}__${resourceTool}`));
 }
 
 const REGEX_META = new Set([".", "+", "^", "$", "{", "}", "(", ")", "|", "[", "]", "\\", "?"]);

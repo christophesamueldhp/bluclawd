@@ -110,6 +110,13 @@ describe("deniedBy", () => {
 		expect(denied(["Mcp(github:get-me)"], "mcp__github__get_mex", {})).toBe(false);
 	});
 
+	it("reads `Mcp(server:tool)` around spaces", () => {
+		for (const rule of ["Mcp(srv: tool)", "Mcp( srv :*)", "Mcp( srv )"]) {
+			expect(denied([rule], "mcp__srv__tool", {}), rule).toBe(true);
+		}
+		expect(denied(["Mcp(srv: tool)"], "mcp__srv__other", {})).toBe(false);
+	});
+
 	it("leaves a longer command name alone, and ungoverned tools", () => {
 		expect(denied(["Bash(ls *)"], "bash", { command: "lsof" })).toBe(false);
 		expect(denied(["Bash(**)"], "task_stop", {})).toBe(false);
@@ -478,7 +485,19 @@ describe("the extension", () => {
 		await listing.handlers.session_start({}, listing.ctx);
 		expect((await listing.call("list_mcp_resources", {}))?.block).toBe(true);
 		expect(await listing.call("list_mcp_resource_templates", {})).toBeUndefined();
-		for (const deny of [[], ["mcp__github__delete_*"], ["Mcp(github:get_me)"], ["Bash(rm *)"]]) {
+		// So does a tool glob that some server's listing falls under.
+		for (const [rule, server] of [
+			["mcp__srv__x*", "srv--xy"],
+			["Mcp(*:x*)", "a--xyz"],
+			["Mcp(*:delete_*)", "a--delete-me"],
+			["mcp__github__delete_*", "github--delete-x"],
+		]) {
+			const { handlers, ctx, call } = load({ permissions: { deny: [rule] } });
+			await handlers.session_start({}, ctx);
+			expect((await call("list_mcp_resources", { server }))?.block, `${rule} vs ${server}`).toBe(true);
+			expect((await call("list_mcp_resources", {}))?.block, rule).toBe(true);
+		}
+		for (const deny of [[], ["mcp__github__delete_repo"], ["Mcp(github:get_me)"], ["Bash(rm *)"]]) {
 			const { handlers, ctx, call } = load({ permissions: { deny } });
 			await handlers.session_start({}, ctx);
 			expect(await call("list_mcp_resources", {}), JSON.stringify(deny)).toBeUndefined();
