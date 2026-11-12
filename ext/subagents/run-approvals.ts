@@ -6,14 +6,22 @@
  * id for the dialog, and gives pi the answer the orchestrator stores beside it. The orchestrator notes again and again
  * that it still sees the request: one nobody saw for a while has no one to ask any more, and the host answers it as
  * blocked. A request ends once answered, or withdrawn by the host, and nothing answers it after. A run in a pane of its
- * own (ADR-0013) asks the user there, as any pi asks, and its orchestrator's panel says it needs input.
+ * own (ADR-0013) asks the user there, as any pi asks, and its orchestrator's panel says it needs input; once its
+ * orchestrator is gone and no terminal shows its pane, pane-child.ts blocks it as the host would.
  */
 
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import type { ExtensionUIContext, ToolCallEventResult } from "@earendil-works/pi-coding-agent";
 import { RUN_PANE_ENV } from "../../daemon/tmux.ts";
+import { sharedRef } from "../_shared/global-state.ts";
 import { writeAtomicPrivateFile } from "./storage.ts";
+
+/**
+ * In a run's pi in a pane: aborted once no one is left to answer its approvals (pane-child.ts), as the host blocks
+ * them on pi's RPC. Shared, since each of the pi's extensions loads its own copy of this module.
+ */
+export const paneApprovalsUnanswerable = sharedRef<AbortSignal | undefined>("run-pane-unanswerable", undefined);
 
 /** What a run asks to do, and to what. */
 export interface RunApprovalAsk {
@@ -50,7 +58,9 @@ export async function askRunApproval(
 	const title = process.env[RUN_PANE_ENV]
 		? `Allow this subagent ${ask.action} ${ask.target}?`
 		: `${TITLE_PREFIX}${JSON.stringify({ action: ask.action, target: ask.target })}`;
-	const answer = await ui.select(title, [ALLOW, DENY], { signal });
+	const unanswerable = process.env[RUN_PANE_ENV] ? paneApprovalsUnanswerable.get() : undefined;
+	const ends = [signal, unanswerable].filter((ending): ending is AbortSignal => ending !== undefined);
+	const answer = await ui.select(title, [ALLOW, DENY], { signal: ends.length ? AbortSignal.any(ends) : undefined });
 	if (answer === ALLOW) return undefined;
 	if (answer === DENY) return { block: true, reason: `Refused: the user did not allow ${ask.action} ${ask.target}.` };
 	return {
