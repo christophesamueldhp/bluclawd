@@ -107,7 +107,7 @@ describe.skipIf(!hasTmux)("the workspace of an RPC run that edits", () => {
 	it("leaves nothing in the repository when it never started", async () => {
 		const real = await startOrchestrator();
 		pi = real;
-		addSettings(real, { subagents: { maxActive: 1 } });
+		addSettings(real, { subagents: { panes: false, maxActive: 1 } });
 		const repo = real.cwd;
 		dirtyRepository(repo);
 		const gate = join(real.cwd, "..", "first.go");

@@ -136,7 +136,7 @@ describe.skipIf(!hasTmux)("the daemon's queue of RPC runs", () => {
 	it("gives a freed slot to the orchestrator served least recently, a Resume taking its turn as a launch does", async () => {
 		const real = await startOrchestrator();
 		pi = real;
-		addSettings(real, { subagents: { maxActive: 2 } });
+		addSettings(real, { subagents: { panes: false, maxActive: 2 } });
 		const gate = (name: string) => join(real.cwd, `${name}.go`);
 		const alpha = ["a1", "a2", "a3", "a4"];
 		real.script("beta", [
@@ -181,7 +181,7 @@ describe.skipIf(!hasTmux)("the daemon's queue of RPC runs", () => {
 	it("starts a queued run as admitted but held to what its orchestrator denies by its turn, if it may start at all", async () => {
 		const real = await startOrchestrator();
 		pi = real;
-		addSettings(real, { subagents: { maxActive: 1 } });
+		addSettings(real, { subagents: { panes: false, maxActive: 1 } });
 		const auditor = (instructions: string, model: string, thinking: string) =>
 			writeFileSync(
 				join(real.agentDir, "agents", "auditor.md"),

@@ -189,6 +189,7 @@ export function createGenerationsFixture(earlier?: { cwd: string; agentDir: stri
 		parentThinkingLevel: () => "off",
 		scope,
 		pane: () => ORCHESTRATOR_PANE,
+		runPane: () => undefined,
 		tools: () => [],
 		registeredTools: () => [],
 		ensureQueue: async () => false,

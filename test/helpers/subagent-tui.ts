@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -100,6 +100,8 @@ export async function createSubagentTui(
 	initTheme("dark");
 	const dirs = [mkdtempSync(join(tmpdir(), "bluclawd-tui-cwd-")), mkdtempSync(join(tmpdir(), "bluclawd-tui-agent-"))];
 	const [cwd, agentDir] = dirs;
+	// Runs on pi's RPC: none of these tests drives a run in a pane (ADR-0013).
+	writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ subagents: { panes: false } }));
 	let offset = 0;
 
 	const widgets = new Map<string, { component: Rendered; placement: string }>();

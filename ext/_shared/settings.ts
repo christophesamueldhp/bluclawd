@@ -64,3 +64,8 @@ export function remotePort(sm: SettingsManager): number {
 	const port = (merged(sm).remote as { port?: unknown } | undefined)?.port;
 	return typeof port === "number" && Number.isInteger(port) && port > 0 && port < 65536 ? port : DEFAULT_PORT;
 }
+
+/** `subagents.panes`: whether a run started from a pane runs in a pane of its own (ADR-0013), or on pi's RPC. */
+export function runsInPanes(sm: SettingsManager): boolean {
+	return (merged(sm).subagents as { panes?: unknown } | undefined)?.panes !== false;
+}

@@ -5,12 +5,14 @@
  * dialogs, which pi's RPC hands the run's host; the host stores it in the run's directory, by generation and by pi's
  * id for the dialog, and gives pi the answer the orchestrator stores beside it. The orchestrator notes again and again
  * that it still sees the request: one nobody saw for a while has no one to ask any more, and the host answers it as
- * blocked. A request ends once answered, or withdrawn by the host, and nothing answers it after.
+ * blocked. A request ends once answered, or withdrawn by the host, and nothing answers it after. A run in a pane of its
+ * own (ADR-0013) asks the user there, as any pi asks, and its orchestrator's panel says it needs input.
  */
 
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import type { ExtensionUIContext, ToolCallEventResult } from "@earendil-works/pi-coding-agent";
+import { RUN_PANE_ENV } from "../../daemon/tmux.ts";
 import { writeAtomicPrivateFile } from "./storage.ts";
 
 /** What a run asks to do, and to what. */
@@ -44,7 +46,10 @@ export async function askRunApproval(
 	ask: RunApprovalAsk,
 	signal: AbortSignal | undefined,
 ): Promise<ToolCallEventResult | undefined> {
-	const title = `${TITLE_PREFIX}${JSON.stringify({ action: ask.action, target: ask.target })}`;
+	// In a pane (ADR-0013) the user reads it there; on pi's RPC, the host reads it back.
+	const title = process.env[RUN_PANE_ENV]
+		? `Allow this subagent ${ask.action} ${ask.target}?`
+		: `${TITLE_PREFIX}${JSON.stringify({ action: ask.action, target: ask.target })}`;
 	const answer = await ui.select(title, [ALLOW, DENY], { signal });
 	if (answer === ALLOW) return undefined;
 	if (answer === DENY) return { block: true, reason: `Refused: the user did not allow ${ask.action} ${ask.target}.` };

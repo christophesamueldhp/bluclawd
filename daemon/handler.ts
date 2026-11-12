@@ -313,6 +313,11 @@ export async function handleIpcRequest(supervisor: ServerSupervisor, request: Se
 				runQueue.release(request.run);
 				return { type: "run_queue_result", ok: true };
 			}
+			if (request.action === "take_env") {
+				const env = runQueue.takePaneEnv(request.pane);
+				if (!env) return { type: "error", ok: false, error: `no run's environment waits for pane ${request.pane}` };
+				return { type: "run_queue_result", ok: true, env };
+			}
 			try {
 				return { type: "run_queue_result", ok: true, hostPid: runQueue.launch(request.run, request.host) };
 			} catch (error) {

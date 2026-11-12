@@ -3,6 +3,7 @@ import {
 	type ExtensionContext,
 	getAgentDir,
 	type InlineExtension,
+	SettingsManager,
 	type ToolLoadout,
 	type ToolLoadoutChanges,
 } from "@earendil-works/pi-coding-agent";
@@ -10,12 +11,14 @@ import { isKeyRelease, matchesKey, type TUI } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import type { SessionMessage } from "../../daemon/ipc/protocol.ts";
 import { OrchestratorClient } from "../../daemon/orchestrator-client.ts";
+import { runPaneSession } from "../../daemon/run-queue.ts";
 import { endPane, runParent, Tmux } from "../../daemon/tmux.ts";
 import { notifyAgentTasksChanged, publishAgentTasks } from "../_shared/agent-tasks.ts";
 import { commandBlock } from "../_shared/command-block.ts";
 import { focusedComponent, isPromptEditor } from "../_shared/focus.ts";
 import { sharedRef } from "../_shared/global-state.ts";
 import { pistatuslineDrawsFooter } from "../_shared/pistatusline.ts";
+import { runsInPanes } from "../_shared/settings.ts";
 import { STATUS_KEYS } from "../_shared/status-keys.ts";
 import { publishSubagentPanel } from "../_shared/subagent-panel.ts";
 import { timed } from "../_shared/timing.ts";
@@ -77,6 +80,8 @@ const relaysGiven = sharedRef("subagentRelaysGiven", new Set<string>()).get();
 const ENDED_SHOWN_MS = 30_000;
 /** How many open runs `subagent_status` describes at once. */
 const MAX_STATUS_RUNS = 30;
+/** How long opening a finished run waits for the pane its Resume runs in, before saying it waits for its turn. */
+const PANE_OPEN_WAIT_MS = 5000;
 const timedTmux = (): Tmux => new Tmux(undefined, undefined, { timeoutMs: 2000 });
 const SUBAGENT_DESCRIPTION_LEAD = "Delegate a task to a child agent";
 // Wording follows Codex's "After you delegate" block and Claude Code's harness text (docs/research/subagents-ux-and-waiting.md).
@@ -310,6 +315,15 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			}
 		};
 
+		/** This pane, while its runs run in panes of their own: the user's `subagents.panes` may have them on pi's RPC. */
+		const runPane = (): string | undefined => {
+			const ctx = parentScope.context();
+			if (!pane || !ctx) return undefined;
+			const settings = SettingsManager.create(ctx.cwd, resolveAgentDir(), {
+				projectTrusted: ctx.isProjectTrusted(),
+			});
+			return runsInPanes(settings) ? pane : undefined;
+		};
 		const slots = daemonRunSlots();
 		const { scheduler, directory, messageFromParent, resumeFromParent, pullReports, retellReport } =
 			createGenerations({
@@ -332,6 +346,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			parentThinkingLevel: () => pi.getThinkingLevel(),
 			scope: parentScope,
 			pane: () => pane,
+			runPane,
 			tools: () => (latestLoadout ? orchestratorTools(latestLoadout) : []),
 			registeredTools: () => latestLoadout?.registered.map((tool) => tool.name) ?? [],
 			ensureQueue: () => slots.ensure(),
@@ -423,7 +438,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 				ctx.ui.notify("That run belongs to an earlier session and can no longer be opened.", "warning");
 				return undefined;
 			}
-			if (run.backend === "rpc") return openRpcRun(run, ctx);
+			if (run.backend === "rpc") return runPane() ? openPaneRun(run, ctx) : openRpcRun(run, ctx);
 			// A run in tmux from before runs ran on pi's RPC: its pane while it is open, else its history only.
 			if (!run.pane || isTerminalSubagentStatus(run.status)) {
 				pi.appendEntry(RUN_CONVERSATION_ENTRY, { lines: intervention.conversation(run) });
@@ -436,6 +451,46 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 				ctx.ui.notify(`Could not open ${run.name ?? runId}: ${Tmux.reason(error)}`, "warning");
 			}
 			return Promise.resolve();
+		};
+
+		/**
+		 * Opens a run from an orchestrator in a pane (ADR-0013): its generation's pane while it runs in one. A finished
+		 * run resumes in a pane for the user to type in, opened once its turn in the queue comes; one still queued opens
+		 * once it runs. A generation on pi's RPC, launched from no pane, has none: its conversation shows here instead.
+		 */
+		const openPaneRun = async (run: SubagentRunRecord, ctx: ExtensionContext): Promise<void> => {
+			const label = run.name ?? run.runId;
+			const tmux = timedTmux();
+			const show = async (generation: number) => {
+				const name = runPaneSession(run.runId, generation);
+				if (!(await tmux.hasSessionAsync(name).catch(() => false))) return false;
+				try {
+					showRun(name);
+				} catch (error) {
+					ctx.ui.notify(`Could not open ${label}: ${Tmux.reason(error)}`, "warning");
+				}
+				return true;
+			};
+			if (await show(run.generation)) return;
+			if (!isTerminalSubagentStatus(run.status)) {
+				if (run.status === "starting")
+					ctx.ui.notify(`${label} waits for its turn; open it again once it runs.`, "info");
+				else await openRpcRun(run, ctx);
+				return;
+			}
+			if (!isResumableSubagentStatus(run.status)) return openRpcRun(run, ctx);
+			const resumed = await admission.resume(run, () => "", ctx, { from: "user", typed: true });
+			if (!resumed.ok) {
+				ctx.ui.notify(resumed.error, "warning");
+				// It cannot resume now: its conversation shows here instead, as for a run with no pane.
+				return openRpcRun(run, ctx);
+			}
+			const generation = resumed.handle.record.generation;
+			for (const until = Date.now() + PANE_OPEN_WAIT_MS; Date.now() < until; ) {
+				if (await show(generation)) return;
+				await new Promise((resolve) => setTimeout(resolve, 200));
+			}
+			ctx.ui.notify(`${label} waits for its turn; open it again once it runs.`, "info");
 		};
 
 		/**

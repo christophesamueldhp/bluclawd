@@ -1,5 +1,7 @@
 # Run subagents through pi RPC with workspace isolation
 
+Revised by ADR-0013: from an orchestrator in a pane, a run's generation runs as an interactive pi in a pane of its own, held to everything below. Only the process that runs it changes, and its approvals are asked in its pane.
+
 On 2026-11-10, the user accepted pi RPC as the direction for running subagent sessions and workspace isolation for delegated work, to retain pi's execution model while reducing idle-process overhead and conflicting edits. This revises ADR-0006's requirement that every run be an interactive pi in tmux and ADR-0003's shared-checkout-only decision. It is implemented: since #311 every new run runs on pi's RPC, and no run starts in tmux.
 
 ## Accepted behavior

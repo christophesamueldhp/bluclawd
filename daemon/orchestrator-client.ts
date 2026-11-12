@@ -75,6 +75,7 @@ interface AnyResponse {
 	id?: string;
 	granted?: boolean;
 	hostPid?: number;
+	env?: Record<string, string>;
 	collaboration?: Collaboration;
 	to?: CollaborationMember;
 	current?: boolean;
@@ -319,6 +320,13 @@ export class OrchestratorClient {
 		const res = await this.request({ type: "run_queue", action: "launch", run, host });
 		if (res.type !== "run_queue_result" || res.hostPid === undefined) throw new Error(OUT_OF_DATE);
 		return res.hostPid;
+	}
+
+	/** From a run's host in pane `pane`: the environment its run was launched with, which the daemon gives once. */
+	async takeRunEnv(pane: string): Promise<Record<string, string>> {
+		const res = await this.request({ type: "run_queue", action: "take_env", pane });
+		if (res.type !== "run_queue_result" || !res.env) throw new Error(OUT_OF_DATE);
+		return res.env;
 	}
 
 	/** Gives up run `run`'s claim, or its slot before it launched. */

@@ -382,6 +382,8 @@ export interface RunAdmissionDeps {
 	scope: ParentScopeChecks;
 	/** The orchestrator's tmux session, which takes over its runs in tmux from before runs ran on pi's RPC. */
 	pane: () => string | undefined;
+	/** The orchestrator's tmux session when its runs run in panes of their own (ADR-0013); none runs them on pi's RPC. */
+	runPane: () => string | undefined;
 	/** The tools the orchestrator has, which a role may name. */
 	tools: () => readonly string[];
 	/** Every tool the orchestrator's pi registered, active or not. */
@@ -407,6 +409,8 @@ export interface ResumeChanges {
 	from?: "user";
 	/** Set when the Resume is a step of the run's chain, which releases the worktree once the chain settles. */
 	chainStep?: true;
+	/** Set when the user opened the run to type its instruction in its pane: the Resume starts with no task. */
+	typed?: true;
 }
 
 export interface RunAdmission {
@@ -631,8 +635,10 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 				`its worktree ${root} is in use by ${formatRunLabel(occupant)}: no two runs work in one worktree at once.`,
 			);
 		}
-		const task = buildPrompt();
-		const invalidTask = invalidTaskText(task);
+		// One the user types in its pane has no task until they do.
+		const typed = changes.typed === true && deps.runPane() !== undefined;
+		const task = typed ? "" : buildPrompt();
+		const invalidTask = typed ? undefined : invalidTaskText(task);
 		if (invalidTask) return refuse.unavailable(invalidTask);
 		const model = { provider: childModel.model.provider, modelId: childModel.model.id, thinkingLevel };
 		const definition: RunDefinition = {
@@ -668,6 +674,8 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 					...(changes.from ? { taskFrom: changes.from } : {}),
 					...(changes.chainStep ? { keepWorktree: true } : {}),
 					...(definition.workspace ? { workspace: definition.workspace } : {}),
+					...paneOf(),
+					...(typed ? { typed: true as const } : {}),
 					recheck: recheckRpc(current.runId, runDir, generation, { cwd: ctx.cwd, trusted: projectTrusted }),
 				},
 			},
@@ -683,6 +691,12 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 	 * turn in the queue comes: its scope or branch is gone, or its delegation is denied now. What its orchestrator
 	 * can no longer give, or now denies, is stored in the generation's definition, which its pi enforces.
 	 */
+	/** A generation runs in a pane of its own while its orchestrator runs in one (ADR-0013), else on pi's RPC. */
+	const paneOf = (): { parentPane?: string } => {
+		const parentPane = deps.runPane();
+		return parentPane ? { parentPane } : {};
+	};
+
 	const recheckRpc =
 		(runId: string, runDir: string, generation: number, parent: { cwd: string; trusted: boolean }) =>
 		(): string | undefined => {
@@ -967,6 +981,7 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 						...(isolated ? { workspace: isolated } : {}),
 						...(typeof shared === "object" ? { worktreeMade: true } : {}),
 						...(chain ? { keepWorktree: true } : {}),
+						...paneOf(),
 						recheck: recheckRpc(runId, storage.runDir, 0, { cwd: ctx.cwd, trusted: projectTrusted }),
 					},
 				},
@@ -1018,6 +1033,7 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 							? { workspace, ...(basename(workspace.root) !== run.runId ? { worktreeMade: true } : {}) }
 							: {}),
 						...(run.chain ? { keepWorktree: true } : {}),
+						...(spec.pane ? { parentPane: spec.pane.parent } : {}),
 						recovered: spec,
 						// Not yet started, it starts only once the session that returned may still start it, as at any turn.
 						recheck: recheckRpc(run.runId, runDir, run.generation, {
