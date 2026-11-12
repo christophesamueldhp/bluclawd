@@ -13,12 +13,17 @@ import { randomUUID } from "node:crypto";
 import { existsSync, linkSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { parseSessionEntries, type SessionEntry, SettingsManager } from "@earendil-works/pi-coding-agent";
+import {
+	DefaultPackageManager,
+	parseSessionEntries,
+	type SessionEntry,
+	SettingsManager,
+} from "@earendil-works/pi-coding-agent";
 import type { SessionMessage, SessionUsage } from "../../daemon/ipc/protocol.ts";
 import { OrchestratorClient } from "../../daemon/orchestrator-client.ts";
 import { processAlive, processGroupAlive } from "../../daemon/processes.ts";
 import { runMarker } from "../../daemon/run-members.ts";
-import type { RunHostLaunch } from "../../daemon/run-queue.ts";
+import { type RunHostLaunch, runPaneSession } from "../../daemon/run-queue.ts";
 import * as forkSettings from "../_shared/settings.ts";
 import {
 	endRunProcesses,
@@ -34,6 +39,7 @@ import {
 	generationHost,
 	prepareRpcHost,
 	type RpcHostSpec,
+	readPaneChildState,
 	readRpcHostState,
 	runGroupAlive,
 	stopRpcHost,
@@ -78,6 +84,7 @@ import { sessionUsage } from "./usage.ts";
  */
 const RPC_PROVIDER_EXTENSIONS_ENV = "BLUCLAWD_RPC_PROVIDER_EXTENSIONS";
 const CHILD_EXTENSION = fileURLToPath(new URL("./rpc-child.ts", import.meta.url));
+const PANE_CHILD_EXTENSION = fileURLToPath(new URL("./pane-child.ts", import.meta.url));
 
 /** pi's tools that only read. */
 const READ_TOOLS = ["read", "grep", "find", "ls"];
@@ -111,6 +118,13 @@ export interface RpcLaunch {
 	projectTrusted: boolean;
 	/** The saved session a Resume reopens; absent at the launch, which starts a fresh one. */
 	sessionFile?: string;
+	/**
+	 * The orchestrator's tmux session, when it runs in a pane: the generation then runs as an interactive pi in a pane
+	 * of its own, which the user can open (ADR-0013). Without one, it runs on pi's RPC.
+	 */
+	parentPane?: string;
+	/** Set on a Resume the user opened to type in: its pane starts with no task, and the user's first prompt is it. */
+	typed?: true;
 	/** Set when a Resume's instruction is the user's own; otherwise the task is its orchestrator's. */
 	taskFrom?: "user";
 	/** The worktree of a run that edits, made at its launch, or of its chain; its `cwd` is in it. */
@@ -295,14 +309,38 @@ export function rpcDenyRules(
 	return { ok: true, deny };
 }
 
-/** The run's pi's flags: only bluclawd's child extension, its tools as an allowlist, its exact model and level. */
+/**
+ * What a run's pi in a pane loads besides its child extensions: bluclawd's extensions that only change what the user
+ * sees, and pistatusline when the user has it. None of them changes what the run's model sees or may do, so it works
+ * as it would on RPC (ADR-0013).
+ */
+function paneExtensions(agentDir: string, cwd: string): string[] {
+	const own = ["branding", "transcript", "agent-view", "help", "vibes", "paste", "skills", "accounts"].map((name) =>
+		fileURLToPath(new URL(`../${name}/index.ts`, import.meta.url)),
+	);
+	// By where it is installed: `-e` would install a package source again, in a temporary place, for every run.
+	const settingsManager = SettingsManager.create(cwd, agentDir);
+	const statusline = new DefaultPackageManager({ cwd, agentDir, settingsManager })
+		.listConfiguredPackages()
+		.flatMap(({ source, scope, installedPath }) =>
+			scope === "user" && installedPath && /pistatusline/.test(source) ? [installedPath] : [],
+		);
+	return [...own, ...statusline];
+}
+
+/**
+ * The run's pi's flags: only bluclawd's child extension, its tools as an allowlist, its exact model and level. On RPC
+ * with no terminal; in a pane, interactive, with what draws it as the user's other sessions are drawn.
+ */
 function rpcArgs(launch: RpcLaunch, instructionsFile: string, definitionFile: string): string[] {
 	const providers = (process.env[RPC_PROVIDER_EXTENSIONS_ENV] ?? "").split(":").filter(Boolean);
+	const extensions = launch.parentPane
+		? [CHILD_EXTENSION, PANE_CHILD_EXTENSION, ...providers, ...paneExtensions(launch.agentDir, launch.cwd)]
+		: [CHILD_EXTENSION, ...providers];
 	return [
-		"--mode",
-		"rpc",
+		...(launch.parentPane ? [] : ["--mode", "rpc"]),
 		"-ne",
-		...[CHILD_EXTENSION, ...providers].flatMap((path) => ["-e", path]),
+		...extensions.flatMap((path) => ["-e", path]),
 		"--provider",
 		launch.provider,
 		"--model",
@@ -519,13 +557,18 @@ export async function executeRpcRun(
 			args: rpcArgs(launch, instructions, runDefinitionPath(launch.runDir, record.generation)),
 			cwd: launch.cwd,
 			agentDir: launch.agentDir,
-			prompt:
-				launch.taskFrom === "user"
+			// None for a Resume the user types in themself.
+			prompt: launch.typed
+				? ""
+				: launch.taskFrom === "user"
 					? rpcRunMessageText({ kind: "user" }, record, launch.task)
 					: runTaskText(launch.task, launch.sessionFile !== undefined),
 			model: { provider: launch.provider, id: launch.modelId, thinkingLevel: launch.thinkingLevel },
 			generation: record.generation,
 			...(launch.sessionFile ? { sessionFile: launch.sessionFile } : {}),
+			...(launch.parentPane
+				? { pane: { session: runPaneSession(record.runId, record.generation), parent: launch.parentPane } }
+				: {}),
 		},
 	);
 	if (launch.tools.includes("bash")) {
@@ -624,12 +667,22 @@ export async function executeRpcRun(
 			pending.abort();
 		}
 	};
+	/** A run in a pane asks the user there; its panel row says it waits on them meanwhile. */
+	let awaiting = false;
+	const paneActivity = () => {
+		if (!launch.parentPane) return;
+		const now = readPaneChildState(launch.runDir)?.awaiting === true;
+		if (now === awaiting) return;
+		awaiting = now;
+		controller.updateActivity(now ? "awaiting_input" : "working");
+	};
 	await until(
 		() => {
 			// Handed off, it is the next instance's to relay and answer for: its scope here is gone.
 			if (deps.handOff.aborted) return false;
 			relay();
 			approvals();
+			paneActivity();
 			return ended();
 		},
 		AbortSignal.any([signal, deps.handOff]),
@@ -683,6 +736,13 @@ export async function executeRpcRun(
 			errorMessage: `Its processes did not all end, even killed: ${contained ? `process group ${hostPid}, or a process its commands started,` : `process group ${hostPid}`} still runs. Nothing confirms its work stopped.${workspaceNote}`,
 			transcriptPath: state?.sessionFile,
 		};
+	}
+	// Opened for the user to type in, and left with nothing typed: nothing was done, and there is nothing to tell.
+	if (state?.exit && state.idle) {
+		sealRunInbox(launch.runDir, record.generation);
+		// Its earlier Report stays what it last said.
+		const earlier = readRunReports(launch.runDir, 0).at(-1)?.text ?? "";
+		return { status: "closed", summaryText: earlier, transcriptPath: state.sessionFile };
 	}
 	if (!state?.exit || !report) {
 		// Later messages are refused; those it was sent stay on disk, whether its pi took them or not.

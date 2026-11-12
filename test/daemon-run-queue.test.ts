@@ -241,4 +241,23 @@ describe("maxActiveRuns: the user's bound on active runs", () => {
 			rmSync(agentDir, { recursive: true, force: true });
 		}
 	});
+
+	it("gives a run in a pane its launch's environment once, without loaders, and none for a pane no run launched", async () => {
+		const { queue, claim, spawned } = fixture();
+		const run = "sub_a-0";
+		await claim(run, "o").done;
+		queue.launch(run, { runDir: "/runs/a", env: { PATH: "/bin", NODE_OPTIONS: "--require x" }, pane: run });
+		expect(spawned.at(-1)).toMatchObject({ pane: run });
+		expect(queue.takePaneEnv("sub_b-0")).toBeUndefined();
+		expect(queue.takePaneEnv(run)).toEqual({ PATH: "/bin" });
+		expect(queue.takePaneEnv(run)).toBeUndefined();
+	});
+
+	it("refuses a pane not named as a run's", async () => {
+		const { queue, claim } = fixture();
+		await claim("sub_a-0", "o").done;
+		expect(() => queue.launch("sub_a-0", { ...host("a"), pane: "main; kill-server" })).toThrow(
+			/not named as a run's/,
+		);
+	});
 });

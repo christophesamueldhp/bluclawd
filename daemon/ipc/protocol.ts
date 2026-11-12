@@ -195,6 +195,8 @@ export type RunQueueRequest = { type: "run_queue" } & (
 	| { action: "claim"; run: string; parent: string }
 	| { action: "launch"; run: string; host: RunHostLaunch }
 	| { action: "release"; run: string }
+	/** From a run's host in a pane (ADR-0013): the environment its run was launched with, given once. */
+	| { action: "take_env"; pane: string }
 );
 
 /**
@@ -534,6 +536,8 @@ export interface RunQueueResponse extends ResponseBase {
 	granted?: boolean;
 	/** A launch's host. */
 	hostPid?: number;
+	/** take_env's answer. */
+	env?: Record<string, string>;
 }
 
 export interface CollaborationResponse extends ResponseBase {

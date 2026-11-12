@@ -167,7 +167,7 @@ describe.skipIf(!hasTmux)("a tasks batch of RPC runs", () => {
 	it("runs a foreground batch side by side within the shared capacity, each task as it chose, and returns one aggregate once all settle", async () => {
 		const real = await startOrchestrator();
 		pi = real;
-		addSettings(real, { subagents: { maxActive: 2 } });
+		addSettings(real, { subagents: { panes: false, maxActive: 2 } });
 		for (const dir of ["a", "b"]) {
 			mkdirSync(join(real.cwd, dir));
 			writeFileSync(join(real.cwd, dir, "here.txt"), `IN-${dir.toUpperCase()}\n`);
@@ -307,7 +307,7 @@ describe.skipIf(!hasTmux)("a tasks batch of RPC runs", () => {
 	it("cancels every member, working or queued, when the foreground call is cancelled; a queued one never starts", async () => {
 		const real = await startOrchestrator();
 		pi = real;
-		addSettings(real, { subagents: { maxActive: 1 } });
+		addSettings(real, { subagents: { panes: false, maxActive: 1 } });
 		real.script("main", [
 			{
 				tool: "subagent",
@@ -340,7 +340,7 @@ describe.skipIf(!hasTmux)("a tasks batch of RPC runs", () => {
 	it("stops a background batch whole by its ID, a member alone by its name, and reports once with what finished", async () => {
 		const real = await startOrchestrator();
 		pi = real;
-		addSettings(real, { subagents: { maxActive: 1 } });
+		addSettings(real, { subagents: { panes: false, maxActive: 1 } });
 		const names = ["m0", "m1", "m2", "m3"];
 		const steps = (batch: string): FauxStep[] => [
 			{

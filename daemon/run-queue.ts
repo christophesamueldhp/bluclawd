@@ -24,7 +24,16 @@ export interface RunHostLaunch {
 	 * (daemon/run-members.ts), may have left the host's group, and its slot is held until they end too.
 	 */
 	contained?: boolean;
+	/** The tmux session of agent view's server to start the host in, for a run in a pane (ADR-0013); else detached. */
+	pane?: string;
 }
+
+/** What would have node, or the loader, run code of a client's choosing in a run's host or its pi. */
+export const LOADER_ENV = ["NODE_OPTIONS", "DYLD_INSERT_LIBRARIES", "LD_PRELOAD"];
+
+/** The tmux session a run's generation runs in, when it runs in a pane: named after both, so it is found by them. */
+export const runPaneSession = (runId: string, generation: number) => `${runId}-${generation}`;
+const RUN_PANE = /^sub_[\w-]+-\d+$/;
 
 /** How long a claim waits for a slot before it is answered without one; the orchestrator then claims again. */
 export const RUN_CLAIM_WAIT_MS = 25_000;
@@ -54,7 +63,7 @@ export function maxActiveRuns(agentDir: string): number | undefined {
 
 export interface RunQueueDeps {
 	now: () => number;
-	/** Starts a run's host detached, in a process group of its own; returns its pid, or throws. */
+	/** Starts a run's host detached, or as its pane's command, in a process group of its own; returns its pid, or throws. */
 	spawn: (launch: RunHostLaunch) => number;
 	/**
 	 * Whether any process of the group led by `pid` still runs, or, once none does, any process its commands started,
@@ -88,6 +97,8 @@ interface Entry {
 	grantedAt?: number;
 	pid?: number;
 	contained?: boolean;
+	/** A run in a pane: its tmux session, and the environment its host has not taken yet. */
+	pane?: { name: string; env?: Record<string, string> };
 }
 
 /** A run's key in the queue: its run ID and the generation launched. */
@@ -104,6 +115,9 @@ function invalidLaunch(run: string, host: RunHostLaunch): string | undefined {
 	if (host?.contained && !RUN_KEY.test(run))
 		return "its key, which names its processes, is not a run's and a generation's";
 	if (typeof host?.runDir !== "string" || !isAbsolute(host.runDir)) return "its directory is not an absolute path";
+	if (host.pane !== undefined && !(typeof host.pane === "string" && RUN_PANE.test(host.pane))) {
+		return "its pane is not named as a run's";
+	}
 	const { env } = host;
 	if (typeof env !== "object" || env === null || Object.values(env).some((value) => typeof value !== "string")) {
 		return "its environment is not a set of strings";
@@ -180,6 +194,11 @@ export class RunQueue {
 		if (entry?.state !== "granted") throw new Error(`run ${run} was not granted a slot`);
 		const invalid = invalidLaunch(run, host);
 		if (invalid) throw new Error(`run ${run} was not launched: ${invalid}`);
+		// A host in a pane takes its environment from here once it runs, never through tmux's command line.
+		if (host.pane) {
+			const env = Object.entries(host.env).filter(([key]) => !LOADER_ENV.includes(key) && key !== "PI_PACKAGE_ROOT");
+			entry.pane = { name: host.pane, env: Object.fromEntries(env) };
+		}
 		try {
 			entry.pid = this.deps.spawn(host);
 		} catch (error) {
@@ -191,6 +210,20 @@ export class RunQueue {
 		entry.contained = host.contained === true;
 		this.save();
 		return entry.pid;
+	}
+
+	/**
+	 * The environment the host started in pane `pane` was launched with, given once: whatever asks later, or asks for a
+	 * pane no run launched, gets none.
+	 */
+	takePaneEnv(pane: string): Record<string, string> | undefined {
+		for (const entry of this.entries.values()) {
+			if (entry.pane?.name !== pane || !entry.pane.env) continue;
+			const { env } = entry.pane;
+			entry.pane.env = undefined;
+			return env;
+		}
+		return undefined;
 	}
 
 	/** Gives up run `run`'s claim or slot before it launched; a launched run keeps its slot until its processes end. */

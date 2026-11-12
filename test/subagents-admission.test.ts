@@ -134,6 +134,7 @@ async function setup(
 		parentThinkingLevel: () => "low",
 		scope,
 		pane: () => (options.pane === null ? undefined : (options.pane ?? "pi-orchestrator")),
+		runPane: () => undefined,
 		tools: () => options.tools ?? [],
 		registeredTools: () => [],
 		ensureQueue: async () => !options.queueDown,

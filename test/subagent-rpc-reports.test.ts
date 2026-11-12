@@ -151,7 +151,7 @@ describe.skipIf(!hasTmux)("an RPC run's Report", () => {
 		const settings = join(real.agentDir, "settings.json");
 		writeFileSync(
 			settings,
-			JSON.stringify({ ...JSON.parse(readFileSync(settings, "utf8")), subagents: { maxActive: 1 } }),
+			JSON.stringify({ ...JSON.parse(readFileSync(settings, "utf8")), subagents: { panes: false, maxActive: 1 } }),
 		);
 		const tasks = ["a", "b", "c"].map((name) => ({ agent: "explorer", name, task: `Look, ${name}.` }));
 		real.script("main", [{ tool: "subagent", args: { tasks } }]);

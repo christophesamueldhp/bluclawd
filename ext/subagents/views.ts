@@ -16,6 +16,10 @@ const ACTIVITY_LABEL: Record<AgentActivity, string> = {
  */
 export function runStatus(run: Pick<SubagentRunRecord, "pane" | "status" | "activity" | "backend">): string {
 	if (run.backend === "rpc" && run.status === "starting") return "queued";
+	// One in a pane (ADR-0013) asks the user there.
+	if (run.backend === "rpc" && run.status === "running" && run.activity === "awaiting_input") {
+		return ACTIVITY_LABEL.awaiting_input;
+	}
 	return run.pane && run.status === "running" ? ACTIVITY_LABEL[run.activity ?? "working"] : run.status;
 }
 

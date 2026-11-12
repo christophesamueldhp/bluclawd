@@ -221,7 +221,7 @@ describe.skipIf(!hasTmux)("recovering RPC runs", () => {
 	 * both so, and "first" was let go on to finish while it was gone.
 	 */
 	async function crashWithQueuedMember(real: RealPi) {
-		addSettings(real, { subagents: { maxActive: 1 } });
+		addSettings(real, { subagents: { panes: false, maxActive: 1 } });
 		const gate = join(real.cwd, "first.go");
 		real.script("main", [batch("first", "second"), { text: "waiting" }, { text: "noted" }, { text: "noted again" }]);
 		real.script("first", [{ text: "First done.", until: gate }]);
@@ -359,7 +359,7 @@ describe.skipIf(!hasTmux)("recovering RPC runs", () => {
 		async () => {
 			const real = await startOrchestrator();
 			pi = real;
-			addSettings(real, { subagents: { maxActive: 1 } });
+			addSettings(real, { subagents: { panes: false, maxActive: 1 } });
 			const gate = join(real.cwd, "first.go");
 			real.script("main", [
 				launch("first"),

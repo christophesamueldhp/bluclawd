@@ -153,6 +153,10 @@ export function createRunShell(
 			TMPDIR: runShellTmp(options.agentDir, scope.runId),
 		};
 		for (const name of shell.hiddenEnv) delete env[name];
+		// A run's pi in a pane knows its tmux and the daemon (ADR-0013); its commands are not told of either.
+		for (const name of Object.keys(env)) {
+			if (name.startsWith("BLUCLAWD_") || ["PI_SERVER_DIR", "TMUX", "TMUX_PANE"].includes(name)) delete env[name];
+		}
 		const wrapped = await SandboxManager.wrapWithSandbox(command, "/bin/bash", undefined, execOptions.signal, {
 			commandId: randomUUID(),
 			commandText: command,

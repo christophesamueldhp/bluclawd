@@ -21,7 +21,15 @@ import type { PaneHeartbeat, PaneMessage } from "../../daemon/ipc/protocol.ts";
 import { type InstanceSummary, OrchestratorClient } from "../../daemon/orchestrator-client.ts";
 import { labelFromTask, otherRows } from "../../daemon/rows.ts";
 import { toolActivity } from "../../daemon/session-state.ts";
-import { AGENT_VIEW_COMMAND, HIDE_ENV, NORMAL_ENV, OPEN_VIEW_ENV, runParent, Tmux } from "../../daemon/tmux.ts";
+import {
+	AGENT_VIEW_COMMAND,
+	HIDE_ENV,
+	NORMAL_ENV,
+	OPEN_VIEW_ENV,
+	RUN_PANE_ENV,
+	runParent,
+	Tmux,
+} from "../../daemon/tmux.ts";
 import { agentTasks, subscribeAgentTasks } from "../_shared/agent-tasks.ts";
 import { BUILTIN_SLASH_COMMANDS } from "../_shared/builtin-commands.ts";
 import { holdTui } from "../_shared/hold-tui.ts";
@@ -450,22 +458,25 @@ const agentView: InlineExtension = {
 				// A new count is a new line on the row, which only a heartbeat carries.
 				if (waitingDetail(activity) !== line) void registration?.refresh();
 			};
-			registration = new SelfRegistration(
-				new OrchestratorClient(),
-				// A blank session waits for its first prompt to be listed, unless it is a run (its orchestrator
-				// reaches it from its first turn on) or carries a row on (/new).
-				() =>
-					timedCall("agent-view", "heartbeat", () =>
-						blank(ctx) && !parent() && event.reason !== "new" ? undefined : selfHeartbeat(ctx),
-					),
-				(message) => onPaneMessage(ctx, message),
-				pane,
-				(watched) => pi.events.emit("bluclawd:remote-watched", watched),
-				() => pi.events.emit("bluclawd:remote-want-report", true),
-				// Messages queued for it while the daemon was out of reach may be lost (ext/subagents).
-				() => pi.events.emit("bluclawd:daemon-reconnected", true),
-			);
-			registration.start();
+			// A run in a pane (ADR-0013) is no row of its own, and reaches its orchestrator only through its run directory.
+			if (!process.env[RUN_PANE_ENV]) {
+				registration = new SelfRegistration(
+					new OrchestratorClient(),
+					// A blank session waits for its first prompt to be listed, unless it is a run (its orchestrator
+					// reaches it from its first turn on) or carries a row on (/new).
+					() =>
+						timedCall("agent-view", "heartbeat", () =>
+							blank(ctx) && !parent() && event.reason !== "new" ? undefined : selfHeartbeat(ctx),
+						),
+					(message) => onPaneMessage(ctx, message),
+					pane,
+					(watched) => pi.events.emit("bluclawd:remote-watched", watched),
+					() => pi.events.emit("bluclawd:remote-want-report", true),
+					// Messages queued for it while the daemon was out of reach may be lost (ext/subagents).
+					() => pi.events.emit("bluclawd:daemon-reconnected", true),
+				);
+				registration.start();
+			}
 			offSubagents?.();
 			offSubagents = subscribeAgentTasks(subagentsChanged);
 			subagentsChanged();
