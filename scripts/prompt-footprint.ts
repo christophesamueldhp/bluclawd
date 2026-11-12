@@ -34,6 +34,7 @@ import {
 	SessionManager,
 	SettingsManager,
 } from "@earendil-works/pi-coding-agent";
+import { toolChars } from "../ext/help/diagnostics.ts";
 import { type AgentDefinition, discoverAgentDefinitions } from "../ext/subagents/definitions.ts";
 import { SUBAGENT_MESSAGE_TOOL } from "../ext/subagents/messages.ts";
 import { REPORT_INSTRUCTIONS, rpcGrantableTools, rpcRunTools, WORKTREE_TOOLS } from "../ext/subagents/rpc-runs.ts";
@@ -223,7 +224,6 @@ function promptOf(context: Context): Prompt {
 	};
 }
 
-const toolChars = (tool: Tool) => tool.name.length + tool.description.length + JSON.stringify(tool.parameters).length;
 const reminderChars = (message: Message) => JSON.stringify("content" in message ? message.content : "").length;
 
 function promptChars(prompt: Prompt): number {

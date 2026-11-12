@@ -75,17 +75,22 @@ function formatTokens(value: number): string {
 	return String(value);
 }
 
+interface ToolDefinitionText {
+	name: string;
+	description: string;
+	parameters: unknown;
+}
+
 /**
- * Characters of tool definitions, by the formula `scripts/prompt-footprint.ts` uses. Prompt
+ * Characters of one tool definition, also used by `scripts/prompt-footprint.ts`. Prompt
  * guidelines are left out: they are part of the system prompt.
  */
-export function toolDefinitionChars(
-	tools: readonly { name: string; description: string; parameters: unknown }[],
-): number {
-	return tools.reduce(
-		(sum, tool) => sum + tool.name.length + tool.description.length + JSON.stringify(tool.parameters).length,
-		0,
-	);
+export function toolChars(tool: ToolDefinitionText): number {
+	return tool.name.length + tool.description.length + JSON.stringify(tool.parameters).length;
+}
+
+export function toolDefinitionChars(tools: readonly ToolDefinitionText[]): number {
+	return tools.reduce((sum, tool) => sum + toolChars(tool), 0);
 }
 
 /** Exported pure for tests; `theme` is the only styling dependency. */
