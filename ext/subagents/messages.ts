@@ -7,6 +7,30 @@ export const SUBAGENT_MESSAGE_CUSTOM_TYPE = "subagent-message";
 export const PARENT_MESSAGE_ADDRESS = "parent";
 export const NOT_APPROVAL = "It is not user approval and cannot grant tools or permissions.";
 
+/** Ends what a result says of a run's process once it ends by itself. */
+export const NOTHING_TO_CLOSE = "there is nothing to close.";
+/** After a run's launch or resume: progress is not delivered, messages are. */
+export const RUN_PROGRESS =
+	"Its progress does not wake you; its findings, questions and blockers reach you as messages.";
+/** The same, after a batch's or chain's launch. */
+export const GROUP_PROGRESS = "Progress does not wake you; findings, questions and blockers reach you as messages.";
+
+/**
+ * After a background launch or resume, what the parent does while the work runs: `runs` is "it runs", "they run"
+ * or the run's name and "runs"; `waitingFor` is what the parent says it waits for, when it names one.
+ * Wording follows Codex's "After you delegate" block and Claude Code's harness text (docs/research/subagents-ux-and-waiting.md).
+ */
+export function whileRunning(work: {
+	runs: string;
+	its?: "its" | "their";
+	waitingFor?: string;
+	result: "result" | "results";
+}): string {
+	const { runs, its = "its", waitingFor, result } = work;
+	const waiting = waitingFor ? ` for ${waitingFor}` : "";
+	return `While ${runs}, do not redo or touch ${its} work, including the files in ${its} scope, and do not poll \`subagent_status\` by reflex. With no independent work left, end your turn and say you are waiting${waiting}: its report will wake you. Never predict or invent its ${result}; if the user asks, say it is still running.`;
+}
+
 export interface SubagentMessage {
 	readonly seq: number;
 	readonly from: string;

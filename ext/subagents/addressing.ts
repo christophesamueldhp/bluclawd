@@ -6,7 +6,13 @@ import {
 	type RunAdmission,
 } from "./admission.ts";
 import type { RunDirectory } from "./directory.ts";
-import { formatMessageReceipt, PARENT_MESSAGE_ADDRESS, type SubagentMessageBus } from "./messages.ts";
+import {
+	formatMessageReceipt,
+	PARENT_MESSAGE_ADDRESS,
+	RUN_PROGRESS,
+	type SubagentMessageBus,
+	whileRunning,
+} from "./messages.ts";
 import type { ParentScope } from "./parent-scope.ts";
 import { isTerminalSubagentStatus } from "./runs.ts";
 
@@ -74,7 +80,7 @@ export function createRunAddressing(deps: RunAddressingDeps) {
 			content: [
 				{
 					type: "text" as const,
-					text: `Resuming ${formatRunLabel(run)} in the background with its earlier context, as its generation ${record.generation} on ${record.provider}/${record.modelId} at thinking ${record.thinkingLevel}. Its report will be delivered when it finishes.\nWhile it runs, do not redo or touch its work, including the files in its scope, and do not poll \`subagent_status\` by reflex. With no independent work left, end your turn and say you are waiting: its report will wake you. Never predict or invent its result; if the user asks, say it is still running.\nIts progress does not wake you; its findings, questions and blockers reach you as messages.`,
+					text: `Resuming ${formatRunLabel(run)} in the background with its earlier context, as its generation ${record.generation} on ${record.provider}/${record.modelId} at thinking ${record.thinkingLevel}. Its report will be delivered when it finishes.\n${whileRunning({ runs: "it runs", result: "result" })}\n${RUN_PROGRESS}`,
 				},
 			],
 			details: undefined,

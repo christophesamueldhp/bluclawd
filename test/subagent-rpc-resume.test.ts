@@ -99,6 +99,13 @@ describe.skipIf(!hasTmux)("resuming an RPC run", () => {
 		expect(receipt).toContain(
 			"Its progress does not wake you; its findings, questions and blockers reach you as messages.",
 		);
+		expect(receipt).toContain(
+			[
+				"Its report will be delivered when it finishes.",
+				"While it runs, do not redo or touch its work, including the files in its scope, and do not poll `subagent_status` by reflex. With no independent work left, end your turn and say you are waiting: its report will wake you. Never predict or invent its result; if the user asks, say it is still running.",
+				"Its progress does not wake you; its findings, questions and blockers reach you as messages.",
+			].join("\n"),
+		);
 		// Its earlier conversation, then the instruction, as from its orchestrator.
 		const look = real.requests("look");
 		expect(look).toHaveLength(2);

@@ -126,6 +126,13 @@ describe("The orchestrator's Waiting", () => {
 			"Its progress does not wake you; its findings, questions and blockers reach you as messages.",
 		);
 		expect(launchResult).toContain("its process then ends by itself: there is nothing to close.");
+		expect(launchResult).toContain(
+			[
+				"Its report arrives here once it has finished; its process then ends by itself: there is nothing to close.",
+				"While explorer-1 runs, do not redo or touch its work, including the files in its scope, and do not poll `subagent_status` by reflex. With no independent work left, end your turn and say you are waiting for explorer-1: its report will wake you. Never predict or invent its result; if the user asks, say it is still running.",
+				"Its progress does not wake you; its findings, questions and blockers reach you as messages.",
+			].join("\n"),
+		);
 	});
 
 	it("reminds every turn of the working runs by name, mode and elapsed time, and not once none is working", async () => {
