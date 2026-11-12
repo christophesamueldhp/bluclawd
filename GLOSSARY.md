@@ -152,7 +152,7 @@ One fact the agent keeps for one Project across sessions: who the user is, guida
 _Avoid_: note, entry, context file (`AGENTS.md`, `CLAUDE.md`)
 
 **Memory index**:
-One line per Memory of the Project, given to the agent when its session starts. A Memory saved during the session is not added to it until the next session.
+One line per Memory of the Project, given to the agent when its session starts, while the `memory` tool is active and `/memory` is on. A Memory saved during the session is not added to it until the next session.
 _Avoid_: MEMORY.md (its file, not the concept)
 
 **Project**:

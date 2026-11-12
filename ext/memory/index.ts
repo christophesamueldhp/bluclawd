@@ -8,7 +8,7 @@ import { basename, dirname, resolve } from "node:path";
 import { type ExtensionAPI, type ExtensionFactory, getAgentDir } from "@earendil-works/pi-coding-agent";
 import { type Static, Type } from "typebox";
 import { sharedRef } from "../_shared/global-state.ts";
-import { noticeOnce } from "../_shared/notice-once.ts";
+import { toolOffNoticeOnce, turnOnHint } from "../_shared/notice-once.ts";
 import { timed } from "../_shared/timing.ts";
 import { loadMemoryEnabled, saveMemoryEnabled } from "./prefs.ts";
 import {
@@ -41,16 +41,13 @@ const reply = (text: string, isError = false) => ({
 });
 
 const TIDY_UP = "Merge related Memories or delete stale ones.";
-const TURN_ON =
-	'Turn it on with "defaultTools": ["+memory"] in ~/.pi/agent/settings.json, or for one session with pi --tools +memory.';
-const TOOL_OFF = `The memory tool is off, so this session neither loads nor saves Memories. ${TURN_ON}`;
-/** Told once, to the user who kept Memories before the tool was off by default. */
-const MEMORIES_UNREAD = `This Project has Memories, but the memory tool is off by default now, so this session neither loads nor saves them. ${TURN_ON}`;
+const TOOL_OFF = `The memory tool is off, so this session neither loads nor saves Memories. ${turnOnHint("memory")}`;
+const MEMORIES_UNREAD = `This Project has Memories, but the memory tool is off by default now, so this session neither loads nor saves them. ${turnOnHint("memory")}`;
 /**
  * The sessions the user's `defaultTools` or `--tools` gave the memory tool. A /reload loads this extension anew,
  * and keeps the tool left out when `/memory` was off at the session's start.
  */
-const toolSessions = sharedRef("memory.toolSessions", new Set<string>());
+const sessionsGivenTool = sharedRef("memory.toolSessions", new Set<string>());
 const lines = (count: number) => `${count} line${count === 1 ? "" : "s"}`;
 
 /**
@@ -89,24 +86,23 @@ export function createMemoryExtension(options: { agentDir?: string } = {}): Exte
 		const agentDir = () => options.agentDir ?? getAgentDir();
 		let dir: string | undefined;
 		let section: string | undefined;
-		/** Whether the user's `defaultTools` or `--tools` gave this session the memory tool. */
-		let toolOn = false;
+		/** Whether the user's `defaultTools` or `--tools` gave this session the memory tool, active or not. */
+		let toolGiven = false;
 
 		// The toggle is read once per session start, like the Memory index. pi registers tools
 		// when it loads the extension, so turned off, the tool is left out of the active set.
 		// The section goes with the tool.
 		pi.on("session_start", async (event, ctx) => {
 			const enabled = loadMemoryEnabled(agentDir());
-			const active = pi.getActiveTools().includes("memory");
+			const toolActive = pi.getActiveTools().includes("memory");
 			const session = ctx.sessionManager.getSessionId();
-			toolOn = active || (event.reason === "reload" && toolSessions.get().has(session));
-			if (toolOn) toolSessions.get().add(session);
+			toolGiven = toolActive || (event.reason === "reload" && sessionsGivenTool.get().has(session));
+			if (toolGiven) sessionsGivenTool.get().add(session);
 			if (!enabled) pi.setActiveTools(pi.getActiveTools().filter((tool) => tool !== "memory"));
 			dir = enabled ? memoryDir(agentDir(), await resolveProject(pi, ctx.cwd)) : undefined;
-			section = dir && active ? promptSection(readIndex(dir)) : undefined;
-			if (ctx.hasUI && dir && !toolOn && readIndex(dir).trim() && noticeOnce(agentDir(), "memory-tool-off")) {
-				ctx.ui.notify(MEMORIES_UNREAD, "info");
-			}
+			const index = dir ? readIndex(dir) : "";
+			section = dir && toolActive ? promptSection(index) : undefined;
+			if (!toolGiven && index.trim()) toolOffNoticeOnce(ctx, agentDir(), "memory-tool-off", MEMORIES_UNREAD);
 		});
 
 		pi.on("before_agent_start", (event) => {
@@ -158,7 +154,7 @@ export function createMemoryExtension(options: { agentDir?: string } = {}): Exte
 				const memories = listMemories(project);
 				const labels = memories.map((m) => `${m.name} (${m.type}) — ${m.description}`);
 				const status = `Memory ${enabled ? "on" : "off"}`;
-				const toolNote = toolOn ? [] : [TOOL_OFF];
+				const toolNote = toolGiven ? [] : [TOOL_OFF];
 				if (!ctx.hasUI) {
 					ctx.ui.notify([`${status}: ${project}`, ...toolNote, ...labels].join("\n"), "info");
 					return;

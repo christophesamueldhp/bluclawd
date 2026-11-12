@@ -43,11 +43,14 @@ import { createGenerations, type ParentNotice, reportToParent } from "./generati
 import { registerIntegration } from "./integration.ts";
 import {
 	fromRunText,
+	NOTHING_TO_CLOSE,
 	PARENT_MESSAGE_ADDRESS,
+	RUN_PROGRESS,
 	SUBAGENT_MESSAGE_CUSTOM_TYPE,
 	SUBAGENT_MESSAGE_PARAMETERS,
 	SUBAGENT_MESSAGE_TOOL,
 	SubagentMessageBus,
+	whileRunning,
 } from "./messages.ts";
 import { describeSubagentModels } from "./models.ts";
 import { createPanel, formatRunElapsed, SUBAGENT_PANEL_WIDGET } from "./panel.ts";
@@ -1102,10 +1105,13 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 								`Background subagent launched: ${handle.record.name} (${handle.runId})`,
 								`Agent: ${handle.record.agentName} (${handle.record.provider}/${handle.record.modelId})`,
 								`Status: ${handle.record.status}`,
-								"Its report arrives here once it has finished; its process then ends by itself: there is nothing to close.",
-								// Wording follows Codex's "After you delegate" block and Claude Code's harness text (docs/research/subagents-ux-and-waiting.md).
-								`While ${handle.record.name} runs, do not redo or touch its work, including the files in its scope, and do not poll \`subagent_status\` by reflex. With no independent work left, end your turn and say you are waiting for ${handle.record.name}: its report will wake you. Never predict or invent its result; if the user asks, say it is still running.`,
-								"Its progress does not wake you; its findings, questions and blockers reach you as messages.",
+								`Its report arrives here once it has finished; its process then ends by itself: ${NOTHING_TO_CLOSE}`,
+								whileRunning({
+									runs: `${handle.record.name} runs`,
+									waitingFor: handle.record.name,
+									result: "result",
+								}),
+								RUN_PROGRESS,
 							].join("\n"),
 						},
 					],

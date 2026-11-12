@@ -419,6 +419,9 @@ describe("a wake-up's lifetime", () => {
 		expect(notices[0]).toMatch(/pending wake-up/);
 		expect(notices[0]).toMatch(/still fires/);
 		expect(notices[0]).toContain('"defaultTools": ["+schedule_wakeup"]');
+		expect(notices[0]).toBe(
+			'This session has a pending wake-up: it still fires, but schedule_wakeup is off by default now, so the agent cannot schedule another. Turn it on with "defaultTools": ["+schedule_wakeup"] in ~/.pi/agent/settings.json, or for one session with pi --tools +schedule_wakeup.',
+		);
 		await reopened.session.reload();
 		expect(notices).toHaveLength(1);
 		reopened.replies([fauxAssistantMessage("Hi.")]);

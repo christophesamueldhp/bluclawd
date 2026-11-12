@@ -252,6 +252,9 @@ describe("memory", () => {
 		expect(off.notices[0]).toMatch(/Memories/);
 		expect(off.notices[0]).toMatch(/off by default/);
 		expect(off.notices[0]).toContain('"defaultTools": ["+memory"]');
+		expect(off.notices[0]).toBe(
+			'This Project has Memories, but the memory tool is off by default now, so this session neither loads nor saves them. Turn it on with "defaultTools": ["+memory"] in ~/.pi/agent/settings.json, or for one session with pi --tools +memory.',
+		);
 		await off.prompt([fauxAssistantMessage("Hi.")]);
 		expect(off.seen[0]).not.toMatch(/off by default/);
 		await off.session.reload();
@@ -514,6 +517,9 @@ describe("/memory", () => {
 		expect(list.title).toMatch(/memory tool is off/i);
 		expect(list.title).toContain('"defaultTools": ["+memory"]');
 		expect(list.title).toContain("--tools +memory");
+		expect(list.title).toContain(
+			'The memory tool is off, so this session neither loads nor saves Memories. Turn it on with "defaultTools": ["+memory"] in ~/.pi/agent/settings.json, or for one session with pi --tools +memory.',
+		);
 		expect(list.options).toContain("tabs (feedback) — The user prefers tabs");
 
 		await s.command(option("Turn memory off"));

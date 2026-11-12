@@ -401,6 +401,12 @@ describe.skipIf(!hasTmux)("a chain of RPC runs", () => {
 		expect(result).toContain("Never predict or invent its results; if the user asks, say it is still running.");
 		expect(result).toContain("Progress does not wake you; findings, questions and blockers reach you as messages.");
 		expect(result).toContain("Its processes end by themselves once it reports: there is nothing to close.");
+		expect(result).toContain(
+			[
+				"While it runs, do not redo or touch its work, including the files in its scope, and do not poll `subagent_status` by reflex. With no independent work left, end your turn and say you are waiting for the chain: its report will wake you. Never predict or invent its results; if the user asks, say it is still running.",
+				"Progress does not wake you; findings, questions and blockers reach you as messages. Its processes end by themselves once it reports: there is nothing to close.",
+			].join("\n"),
+		);
 		const chain = /chain_\w+/.exec(result)?.[0] ?? "";
 		real.script("main", steps(chain));
 
