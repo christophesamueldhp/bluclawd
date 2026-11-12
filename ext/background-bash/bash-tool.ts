@@ -1,5 +1,5 @@
 /**
- * The model's bash tool: `timeout` in milliseconds with a 2-minute default,
+ * The model's bash tool: `timeout` in seconds, as pi's own, with a 2-minute default,
  * `run_in_background`, and a command still running at its timeout (or on Ctrl+B,
  * or when the user sends a message) moved to the background rather than killed.
  * Every session builds its bash here so they cannot drift apart; what differs is
@@ -134,7 +134,11 @@ export function createBackgroundBashTool(options: BackgroundBashOptions): ToolDe
 
 	const parameters = Type.Object({
 		command: base.parameters.properties.command,
-		timeout: Type.Optional(Type.Number({ description: `Optional timeout in milliseconds (max ${maxTimeoutMs()})` })),
+		timeout: Type.Optional(
+			Type.Number({
+				description: `Timeout in seconds (optional, default ${defaultTimeoutMs() / 1000}, max ${maxTimeoutMs() / 1000})`,
+			}),
+		),
 		description: Type.Optional(Type.String({ description: DESCRIPTION_TEXT })),
 		...(disabled
 			? {}
@@ -147,11 +151,8 @@ export function createBackgroundBashTool(options: BackgroundBashOptions): ToolDe
 
 	return {
 		...base,
-		// The timeout's unit is said where the model fills it: pi's description names seconds.
-		description: base.description.replace(" Optionally provide a timeout in seconds.", ""),
 		promptGuidelines: [
 			...(base.promptGuidelines ?? []),
-			`\`timeout\` defaults to ${defaultTimeoutMs()}.`,
 			...(disabled
 				? []
 				: [
@@ -160,13 +161,6 @@ export function createBackgroundBashTool(options: BackgroundBashOptions): ToolDe
 		],
 		parameters,
 		outputSchema,
-		// pi draws `(timeout Ns)` from the argument, which is milliseconds here.
-		renderCall(args, theme, context) {
-			const timeout = (args as { timeout?: unknown }).timeout;
-			const shown =
-				typeof timeout === "number" && timeout > 0 ? { ...(args as object), timeout: timeout / 1000 } : args;
-			return base.renderCall?.(shown as never, theme, context as never) as never;
-		},
 		renderResult(result, renderOptions, theme, context) {
 			if (wentToBackground(result.details)) return new Text(theme.fg("dim", RUNNING_IN_BACKGROUND), 0, 0);
 			return base.renderResult?.(result as never, renderOptions, theme, context as never) as never;
@@ -237,7 +231,8 @@ export function createBackgroundBashTool(options: BackgroundBashOptions): ToolDe
 			}
 
 			const auto = canAutoBackground(command);
-			const timeoutMs = autoBackgroundTimeoutMs(effectiveTimeoutMs(timeout), {
+			const asked = timeout === undefined ? undefined : timeout * 1000;
+			const timeoutMs = autoBackgroundTimeoutMs(effectiveTimeoutMs(asked), {
 				isMain: options.isMain,
 				canAutoBackground: auto,
 			});

@@ -1,7 +1,7 @@
 /**
- * Bash timeouts and the background-task switch: the model gives `timeout` in
- * milliseconds, a command still running when it passes moves to the background
- * instead of being killed, and `BLUCLAWD_DISABLE_BACKGROUND_TASKS` turns every
+ * Bash timeouts, in milliseconds (the tool converts the model's seconds), and the
+ * background-task switch: a command still running when its timeout passes moves
+ * to the background instead of being killed, and `BLUCLAWD_DISABLE_BACKGROUND_TASKS` turns every
  * background path off.
  */
 

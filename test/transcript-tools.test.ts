@@ -76,6 +76,19 @@ describe("expanded bash", () => {
 		expect(draw(bash(), row)).toBe(draw(piBash as never, row));
 	});
 
+	it("draws bluclawd's timeout as pi draws its own, in seconds", () => {
+		const bluclawdBash = createBackgroundBashTool({
+			cwd: "/work",
+			operations: { exec: async () => ({ exitCode: 0 }) },
+			sendMessage: () => {},
+			isMain: true,
+		});
+		const row: Row = { args: { command: "npm test", timeout: 10 }, result: text("a"), expanded: true };
+		const out = draw(restyled("bash", bluclawdBash), row);
+		expect(plain(out)).toContain("(timeout 10s)");
+		expect(out).toBe(draw(piBash as never, row));
+	});
+
 	/** One bash row drawn over time, as pi's tool row does: same state, each render handed its last components. */
 	function liveRow() {
 		const renderers = bash();

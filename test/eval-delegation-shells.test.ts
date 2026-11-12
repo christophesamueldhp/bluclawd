@@ -189,15 +189,22 @@ describe("background shells in the delegation evaluation, on a scripted model", 
 		}
 	});
 
-	it("slow: passes with the limit given in milliseconds, and no bash call ends at its timeout", async () => {
-		const result = await trial("slow", [bash("node build.js", { timeout: 10_000 }), { text: "Built." }]);
+	it("slow: passes with the limit given in seconds, no bash call ends at its timeout, and keeps the limit sent", async () => {
+		const result = await trial("slow", [bash("node build.js", { timeout: 10 }), { text: "Built." }]);
 		expectOutcome(result, true);
 		expect(result).toMatchObject({ parentWakeups: 0, failedToolCalls: 0, bashTimeouts: 0, toolCalls: { bash: 1 } });
+		expect(result.bashTimeoutsSent).toEqual([10]);
 	});
 
-	it("slow: counts a limit given in seconds as a bash call ended at its timeout, though the build still finishes", async () => {
+	it("slow: keeps a limit sent in milliseconds, which the cap leaves with no other trace", async () => {
+		const result = await trial("slow", [bash("node build.js", { timeout: 10_000 }), { text: "Built." }]);
+		expectOutcome(result, true);
+		expect(result).toMatchObject({ failedToolCalls: 0, bashTimeouts: 0, bashTimeoutsSent: [10_000] });
+	});
+
+	it("slow: counts a limit shorter than the build as a bash call ended at its timeout, though the build still finishes", async () => {
 		const result = await trial("slow", [
-			bash("node build.js", { timeout: 10 }),
+			bash("node build.js", { timeout: 1 }),
 			{ text: "The build went on in the background; I will wait for it." },
 			{ text: "Built." },
 		]);
@@ -206,9 +213,9 @@ describe("background shells in the delegation evaluation, on a scripted model", 
 		expect(result).toMatchObject({ parentWakeups: 1, failedToolCalls: 0, bashTimeouts: 1 });
 	});
 
-	it("slow: fails when the build is stopped once it passed a limit given in seconds", async () => {
+	it("slow: fails when the build is stopped once it passed a limit shorter than the build", async () => {
 		const result = await trial("slow", [
-			bash("node build.js", { timeout: 10 }),
+			bash("node build.js", { timeout: 1 }),
 			{ tool: "read", args: { path: "build.js" } },
 			{ stop: true },
 			{ text: "It ran past its limit, so I stopped it." },
@@ -223,7 +230,7 @@ describe("background shells in the delegation evaluation, on a scripted model", 
 
 	it("slow: counts a command killed at its timeout as both a failed call and a bash call ended at its timeout", async () => {
 		// A command that starts with `sleep` is killed at its timeout rather than moved to the background.
-		const result = await trial("slow", [bash("sleep 1; node build.js", { timeout: 10 }), { text: "It timed out." }]);
+		const result = await trial("slow", [bash("sleep 2; node build.js", { timeout: 1 }), { text: "It timed out." }]);
 		expectOutcome(result, false);
 		expect(result).toMatchObject({ failedToolCalls: 1, bashTimeouts: 1 });
 		expect(result.failedCalls).toEqual([expect.stringMatching(/^bash: \S/)]);
