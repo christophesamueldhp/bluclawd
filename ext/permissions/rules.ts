@@ -82,20 +82,20 @@ function ruleParts(rule: string): { verb: string; subject: string } | undefined 
 }
 
 /**
- * Whether a rule denies pi's resource tool `resourceTool` on some server, i.e. matches
- * `mcp__<server>__<resourceTool>` for some spelled server name: `mcp__srv`, `Mcp(*:x*)` and
- * `Mcp(srv:list_mcp_resources)` do for `list_mcp_resources`, `Mcp(srv:get_me)` does not.
+ * Whether a rule's tool part covers pi's resource tool `resourceTool`: a whole-server rule
+ * (`mcp__srv`, `Mcp(srv:*)`, a bare `Mcp`) or one naming that tool (`Mcp(srv:list_mcp_resources)`).
+ * A tool glob such as `mcp__github__delete_*` does not, though a server named to fit it could.
  */
 export function deniesResourceToolOnSomeServer(rule: string, resourceTool: string): boolean {
 	const parts = ruleParts(rule);
 	if (parts?.verb !== "mcp") return false;
 	const pattern = globToRegExp(parts.subject);
-	// No server list is at hand, so sample one name per way the glob can end the server part:
-	// each prefix of it, with `x` standing in for every `*`. `mcp__x` serves a bare `Mcp` (`**`).
-	const prefixes = [...parts.subject].map((_, i) => parts.subject.slice(0, i + 1).replace(/\*/g, "x"));
-	return ["mcp__x", ...prefixes]
-		.filter((serverPrefix) => /^mcp__\w+$/.test(serverPrefix))
-		.some((serverPrefix) => pattern.test(`${serverPrefix}__${resourceTool}`));
+	// A server name can hold `__`, so each `__` of the rule is tried as where the server part
+	// ends, with `x` standing in for its `*`. `mcp__x` serves a bare `Mcp` (`**`).
+	const serverPrefixes = [...parts.subject.matchAll(/(?=__)/g)].map((m) => parts.subject.slice(0, m.index));
+	return ["mcp__x", ...serverPrefixes].some((serverPrefix) =>
+		pattern.test(`${serverPrefix.replace(/\*/g, "x")}__${resourceTool}`),
+	);
 }
 
 const REGEX_META = new Set([".", "+", "^", "$", "{", "}", "(", ")", "|", "[", "]", "\\", "?"]);

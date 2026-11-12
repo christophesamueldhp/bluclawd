@@ -481,11 +481,15 @@ describe("the extension", () => {
 			}
 		}
 		// A rule on the listing tool itself denies that server's listing too.
+		for (const rule of ["Mcp(dev-radius:list_mcp_resources)", "mcp__srv__list_mcp_*"]) {
+			const listing = load({ permissions: { deny: [rule] } });
+			await listing.handlers.session_start({}, listing.ctx);
+			expect((await listing.call("list_mcp_resources", {}))?.block, rule).toBe(true);
+		}
 		const listing = load({ permissions: { deny: ["Mcp(dev-radius:list_mcp_resources)"] } });
 		await listing.handlers.session_start({}, listing.ctx);
-		expect((await listing.call("list_mcp_resources", {}))?.block).toBe(true);
 		expect(await listing.call("list_mcp_resource_templates", {})).toBeUndefined();
-		// So does a tool glob that some server's listing falls under.
+		// A tool glob does not, though a server named to fit it has its own listing blocked.
 		for (const [rule, server] of [
 			["mcp__srv__x*", "srv--xy"],
 			["Mcp(*:x*)", "a--xyz"],
@@ -495,7 +499,7 @@ describe("the extension", () => {
 			const { handlers, ctx, call } = load({ permissions: { deny: [rule] } });
 			await handlers.session_start({}, ctx);
 			expect((await call("list_mcp_resources", { server }))?.block, `${rule} vs ${server}`).toBe(true);
-			expect((await call("list_mcp_resources", {}))?.block, rule).toBe(true);
+			expect(await call("list_mcp_resources", {}), rule).toBeUndefined();
 		}
 		for (const deny of [[], ["mcp__github__delete_repo"], ["Mcp(github:get_me)"], ["Bash(rm *)"]]) {
 			const { handlers, ctx, call } = load({ permissions: { deny } });

@@ -618,9 +618,8 @@ can `mcp__server__*` once the spelled server name reaches 50 characters, as the 
 loses the `__` after it. A server-level rule also covers that server's resources: pi's
 `list_mcp_resources`, `list_mcp_resource_templates` and `read_mcp_resource` with a `server` are
 judged as `mcp__server__<that tool>`, and a list without `server`, which lists every server, is
-blocked while a rule denies that listing on any server (the model is told to pass `server`) — any
-rule whose tool part ends in `*` does, `mcp__github__delete_*` included, since a server could be
-named to fit it. `dir/**` covers
+blocked while a rule denies a whole server or names that listing tool (the model is told to pass
+`server`); a tool glob such as `mcp__github__delete_*` does not block it. `dir/**` covers
 `dir` itself too. A bash rule also matches the command behind wrappers (`sudo`,
 `timeout`, `nice`, `env`, `xargs`, `sh -c '…'`, `eval`, …), shell keywords,
 quoting (`'rm'`, `\rm`), `/bin/…`, `$(…)`, and any part of a `&&`/`;`/`|` chain.
