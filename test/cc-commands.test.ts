@@ -100,12 +100,12 @@ describe("/context report", () => {
 });
 
 describe("tool definition size", () => {
-	it("counts the name, description and schema of the tools declared to the model", () => {
+	it("counts each tool's name, description and schema, not its prompt guidelines", () => {
 		const tools = [
 			{ name: "ab", description: "cde", parameters: { type: "object" }, promptGuidelines: ["in the system prompt"] },
-			{ name: "inactive", description: "not declared", parameters: { type: "object" } },
+			{ name: "f", description: "gh", parameters: {} },
 		];
-		// "ab" + "cde" + '{"type":"object"}'
-		expect(toolDefinitionChars(tools, ["ab"])).toBe(22);
+		// "ab" + "cde" + '{"type":"object"}', then "f" + "gh" + "{}"
+		expect(toolDefinitionChars(tools)).toBe(27);
 	});
 });

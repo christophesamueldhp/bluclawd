@@ -12,6 +12,7 @@ async function helpText(extensionCommands: string[]): Promise<string> {
 		appendEntry: (_type: string, data: unknown) => {
 			entry = { data };
 		},
+		on: () => {},
 		getCommands: () => extensionCommands.map((name) => ({ name, description: "", source: "extension" })),
 	} as never);
 	await commands.get("help")?.("", {});
@@ -30,5 +31,44 @@ describe("/help", () => {
 		const text = await helpText([]);
 		expect(text).not.toContain("Alt+M");
 		expect(text).toContain("/hotkeys");
+	});
+});
+
+describe("/context", () => {
+	const tool = (description: string) => ({ name: "ab", description, parameters: { type: "object" } });
+
+	/** The `toolDefinitionChars` /context records, after the given requests. */
+	async function recordedToolChars(requests: unknown[][]): Promise<unknown> {
+		const handlers = new Map<string, (event: unknown) => void>();
+		const commands = new Map<string, (args: string, ctx: unknown) => Promise<void>>();
+		let data: { toolDefinitionChars?: number } | undefined;
+		help({
+			registerEntryRenderer: () => {},
+			registerCommand: (name: string, options: { handler: never }) => commands.set(name, options.handler),
+			on: (event: string, handler: (event: unknown) => void) => handlers.set(event, handler),
+			appendEntry: (_type: string, entry: typeof data) => {
+				data = entry;
+			},
+			getAllTools: () => [tool("cde"), { ...tool("not declared"), name: "inactive" }],
+			getActiveTools: () => ["ab"],
+		} as never);
+		for (const messages of requests) handlers.get("context_with_system")?.({ type: "context_with_system", messages });
+		await commands.get("context")?.("", {
+			model: { provider: "p", id: "m" },
+			getContextUsage: () => ({ contextWindow: 1000, tokens: 100, percent: 10 }),
+			getSystemPrompt: () => "",
+		});
+		return data?.toolDefinitionChars;
+	}
+
+	it("counts the tools the last request declared, with the descriptions the model got", async () => {
+		const system = { role: "system", content: "", timestamp: 0, toolsAdded: [tool("cde, rewritten by its loadout")] };
+		// "ab" + "cde, rewritten by its loadout" + '{"type":"object"}'
+		expect(await recordedToolChars([[system, { role: "user", content: "hi", timestamp: 0 }]])).toBe(48);
+	});
+
+	it("counts the registered active tools before this process has sent a request", async () => {
+		// "ab" + "cde" + '{"type":"object"}'; the inactive tool is left out
+		expect(await recordedToolChars([])).toBe(22);
 	});
 });

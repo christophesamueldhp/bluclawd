@@ -11,6 +11,7 @@
  * `ctx.ui.notify` (which dims everything and does not persist in the session).
  */
 
+import { getCurrentTools } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { getAgentDir, SettingsManager, VERSION } from "@earendil-works/pi-coding-agent";
 import { commandBlock } from "../_shared/command-block.ts";
@@ -75,20 +76,16 @@ function formatTokens(value: number): string {
 }
 
 /**
- * Characters of the tool definitions declared to the model, measured as `scripts/prompt-footprint.ts`
- * does. Prompt guidelines are left out: they are part of the system prompt.
+ * Characters of tool definitions, by the formula `scripts/prompt-footprint.ts` uses. Prompt
+ * guidelines are left out: they are part of the system prompt.
  */
 export function toolDefinitionChars(
 	tools: readonly { name: string; description: string; parameters: unknown }[],
-	activeNames: readonly string[],
 ): number {
-	const active = new Set(activeNames);
-	return tools
-		.filter((tool) => active.has(tool.name))
-		.reduce(
-			(sum, tool) => sum + tool.name.length + tool.description.length + JSON.stringify(tool.parameters).length,
-			0,
-		);
+	return tools.reduce(
+		(sum, tool) => sum + tool.name.length + tool.description.length + JSON.stringify(tool.parameters).length,
+		0,
+	);
 }
 
 /** Exported pure for tests; `theme` is the only styling dependency. */
@@ -133,6 +130,14 @@ export function formatContext(
 }
 
 export function registerDiagnostics(pi: ExtensionAPI): void {
+	// The tools as the last request declared them, after loadout hooks rewrote their descriptions,
+	// so they match the request `getContextUsage()` reports on. Pi hides codemode-only declarations
+	// after this event, so in that mode they are still counted.
+	let declaredToolChars: number | undefined;
+	pi.on("context_with_system", (event) => {
+		declaredToolChars = toolDefinitionChars(getCurrentTools(event.messages));
+	});
+
 	pi.registerEntryRenderer<ContextData>("bluclawd:context", (entry, _options, theme) =>
 		commandBlock(formatContext(entry.data, theme)),
 	);
@@ -176,13 +181,17 @@ export function registerDiagnostics(pi: ExtensionAPI): void {
 		handler: async (_args, ctx) => {
 			const model = ctx.model;
 			const usage = ctx.getContextUsage();
+			// Before this process sends a request (a resumed session), the active tools as registered.
+			const active = new Set(pi.getActiveTools());
+			const registeredToolChars = () =>
+				toolDefinitionChars(pi.getAllTools().filter((tool) => active.has(tool.name)));
 			pi.appendEntry<ContextData>("bluclawd:context", {
 				model: model ? `${model.provider}/${model.id}` : undefined,
 				contextWindow: usage?.contextWindow,
 				tokens: usage?.tokens,
 				percent: usage?.percent,
 				systemPromptChars: ctx.getSystemPrompt().length,
-				toolDefinitionChars: toolDefinitionChars(pi.getAllTools(), pi.getActiveTools()),
+				toolDefinitionChars: declaredToolChars ?? registeredToolChars(),
 			});
 		},
 	});
