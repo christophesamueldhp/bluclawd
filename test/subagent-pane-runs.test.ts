@@ -570,6 +570,35 @@ describe.skipIf(!hasTmux)("a run in a pane of its own", () => {
 		await real.waitForRequests("next", 1);
 	});
 
+	it("ends as stopped when its pane is ended and its pi does not end on it: the pi is killed after a grace", async () => {
+		const real = await startOrchestrator();
+		pi = real;
+		real.script("main", [
+			{ tool: "subagent", args: { agent: "explorer", name: "look", task: "Look.", background: true } },
+			...Array(3).fill({ text: "waiting" }),
+		]);
+		real.script("look", [{ text: "Never.", until: join(real.cwd, "never") }]);
+		real.start(["--", "delegate"]);
+		await real.waitForRequests("look", 1);
+		const { runId, dir } = runRecord(real.agentDir, "look");
+		const child = JSON.parse(readFileSync(join(dir, "rpc-host.json"), "utf8")).childPid;
+		expect(child).toBeGreaterThan(0);
+
+		// Stopped, its pi stores nothing of its own on the hang-up.
+		process.kill(child, "SIGSTOP");
+		expect(
+			spawnSync("tmux", ["-S", real.tmux.socket, "kill-session", "-t", `=${runPaneSession(runId, 0)}`]).status,
+		).toBe(0);
+		const told = () =>
+			real
+				.requests("main")
+				.flatMap(conversation)
+				.find(({ text }) => text.includes("Outcome: stopped"))?.text;
+		await waitFor(() => expect(told()).toBeDefined());
+		expect(told()).toContain("Outcome: stopped: its pane was ended.");
+		expect(told()).toContain("Process: exited with signal SIGKILL");
+	}, 60_000);
+
 	it("leaves a Resume as it was when the daemon has no environment for its host", async () => {
 		const real = await startOrchestrator();
 		pi = real;

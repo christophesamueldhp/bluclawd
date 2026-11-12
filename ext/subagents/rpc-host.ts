@@ -107,6 +107,8 @@ const statePath = (runDir: string) => join(runDir, "rpc-host.json");
 const hostClaimPath = (runDir: string, generation: number) => join(runDir, "hosts", String(generation));
 /** Child stderr: pi reports a failed start only there. */
 const stderrPath = (runDir: string) => join(runDir, "rpc-child.stderr");
+/** How long a run's host and its pi may take to end, once stopped or done, before what is left of them is killed. */
+export const STOP_GRACE_MS = 10_000;
 /** How often the host looks for messages posted to the run. */
 const INBOX_CHECK_MS = 50;
 /** How long the orchestrator may go without noting it sees an approval the run asks for: past it, no one is there. */
@@ -579,10 +581,14 @@ async function paneHost(
 	// Ctrl+C reaches the pane's process group while its pi does not hold the terminal: it is not the host's to act on.
 	process.on("SIGINT", () => {});
 	// Its pane ended from outside, as by tmux kill-session, hangs its process group up: the host stays to store how its
-	// pi ended.
+	// pi ended. The hang-up may reach the host alone, its pane's session leader, so its pi is passed it; a pi that does
+	// not end on it in time is killed, since nothing else ends it while the host waits for it.
 	let paneEnded = false;
+	let running: ChildProcess | undefined;
 	process.on("SIGHUP", () => {
 		paneEnded = true;
+		running?.kill("SIGHUP");
+		setTimeout(() => running?.kill("SIGKILL"), STOP_GRACE_MS).unref();
 	});
 	// What an earlier generation's pi stored is not this one's.
 	rmSync(paneChildStatePath(runDir), { force: true });
@@ -595,11 +601,17 @@ async function paneHost(
 		save();
 		return;
 	}
+	if (paneEnded) {
+		state.notStarted = `${PANE_ENDED} before its pi started`;
+		save();
+		return;
+	}
 	const child = spawn(process.execPath, [piEntry(), ...spec.args], {
 		cwd: spec.cwd,
 		env: paneChildEnv(launched, process.env, runDir, spec.pane, spec.agentDir),
 		stdio: "inherit",
 	});
+	running = child;
 	const exited = new Promise<{ code: number | null; signal: string | null }>((resolve) => {
 		child.on("exit", (code, signal) => resolve({ code, signal }));
 		child.on("error", (error) => {
@@ -615,8 +627,6 @@ async function paneHost(
 		sealRunInbox(runDir, spec.generation);
 		child.kill("SIGTERM");
 	});
-	// The hang-up may reach the host alone, its pane's session leader: its pi ends on it as on its own.
-	process.on("SIGHUP", () => child.kill("SIGHUP"));
 	const exit = await exited;
 	const { sessionFile, sessionId, outcome, reportSeq, idle } = readPaneChildState(runDir) ?? {};
 	Object.assign(state, { sessionFile, sessionId, outcome, reportSeq, idle });

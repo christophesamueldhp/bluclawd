@@ -42,6 +42,7 @@ import {
 	readPaneChildState,
 	readRpcHostState,
 	runGroupAlive,
+	STOP_GRACE_MS,
 	stopRpcHost,
 } from "./rpc-host.ts";
 import {
@@ -378,8 +379,6 @@ export const REPORT_INSTRUCTIONS = [
 const MAX_REASON_BYTES = 1024;
 /** How often the orchestrator looks at its run's host. */
 const HOST_CHECK_MS = 100;
-/** How long a run's host and its pi may take to end, once stopped or done, before what is left of them is killed. */
-const STOP_GRACE_MS = 10_000;
 /** How long what was killed of a run may take to be gone, before its end is reported as unconfirmed. */
 const KILL_WAIT_MS = 5000;
 
