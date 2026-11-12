@@ -29,6 +29,7 @@ import {
 	MAX_TASK_INPUT_BYTES,
 	type RunAdmissionDeps,
 	type RunExecutionContext,
+	subagentInvocation,
 } from "../ext/subagents/admission.ts";
 import { createRunDirectory } from "../ext/subagents/directory.ts";
 import { SubagentMessageBus } from "../ext/subagents/messages.ts";
@@ -651,5 +652,39 @@ describe("Run admission of a run's own directory, and of its Resume", () => {
 		expect(results.filter((result) => !result.ok).map(errorOf)).toEqual([
 			expect.stringMatching(/another Resume of it already started its generation 1/),
 		]);
+	});
+});
+
+describe("A chain's resume step", () => {
+	const writer = {
+		name: "writer",
+		description: "Edits files.",
+		instructions: "Make the change asked.",
+		tools: ["edit"],
+	};
+	const first = { agent: writer, name: "w", cwd: "pkg", task: "Edit." };
+
+	it("resumes the step it names when it repeats that step's role, name and cwd", () => {
+		const plain = subagentInvocation({ chain: [first, { resume: "w", task: "Fix." }] });
+		const repeated = subagentInvocation({
+			chain: [first, { resume: "w", agent: { ...writer }, name: " w ", cwd: "pkg", task: "Fix." }],
+		});
+		expect(plain).toMatchObject({ ok: true, chain: [{ run: first }, { resume: 0, task: "Fix." }] });
+		expect(repeated).toEqual(plain);
+	});
+
+	it("is refused, naming each field that differs from the resumed step's", () => {
+		const refusal = (step: Record<string, unknown>) => {
+			const result = subagentInvocation({ chain: [first, { resume: "w", task: "Fix.", ...step }] });
+			return result.ok ? undefined : result.error;
+		};
+		expect(refusal({ agent: "explorer" })).toMatch(
+			/^chain\[1\]: .*`agent` differs from chain\[0\]'s.*leave out `agent`\.$/,
+		);
+		expect(refusal({ name: "x" })).toMatch(/`name` differs from chain\[0\]'s.*leave out `name`\.$/);
+		expect(refusal({ name: "w", cwd: "other" })).toMatch(/`cwd` differs from chain\[0\]'s.*leave out `cwd`\.$/);
+		expect(refusal({ agent: "explorer", cwd: "other" })).toMatch(
+			/`agent`, `cwd` differ from chain\[0\]'s.*leave out `agent`, `cwd`\.$/,
+		);
 	});
 });
