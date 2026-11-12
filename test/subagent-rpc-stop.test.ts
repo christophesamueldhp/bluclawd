@@ -137,6 +137,8 @@ describe.skipIf(!hasTmux)("stopping an RPC run", () => {
 		real.tmux.sendKeys(pane, ["stop queued", "Enter"]);
 		const main = await real.waitForRequests("main", 4);
 		expect(lastToolResult(main[3])).toMatch(/^Stopped "queued" \(sub_[\w-]+\): its work was cancelled/);
+		// What to do after the call is said in its result.
+		expect(lastToolResult(main[3])).toContain("only subagent_resume continues it.");
 		expect(recordOf(real, "queued")).toMatchObject({ status: "cancelled", stopSource: "model" });
 
 		writeFileSync(gate, "");

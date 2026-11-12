@@ -54,6 +54,7 @@ describe("The orchestrator's Waiting", () => {
 				"Never predict or invent",
 				"Progress from a run does not wake you",
 				"nothing to close",
+				"only `subagent_resume` continues",
 			]) {
 				expect(description).not.toContain(mechanic);
 			}

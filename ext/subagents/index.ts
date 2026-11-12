@@ -84,9 +84,6 @@ const MAX_STATUS_RUNS = 30;
 const PANE_OPEN_WAIT_MS = 5000;
 const timedTmux = (): Tmux => new Tmux(undefined, undefined, { timeoutMs: 2000 });
 const SUBAGENT_DESCRIPTION_LEAD = "Delegate a task to a child agent";
-const RPC_RUNS_END = [
-	"`subagent_stop` cancels a run's work; only `subagent_resume` continues a finished or stopped run.",
-];
 // Selective by design (spec #290 §13): no required role sequence, no quota, no full-history copying.
 const RPC_DELEGATION = [
 	`${SUBAGENT_DESCRIPTION_LEAD}: a pi of its own with a fresh context window and only the tools its role is granted. Children cannot delegate further.`,
@@ -126,8 +123,6 @@ function buildBaseSubagentDescription(catalog?: AgentDefinitionCatalog, oneShot 
 			? ["Background runs are unavailable in this one-shot mode: omit `background`.", ""]
 			: [
 					"Run in the foreground (the default) when your next step needs the result. Set `background: true` only when you have independent work to do meanwhile.",
-					"",
-					...RPC_RUNS_END,
 					"",
 				]),
 		"Available subagent roles, as found from your directory (a run given a `cwd` of its own finds roles from there):",
