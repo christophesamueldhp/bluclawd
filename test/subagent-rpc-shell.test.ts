@@ -202,9 +202,12 @@ describe.skipIf(!hasTmux || !contained)("a run's shell on pi's RPC", () => {
 			{ tool: "subagent", args: { agent: "general-purpose", name: "gp2", task: "Echo." }, until: gate },
 			{ text: "done" },
 		]);
-		for (const name of ["gp1", "gp2"]) {
-			real.script(name, [{ tool: "bash", args: { command: 'echo "[$PFX]"' } }, { text: "Echoed." }]);
-		}
+		real.script("gp1", [{ tool: "bash", args: { command: 'echo "[$PFX]"' } }, { text: "Echoed." }]);
+		real.script("gp2", [
+			{ tool: "bash", args: { command: 'echo "[$PFX]"' } },
+			{ tool: "bash", args: { command: "export Y=1" } },
+			{ text: "Echoed." },
+		]);
 		real.start(["--", "delegate"]);
 		await real.waitForRequests("main", 2);
 		// A rule the prefixed command would match, but the model's command does not.
@@ -221,7 +224,10 @@ describe.skipIf(!hasTmux || !contained)("a run's shell on pi's RPC", () => {
 		await real.waitForRequests("main", 3);
 
 		expect(toolResults(real.requests("gp1")[1])).toEqual(["[]\n"]);
-		expect(toolResults(real.requests("gp2")[1])).toEqual(["[applied]\n"]);
+		const [prefixed, denied] = toolResults(real.requests("gp2")[2]);
+		expect(prefixed).toBe("[applied]\n");
+		// The rule holds for this run: only the model's own command is judged by it.
+		expect(denied).toMatch(/Blocked by permission rule \(deny\): Bash\(export \*\)/);
 	});
 
 	it("is stopped only once every process its command started has ended, wherever it went", async () => {
