@@ -13,7 +13,6 @@ import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ImageContent } from "@earendil-works/pi-ai";
-import { SettingsManager } from "@earendil-works/pi-coding-agent";
 import {
 	type Component,
 	type Focusable,
@@ -102,7 +101,7 @@ export interface AgentViewOptions {
 	/** A peek reply to this window's own session: sent as its next prompt once the view closes. */
 	onSelfReply?: (text: string) => void;
 	/** ctrl+g's editor command, as pi resolves it: `externalEditor`, else $VISUAL / $EDITOR, else its default. */
-	externalEditor?: () => string;
+	externalEditor: () => string;
 	/** Clipboard IO is separate from the view so asynchronous paste never blocks rendering. */
 	readClipboard?: () => Promise<AgentClipboard>;
 	/** `/resume`: this repository's past sessions, newest first. */
@@ -494,7 +493,7 @@ export class AgentView implements Component, Focusable {
 
 	/** ctrl+g: edit the dispatch prompt in the editor pi's own ctrl+g opens. */
 	private async editExternally(): Promise<void> {
-		const command = (this.opts.externalEditor ?? (() => SettingsManager.inMemory().getExternalEditorCommand()))();
+		const command = this.opts.externalEditor();
 		const dir = mkdtempSync(join(tmpdir(), "pi-agents-"));
 		const file = join(dir, "prompt.md");
 		writeFileSync(file, this.composerText(), "utf-8");

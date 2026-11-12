@@ -194,7 +194,7 @@ function makeView(
 		mode: opts.mode,
 		listModels: opts.listModels,
 		instances,
-		externalEditor: opts.externalEditor,
+		externalEditor: opts.externalEditor ?? (() => "true"),
 	});
 	const flush = () => new Promise((r) => setTimeout(r, 0));
 	return {
@@ -754,6 +754,7 @@ describe("AgentView keys", () => {
 			appName: "bluclawd",
 			cwd: HERE,
 			home: HOME,
+			externalEditor: () => "true",
 			onClose: () => {},
 			panes: fakePanes([]),
 			self: () => {
@@ -1499,6 +1500,7 @@ describe("AgentView look", () => {
 			appName: "bluclawd",
 			cwd: HERE,
 			home: HOME,
+			externalEditor: () => "true",
 			self: () => self,
 			onClose: () => {},
 			instances: sessions,
@@ -1517,6 +1519,7 @@ describe("AgentView look", () => {
 			appName: "bluclawd",
 			cwd: HERE,
 			home: HOME,
+			externalEditor: () => "true",
 			self: () => self,
 			onClose: () => {},
 		});
@@ -1553,6 +1556,7 @@ describe("AgentView look", () => {
 				appName: "bluclawd",
 				cwd: HERE,
 				home: HOME,
+				externalEditor: () => "true",
 				onClose: () => {},
 				instances: [pane],
 			});
