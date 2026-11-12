@@ -28,14 +28,14 @@ function writeSession(dir: string, path: string, entries: object[]): void {
 	writeFileSync(join(dir, path), `${lines.map((line) => JSON.stringify(line)).join("\n")}\n`);
 }
 
-interface Usage {
+interface TokenUsage {
 	input?: number;
 	cacheRead?: number;
 	cacheWrite?: number;
 }
 
 /** An assistant message: one request, calling `calls` as `[name, arguments]`. */
-function request(at: number, calls: [string, object][] = [], usage: Usage = {}) {
+function request(at: number, calls: [string, object][] = [], usage: TokenUsage = {}) {
 	return {
 		type: "message",
 		message: {
@@ -149,11 +149,12 @@ describe("usageReport", () => {
 				],
 			]),
 			request(4, [["subagent", { agent: "please review my secret plan", task: "f" }]]),
+			request(5, [["subagent", { agent: { name: "linter", instructions: "secret" }, task: "g" }]]),
 		]);
 
 		expect(usageReport(dir).total.subagent).toEqual({
-			calls: 4,
-			roles: { explorer: 2, "general-purpose": 2, reviewer: 1, "(resume)": 1, "(other)": 1 },
+			calls: 5,
+			roles: { explorer: 2, "general-purpose": 2, reviewer: 1, "(resume)": 1, "(other)": 1, "(inline) linter": 1 },
 		});
 	});
 
@@ -175,6 +176,11 @@ describe("usageReport", () => {
 				{ type: "text", text: "56" },
 			]),
 			notice("subagent-message", "1"),
+			// Two Reports delivered as one message.
+			{
+				...notice("subagent-notification", "1234"),
+				details: { runs: [{ runId: "sub_1" }, { runId: "sub_2" }], messages: [] },
+			},
 			notice("web-search-results", "1234"),
 		]);
 
@@ -182,7 +188,7 @@ describe("usageReport", () => {
 			"task exits": { count: 2, chars: 8 },
 			"monitor events": { count: 1, chars: 7 },
 			"wake-ups": { count: 1, chars: 2 },
-			Reports: { count: 1, chars: 6 },
+			Reports: { count: 3, chars: 10 },
 			"run messages": { count: 1, chars: 1 },
 			"web-search-results": { count: 1, chars: 4 },
 		});
@@ -231,6 +237,45 @@ describe("usageReport", () => {
 			besideAwaited: { requests: 1, input: 20, cacheRead: 80, cacheWrite: 0 },
 			other: { requests: 2, input: 70, cacheRead: 130, cacheWrite: 0 },
 		});
+	});
+
+	it("counts only a resumed Run's first generation as awaited, as a Resume records no start", () => {
+		const run = (status: string, endedAt?: number) => ({
+			type: "custom",
+			customType: "bluclawd.subagent-run",
+			data: { runId: "sub_1", status, admittedAt: 100, endedAt },
+		});
+		const dir = sessionsDir();
+		writeSession(dir, "one.jsonl", [
+			run("starting"),
+			request(150, [], { input: 1 }),
+			run("closed", 200),
+			// Between the generations: the Run is closed.
+			request(250, [], { input: 2 }),
+			run("completed", 400),
+		]);
+
+		const { cache } = usageReport(dir).total;
+		expect(cache.awaited.input).toBe(1);
+		expect(cache.other.input).toBe(2);
+	});
+
+	it("reads past content blocks and declared tools it does not recognise", () => {
+		const dir = sessionsDir();
+		writeSession(dir, "one.jsonl", [
+			{
+				type: "message",
+				message: { role: "system", content: "", toolsAdded: [null, { name: "bash" }], timestamp: 0 },
+			},
+			{
+				type: "message",
+				message: { role: "assistant", content: [null, { type: "toolCall", name: "bash" }], timestamp: 1 },
+			},
+		]);
+
+		const { total } = usageReport(dir);
+		expect(total.tools).toEqual({ bash: 1 });
+		expect(total.declared).toEqual({ bash: 1 });
 	});
 
 	it("names the files it cannot parse and leaves them out of the figures", () => {

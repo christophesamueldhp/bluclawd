@@ -38,8 +38,9 @@ export interface Usage {
 	notices: Record<string, Sizes>;
 	/**
 	 * Token figures of the requests made while a Run was awaited, of the other requests of the sessions that made
-	 * such requests, and of all other requests. A Run counts as awaited from its admission to its end: the session
-	 * files do not say when it sat idle, so this is an upper bound.
+	 * such requests, and of all other requests. A Run counts as awaited from its admission to the end of its first
+	 * generation: the session files do not say when it sat idle, so this is an upper bound, and a Resume records no
+	 * start, so later generations are left out.
 	 */
 	cache: { awaited: CacheFigures; besideAwaited: CacheFigures; other: CacheFigures };
 }
@@ -68,21 +69,18 @@ interface Entry {
 	customType?: string;
 	content?: unknown;
 	data?: { runId?: string; admittedAt?: number; endedAt?: number };
+	details?: { runs?: unknown[] };
 	message?: {
 		role: string;
 		content?: unknown;
-		nestedCalls?: { calls?: { name: string }[] };
-		toolsAdded?: { name: string }[];
+		nestedCalls?: { calls?: unknown[] };
+		toolsAdded?: unknown[];
 		usage?: { input?: number; cacheRead?: number; cacheWrite?: number };
 		timestamp?: number;
 	};
 }
 
-interface ToolCall {
-	type: "toolCall";
-	name: string;
-	arguments?: SubagentArguments;
-}
+const isObject = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null;
 
 interface SubagentStep {
 	agent?: unknown;
@@ -133,8 +131,15 @@ function textChars(content: unknown): number {
 	return content.reduce((sum, block) => sum + (typeof block?.text === "string" ? block.text.length : 0), 0);
 }
 
+const isName = (value: unknown): value is string => typeof value === "string" && /^[\w.-]{1,64}$/.test(value);
+
 /** A role as the model named it; anything not shaped like a name is not printed, as it may be the user's text. */
-const roleName = (agent: unknown) => (typeof agent === "string" && /^[\w.-]{1,64}$/.test(agent) ? agent : "(other)");
+function roleName(agent: unknown): string {
+	if (isName(agent)) return agent;
+	// A role defined in the call itself.
+	if (isObject(agent) && isName(agent.name)) return `(inline) ${agent.name}`;
+	return "(other)";
+}
 
 function subagentRoles(args: SubagentArguments | undefined): string[] {
 	const steps = args?.tasks ?? args?.chain ?? [args ?? {}];
@@ -149,13 +154,15 @@ function sessionFiles(dir: string): string[] {
 		.sort();
 }
 
-/** When each Run of the session was admitted and, once it ended, when; its latest record holds both. */
+/** When each Run of the session was admitted and when its first generation ended, from its records. */
 function runIntervals(entries: Entry[]): { from: number; to: number }[] {
 	const runs = new Map<string, { from: number; to: number }>();
 	for (const { type, customType, data } of entries) {
 		if (type !== "custom" || customType !== SUBAGENT_RUN_CUSTOM_ENTRY || !data?.runId) continue;
 		if (typeof data.admittedAt !== "number") continue;
-		runs.set(data.runId, { from: data.admittedAt, to: data.endedAt ?? Number.POSITIVE_INFINITY });
+		const run = runs.get(data.runId) ?? { from: data.admittedAt, to: Number.POSITIVE_INFINITY };
+		if (run.to === Number.POSITIVE_INFINITY && typeof data.endedAt === "number") run.to = data.endedAt;
+		runs.set(data.runId, run);
 	}
 	return [...runs.values()];
 }
@@ -167,11 +174,19 @@ function usageOf(entries: Entry[]): Usage {
 	for (const entry of entries) {
 		if (entry.type === "custom_message" && entry.customType) {
 			const kind = NOTICE_KINDS[entry.customType] ?? entry.customType;
-			addSizes(usage.notices, kind, { count: 1, chars: textChars(entry.content) });
+			// Reports that arrive together are delivered as one message.
+			const runs = entry.customType === SUBAGENT_NOTIFICATION_CUSTOM_TYPE ? entry.details?.runs : undefined;
+			addSizes(usage.notices, kind, {
+				count: Array.isArray(runs) ? runs.length : 1,
+				chars: textChars(entry.content),
+			});
 		}
 		const message = entry.message;
 		if (entry.type !== "message" || !message) continue;
-		if (message.role === "system") for (const tool of message.toolsAdded ?? []) usage.declared[tool.name] = 1;
+		if (message.role === "system") {
+			for (const tool of message.toolsAdded ?? [])
+				if (isObject(tool) && isName(tool.name)) usage.declared[tool.name] = 1;
+		}
 		if (message.role === "assistant" && message.usage) {
 			// An assistant message is stamped as its request's stream starts.
 			const at = message.timestamp;
@@ -183,17 +198,19 @@ function usageOf(entries: Entry[]): Usage {
 			});
 		}
 		if (message.role === "assistant" && Array.isArray(message.content)) {
-			for (const block of message.content as ToolCall[]) {
-				if (block.type !== "toolCall") continue;
+			for (const block of message.content) {
+				if (!isObject(block) || block.type !== "toolCall" || typeof block.name !== "string") continue;
 				add(usage.tools, block.name);
 				if (block.name !== "subagent") continue;
 				usage.subagent.calls++;
-				for (const role of subagentRoles(block.arguments)) add(usage.subagent.roles, role);
+				for (const role of subagentRoles(block.arguments as SubagentArguments | undefined))
+					add(usage.subagent.roles, role);
 			}
 		}
 		// The tools pi's codemode called for the model are recorded on its result.
 		if (message.role === "toolResult")
-			for (const call of message.nestedCalls?.calls ?? []) add(usage.tools, call.name);
+			for (const call of message.nestedCalls?.calls ?? [])
+				if (isObject(call) && typeof call.name === "string") add(usage.tools, call.name);
 	}
 	if (usage.cache.awaited.requests > 0) addCache(usage.cache.besideAwaited, usage.cache.other);
 	return usage;
