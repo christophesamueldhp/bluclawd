@@ -7,7 +7,7 @@ import { ALL_TOOLS, capturePrefixes, capturePrompt } from "../scripts/prompt-foo
  * smaller.
  */
 const PROFILES = { "the default profile": {}, "all tools declared": ALL_TOOLS };
-const CEILINGS = { "the default profile": 16_592, "all tools declared": 22_914 };
+const CEILINGS = { "the default profile": 15_733, "all tools declared": 22_055 };
 
 /** Each bundled role's run footprint, held the same way. */
 const RUN_CEILINGS = { explorer: 2_789, "general-purpose": 3_858, reviewer: 2_989 };
