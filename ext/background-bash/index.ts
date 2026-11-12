@@ -202,8 +202,9 @@ const backgroundBash: InlineExtension = {
 
 		const owner = () => ctx?.sessionManager?.getSessionId();
 
-		// The user's configured shell, read per session.
+		// The user's configured shell and command prefix, read per session.
 		let shellPath: string | undefined;
+		let commandPrefix: string | undefined;
 		// Inside the sandbox when it is on (ext/sandbox): every model shell command runs through here.
 		const operations: BashOperations = {
 			exec: wrapExec(
@@ -218,6 +219,7 @@ const backgroundBash: InlineExtension = {
 			createBackgroundBashTool({
 				cwd: localCwd,
 				operations,
+				commandPrefix: () => commandPrefix,
 				sendMessage: (message, delivery) => deliverOrHold(() => mainSession.sendMessage(message, delivery)),
 				isMain: true,
 				record: {
@@ -528,9 +530,12 @@ const backgroundBash: InlineExtension = {
 				appendEntry: (customType, data) => pi.appendEntry(customType, data),
 			});
 			try {
-				shellPath = startupSettings(event, startCtx).settings.getShellPath();
+				const { settings } = startupSettings(event, startCtx);
+				shellPath = settings.getShellPath();
+				commandPrefix = settings.getShellCommandPrefix();
 			} catch {
 				shellPath = undefined;
+				commandPrefix = undefined;
 			}
 			const session = startCtx.sessionManager.getSessionId();
 			// Background shells survive /clear: the new session owns them.

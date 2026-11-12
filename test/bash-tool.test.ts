@@ -156,6 +156,53 @@ describe("timeouts", () => {
 	});
 });
 
+describe("pi's shellCommandPrefix", () => {
+	const commandPrefix = () => "export PFX=applied";
+
+	it("runs a run_in_background command after the prefix, and lists it as the model wrote it", async () => {
+		const { ops, calls } = fakeOps();
+		const { tool } = makeTool(ops, { commandPrefix });
+		const result = await tool.execute(
+			"p1",
+			{ command: "npm run dev", run_in_background: true } as never,
+			undefined,
+			undefined,
+			ctx,
+		);
+		await waitFor(() => expect(calls.length).toBe(1));
+		expect(calls[0].command).toBe("export PFX=applied\nnpm run dev");
+		const id = (result.details as { backgroundTaskId: string }).backgroundTaskId;
+		expect(backgroundBashJobs.get(id)?.command).toBe("npm run dev");
+	});
+
+	it("runs a foreground command after the prefix once, and keeps it as written when it moves at its timeout", async () => {
+		const { ops, calls } = fakeOps();
+		const { tool } = makeTool(ops, { commandPrefix });
+		const result = await tool.execute(
+			"p2",
+			{ command: "npm run dev", timeout: 20 } as never,
+			undefined,
+			undefined,
+			ctx,
+		);
+		expect(calls[0].command).toBe("export PFX=applied\nnpm run dev");
+		const id = (result.details as { backgroundTaskId: string }).backgroundTaskId;
+		expect(backgroundBashJobs.get(id)?.command).toBe("npm run dev");
+	});
+
+	it("runs commands as written when the setting is absent", async () => {
+		const { ops, calls } = fakeOps();
+		const { tool } = makeTool(ops, { commandPrefix: () => undefined });
+		const run = tool.execute("p3", { command: "echo hi" } as never, undefined, undefined, ctx);
+		await waitFor(() => expect(calls.length).toBe(1));
+		calls[0].finish(0);
+		await run;
+		await tool.execute("p4", { command: "tail -f log", run_in_background: true } as never, undefined, undefined, ctx);
+		await waitFor(() => expect(calls.length).toBe(2));
+		expect(calls.map((call) => call.command)).toEqual(["echo hi", "tail -f log"]);
+	});
+});
+
 describe("backgroundStartText", () => {
 	const job = { id: "b12345678", command: "npm run dev", outputFile: "/tmp/o/b12345678.output" } as never;
 

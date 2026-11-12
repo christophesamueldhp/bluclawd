@@ -269,7 +269,9 @@ describe.skipIf(!hasTmux)("a chain of RPC runs", () => {
 		expect(unknownResume).toMatch(
 			/chain\[0\]: `resume` names an earlier step of this chain .* no earlier step is named "w"/,
 		);
-		expect(resumeWithAgent).toMatch(/chain\[1\]: a step that resumes an earlier one .* leave out `agent`/);
+		expect(resumeWithAgent).toMatch(
+			/chain\[1\]: a step that resumes an earlier one .*`agent` differs from chain\[0\]'s .* leave out `agent`/,
+		);
 		expect(invalid).toMatch(/^No step of the chain was started:/);
 		expect(invalid).not.toMatch(/^- chain\[0\]/m);
 		// One worktree for every step: a step in another repository cannot share it.

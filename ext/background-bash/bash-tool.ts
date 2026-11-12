@@ -66,7 +66,8 @@ export const wentToBackground = (details: unknown) => Boolean((details as BashDe
 export interface BackgroundBashOptions {
 	cwd: string;
 	shellPath?: string;
-	commandPrefix?: string;
+	/** pi's `shellCommandPrefix`, read per command: the settings are read after the tool is built. */
+	commandPrefix?: () => string | undefined;
 	/** What every command runs through. */
 	operations: BashOperations;
 	/** Where a job's notifications go: the session that started it. */
@@ -127,8 +128,8 @@ function timeoutError(err: unknown, timeoutMs: number): unknown {
 }
 
 export function createBackgroundBashTool(options: BackgroundBashOptions): ToolDefinition {
-	const { cwd, shellPath, commandPrefix } = options;
-	const base = createBashToolDefinition(cwd, { shellPath, commandPrefix });
+	const { cwd, shellPath } = options;
+	const base = createBashToolDefinition(cwd, { shellPath });
 	const disabled = backgroundTasksDisabled();
 
 	const parameters = Type.Object({
@@ -174,7 +175,11 @@ export function createBackgroundBashTool(options: BackgroundBashOptions): ToolDe
 			const { description, run_in_background, timeout, ...rest } = rawParams as Params;
 			const command = String(rest.command ?? "");
 			const startedAt = performance.now();
-			const ops = options.operations;
+			const prefix = options.commandPrefix?.();
+			// Prefixed as pi's own bash does, but below the job and the foreground shell, which keep the model's command.
+			const ops: BashOperations = prefix
+				? { exec: (cmd, dir, execOptions) => options.operations.exec(`${prefix}\n${cmd}`, dir, execOptions) }
+				: options.operations;
 			const owner = ctx?.sessionManager?.getSessionId();
 			// A child session's jobs carry its session id as their agent id: the main
 			// session sees and may stop them, another child may not.
@@ -241,7 +246,7 @@ export function createBackgroundBashTool(options: BackgroundBashOptions): ToolDe
 			const exec = disabled
 				? ops.exec
 				: detachableExec(ops.exec, { description, owner, agentId, onExit, onStall, autoBackground: auto });
-			const tool = createBashTool(cwd, { shellPath, commandPrefix, operations: { exec } });
+			const tool = createBashTool(cwd, { shellPath, operations: { exec } });
 			try {
 				return (await tool.execute(id, { ...rest, timeout: timeoutMs / 1000 } as never, signal, onUpdate)) as never;
 			} catch (err) {
