@@ -5,6 +5,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getAgentDir, type SettingsManager } from "@earendil-works/pi-coding-agent";
+import { createMcpToolName } from "@earendil-works/pi-mcp";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { denyRules, invalidDenyScopes } from "../ext/_shared/settings.ts";
 import permissions, { TRUST_CHANGED, trustStatusText } from "../ext/permissions/index.ts";
@@ -84,6 +85,36 @@ describe("deniedBy", () => {
 		expect(denied(["Mcp(github:get_me)"], "mcp__github__get_me", {})).toBe(true);
 		expect(denied(["mcp__github"], "mcp__gitlab__get_me", {})).toBe(false);
 		expect(denied(["WebFetch(domain:*.evil.com)"], "webfetch", { url: "https://a.evil.com/x" })).toBe(true);
+	});
+
+	it("names an MCP server or tool as written in mcp.json, the way pi names its tools", () => {
+		for (const [server, tool] of [
+			["dev-radius", "search"],
+			["my.server", "list"],
+			["a--b", "run"],
+			["github", "get-me"],
+		]) {
+			const name = createMcpToolName(server, tool);
+			for (const rule of [
+				`mcp__${server}`,
+				`mcp__${server}__*`,
+				`mcp__${server}__${tool}`,
+				`Mcp(${server}:*)`,
+				`Mcp(${server}:${tool})`,
+			]) {
+				expect(denied([rule], name, {}), `${rule} vs ${name}`).toBe(true);
+			}
+		}
+		expect(createMcpToolName("a--b", "run")).toBe("mcp__a__b__run");
+		expect(denied(["mcp__dev-radius__*"], "mcp__dev_radiusx__search", {})).toBe(false);
+		expect(denied(["Mcp(github:get-me)"], "mcp__github__get_mex", {})).toBe(false);
+	});
+
+	it("reads `Mcp(server:tool)` around spaces", () => {
+		for (const rule of ["Mcp(srv: tool)", "Mcp( srv :*)", "Mcp( srv )"]) {
+			expect(denied([rule], "mcp__srv__tool", {}), rule).toBe(true);
+		}
+		expect(denied(["Mcp(srv: tool)"], "mcp__srv__other", {})).toBe(false);
 	});
 
 	it("leaves a longer command name alone, and ungoverned tools", () => {
@@ -409,6 +440,72 @@ describe("the extension", () => {
 		expect((await call("powershell", { command: "Get-Content .env" }))?.block).toBe(true);
 		expect((await call("powershell", { command: "Select-String -Path .env -Pattern A" }))?.block).toBe(true);
 		expect(await call("powershell", { command: "Get-ChildItem" })).toBeUndefined();
+	});
+
+	it("judges a resource call on a server as that server's MCP tool", async () => {
+		const resourceTools = ["list_mcp_resources", "list_mcp_resource_templates", "read_mcp_resource"];
+		for (const rule of ["mcp__dev-radius", "mcp__dev-radius__*", "Mcp(dev-radius:*)"]) {
+			const { handlers, ctx, call } = load({ permissions: { deny: [rule] } });
+			await handlers.session_start({}, ctx);
+			for (const tool of resourceTools) {
+				expect(await call(tool, { server: " dev-radius ", uri: "x://a" }), `${rule} vs ${tool}`).toEqual({
+					block: true,
+					reason: `Blocked by permission rule (deny): ${rule}`,
+				});
+				expect(await call(tool, { server: "github", uri: "x://a" }), `${rule} vs ${tool}`).toBeUndefined();
+			}
+		}
+	});
+
+	it("blocks listing every server's resources while a rule denies a whole server", async () => {
+		for (const rule of [
+			"mcp__dev-radius",
+			"mcp__dev-radius__*",
+			"Mcp(dev-radius:*)",
+			"Mcp(dev-radius)",
+			"Mcp",
+			"mcp__*",
+			// A server name can hold `__`, or gain one when spelled (`a--b`).
+			"mcp__a__b__*",
+			"Mcp(a--b:*)",
+		]) {
+			const { handlers, ctx, call } = load({ permissions: { deny: [rule] } });
+			await handlers.session_start({}, ctx);
+			for (const tool of ["list_mcp_resources", "list_mcp_resource_templates"]) {
+				for (const input of [{}, { server: "" }, { server: "  " }]) {
+					expect(await call(tool, input), `${rule} vs ${tool} ${JSON.stringify(input)}`).toEqual({
+						block: true,
+						reason: `Blocked by permission rule (deny): ${rule}. Pass \`server\` to list one server's resources.`,
+					});
+				}
+			}
+		}
+		// A rule on the listing tool itself denies that server's listing too.
+		for (const rule of ["Mcp(dev-radius:list_mcp_resources)", "mcp__srv__list_mcp_*"]) {
+			const listing = load({ permissions: { deny: [rule] } });
+			await listing.handlers.session_start({}, listing.ctx);
+			expect((await listing.call("list_mcp_resources", {}))?.block, rule).toBe(true);
+		}
+		const listing = load({ permissions: { deny: ["Mcp(dev-radius:list_mcp_resources)"] } });
+		await listing.handlers.session_start({}, listing.ctx);
+		expect(await listing.call("list_mcp_resource_templates", {})).toBeUndefined();
+		// A tool glob does not, though a server named to fit it has its own listing blocked.
+		for (const [rule, server] of [
+			["mcp__srv__x*", "srv--xy"],
+			["Mcp(*:x*)", "a--xyz"],
+			["Mcp(*:delete_*)", "a--delete-me"],
+			["mcp__github__delete_*", "github--delete-x"],
+		]) {
+			const { handlers, ctx, call } = load({ permissions: { deny: [rule] } });
+			await handlers.session_start({}, ctx);
+			expect((await call("list_mcp_resources", { server }))?.block, `${rule} vs ${server}`).toBe(true);
+			expect(await call("list_mcp_resources", {}), rule).toBeUndefined();
+		}
+		for (const deny of [[], ["mcp__github__delete_repo"], ["Mcp(github:get_me)"], ["Bash(rm *)"]]) {
+			const { handlers, ctx, call } = load({ permissions: { deny } });
+			await handlers.session_start({}, ctx);
+			expect(await call("list_mcp_resources", {}), JSON.stringify(deny)).toBeUndefined();
+		}
 	});
 
 	it("leaves a Read-denied file's lines out of a folder grep", async () => {

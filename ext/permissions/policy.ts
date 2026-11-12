@@ -1,6 +1,13 @@
 import type { ToolCallEventResult, ToolResultEventResult } from "@earendil-works/pi-coding-agent";
 import { monitorSource } from "../_shared/monitor-source.ts";
-import { deniedBy, displayRule, grepOutputWithoutDenied, searchQueries } from "./rules.ts";
+import {
+	deniedBy,
+	deniesResourceToolOnSomeServer,
+	displayRule,
+	grepOutputWithoutDenied,
+	mcpToolName,
+	searchQueries,
+} from "./rules.ts";
 
 export interface SubagentDelegationDenyResult {
 	readonly blocked: boolean;
@@ -20,11 +27,22 @@ export function governedToolCall(
 		return source.kind === "ws" ? { tool: "webfetch", input: { url: source.url } } : { tool: "bash", input };
 	}
 	if (tool === "powershell") return { tool: "bash", input };
-	if (tool === "mcp_read_resource" || tool === "mcp_list_resources") {
-		const server = typeof input.server === "string" ? input.server : "";
-		if (server) return { tool: `mcp__${server}__${tool.slice("mcp_".length)}`, input };
-	}
+	const server = mcpResourceServer(tool, input);
+	if (server !== undefined) return { tool: mcpToolName(server, tool), input };
 	return { tool, input };
+}
+
+/** pi's MCP resource tools that list; without a `server` they list every server. */
+const MCP_LISTING_TOOLS = new Set(["list_mcp_resources", "list_mcp_resource_templates"]);
+
+/** The server a resource call names, trimmed as pi reads it. */
+function mcpResourceServer(tool: string, input: Record<string, unknown>): string | undefined {
+	if (!MCP_LISTING_TOOLS.has(tool) && tool !== "read_mcp_resource") return undefined;
+	return typeof input.server === "string" ? input.server.trim() || undefined : undefined;
+}
+
+function denyReason(rule: string): string {
+	return `Blocked by permission rule (deny): ${displayRule(rule)}`;
 }
 
 export function evaluateToolCallDeny(
@@ -35,6 +53,15 @@ export function evaluateToolCallDeny(
 ): ToolCallEventResult | undefined {
 	const deny = [...denyRules];
 	const { tool, input } = governedToolCall(toolName, rawInput);
+	// A listing that kept its name named no server, so it lists every server, a denied one's
+	// resources too; pi's truncation saves the whole listing to a file, so it cannot be filtered
+	// after the call.
+	if (MCP_LISTING_TOOLS.has(tool)) {
+		const rule = deny.find((r) => deniesResourceToolOnSomeServer(r, tool));
+		if (rule !== undefined) {
+			return { block: true, reason: `${denyReason(rule)}. Pass \`server\` to list one server's resources.` };
+		}
+	}
 	// A batch is judged item by item: each query of a websearch, each url of a webfetch.
 	const urls = tool === "webfetch" && Array.isArray(input.urls) ? input.urls.filter((u) => typeof u === "string") : [];
 	const calls =
@@ -45,7 +72,7 @@ export function evaluateToolCallDeny(
 				: [input];
 	const rule = calls.map((call) => deniedBy(deny, tool, call, cwd)).find((r) => r !== undefined);
 	if (rule === undefined) return undefined;
-	return { block: true, reason: `Blocked by permission rule (deny): ${displayRule(rule)}` };
+	return { block: true, reason: denyReason(rule) };
 }
 
 export function evaluateSubagentDelegationDeny(
@@ -57,11 +84,10 @@ export function evaluateSubagentDelegationDeny(
 	if (rule === undefined) {
 		return { blocked: false };
 	}
-	const display = displayRule(rule);
 	return {
 		blocked: true,
-		rule: display,
-		reason: `Blocked by permission rule (deny): ${display}`,
+		rule: displayRule(rule),
+		reason: denyReason(rule),
 	};
 }
 
