@@ -388,4 +388,9 @@ describe("monitor tool with pi's shellCommandPrefix", () => {
 		expect(content).toContain("<event>applied</event>");
 		expect(content).not.toContain("noise");
 	});
+
+	it("lets the command use aliases the prefix defines, as pi's alias recipe does", async () => {
+		const { content } = await watch("hi", () => "shopt -s expand_aliases\nalias hi='echo aliased'");
+		expect(content).toContain("<event>aliased</event>");
+	});
 });

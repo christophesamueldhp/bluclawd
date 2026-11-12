@@ -22,6 +22,7 @@ import {
 	type ToolResultEventResult,
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import { withCommandPrefix } from "../_shared/command-prefix.ts";
 import { resolveToCwd } from "../_shared/path-resolve.ts";
 import { startupSettings } from "../_shared/startup-settings.ts";
 import { evaluateToolCallDeny, filterDeniedGrepToolResult } from "../permissions/policy.ts";
@@ -180,22 +181,25 @@ export default function rpcChild(pi: ExtensionAPI): void {
 			commandPrefix = undefined;
 		}
 	});
-	const currentPrefix = () => commandPrefix;
-	const shell = runShell(currentPolicy, currentPrefix, async (run) => {
-		while (commandRunning) await commandRunning;
-		let done = () => {};
-		commandRunning = new Promise((resolve) => {
-			done = resolve;
-		});
-		try {
-			// A file tool checks its path before it runs: no command may change what that path leads to meanwhile.
-			while (fileToolsRunning.size > 0) await new Promise((resolve) => setTimeout(resolve, 10));
-			return await run();
-		} finally {
-			commandRunning = undefined;
-			done();
-		}
-	});
+	const shell = runShell(
+		currentPolicy,
+		() => commandPrefix,
+		async (run) => {
+			while (commandRunning) await commandRunning;
+			let done = () => {};
+			commandRunning = new Promise((resolve) => {
+				done = resolve;
+			});
+			try {
+				// A file tool checks its path before it runs: no command may change what that path leads to meanwhile.
+				while (fileToolsRunning.size > 0) await new Promise((resolve) => setTimeout(resolve, 10));
+				return await run();
+			} finally {
+				commandRunning = undefined;
+				done();
+			}
+		},
+	);
 
 	pi.on("tool_call", async (event, ctx): Promise<ToolCallEventResult | undefined> => {
 		const admitted = currentPolicy();
@@ -350,7 +354,7 @@ function runShell(
 		const current = shell;
 		const prefix = commandPrefix();
 		// Below the tool, as pi's own bash prefixes: its deny rules judged the command as the model wrote it.
-		return exclusive(() => current.exec(prefix ? `${prefix}\n${command}` : command, cwd, options));
+		return exclusive(() => current.exec(withCommandPrefix(prefix, command), cwd, options));
 	};
 	const base = createBashToolDefinition(process.cwd(), { operations: { exec } });
 	return {

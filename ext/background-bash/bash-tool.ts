@@ -10,6 +10,7 @@ import type { BashOperations, ToolDefinition } from "@earendil-works/pi-coding-a
 import { createBashTool, createBashToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { type Static, Type } from "typebox";
+import { withCommandPrefix } from "../_shared/command-prefix.ts";
 import { type BackgroundJobInfo, backgroundBashJobs } from "./background-bash.ts";
 import {
 	autoBackgroundTimeoutMs,
@@ -172,7 +173,10 @@ export function createBackgroundBashTool(options: BackgroundBashOptions): ToolDe
 			const prefix = options.commandPrefix?.();
 			// Prefixed as pi's own bash does, but below the job and the foreground shell, which keep the model's command.
 			const ops: BashOperations = prefix
-				? { exec: (cmd, dir, execOptions) => options.operations.exec(`${prefix}\n${cmd}`, dir, execOptions) }
+				? {
+						exec: (cmd, dir, execOptions) =>
+							options.operations.exec(withCommandPrefix(prefix, cmd), dir, execOptions),
+					}
 				: options.operations;
 			const owner = ctx?.sessionManager?.getSessionId();
 			// A child session's jobs carry its session id as their agent id: the main
