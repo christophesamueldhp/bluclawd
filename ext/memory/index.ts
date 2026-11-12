@@ -39,6 +39,8 @@ const reply = (text: string, isError = false) => ({
 });
 
 const TIDY_UP = "Merge related Memories or delete stale ones.";
+const TOOL_OFF =
+	'The memory tool is off, so this session neither loads nor saves Memories. Turn it on with "defaultTools": ["+memory"] in ~/.pi/agent/settings.json, or for one session with pi --tools +memory.';
 const lines = (count: number) => `${count} line${count === 1 ? "" : "s"}`;
 
 /**
@@ -77,14 +79,18 @@ export function createMemoryExtension(options: { agentDir?: string } = {}): Exte
 		const agentDir = () => options.agentDir ?? getAgentDir();
 		let dir: string | undefined;
 		let section: string | undefined;
+		/** Whether the user's `defaultTools` or `--tools` gave this session the memory tool. */
+		let toolOn = false;
 
 		// The toggle is read once per session start, like the Memory index. pi registers tools
 		// when it loads the extension, so turned off, the tool is left out of the active set.
+		// The section goes with the tool.
 		pi.on("session_start", async (_event, ctx) => {
 			const enabled = loadMemoryEnabled(agentDir());
+			toolOn = pi.getActiveTools().includes("memory");
 			if (!enabled) pi.setActiveTools(pi.getActiveTools().filter((tool) => tool !== "memory"));
 			dir = enabled ? memoryDir(agentDir(), await resolveProject(pi, ctx.cwd)) : undefined;
-			section = dir ? promptSection(readIndex(dir)) : undefined;
+			section = dir && toolOn ? promptSection(readIndex(dir)) : undefined;
 		});
 
 		pi.on("before_agent_start", (event) => {
@@ -95,6 +101,8 @@ export function createMemoryExtension(options: { agentDir?: string } = {}): Exte
 			name: "memory",
 			label: "Memory",
 			exposure: "model-only",
+			// Off unless the user's `defaultTools` or `--tools` names it: few sessions call it, and every request pays for it.
+			defaultActive: false,
 			description:
 				"Save, read or delete a Memory of this Project. save needs description, type and body, and replaces a Memory of the same name.",
 			parameters: PARAMETERS,
@@ -134,18 +142,26 @@ export function createMemoryExtension(options: { agentDir?: string } = {}): Exte
 				const memories = listMemories(project);
 				const labels = memories.map((m) => `${m.name} (${m.type}) — ${m.description}`);
 				const status = `Memory ${enabled ? "on" : "off"}`;
+				const toolNote = toolOn ? [] : [TOOL_OFF];
 				if (!ctx.hasUI) {
-					ctx.ui.notify([`${status}: ${project}`, ...labels].join("\n"), "info");
+					ctx.ui.notify([`${status}: ${project}`, ...toolNote, ...labels].join("\n"), "info");
 					return;
 				}
 				const toggle = enabled ? "Turn memory off" : "Turn memory on";
-				const title = `${status} · ${memories.length === 0 ? "no Memories yet" : `${memories.length} Memories`}\n${project}`;
+				const title = [
+					`${status} · ${memories.length === 0 ? "no Memories yet" : `${memories.length} Memories`}`,
+					project,
+					...toolNote,
+				].join("\n");
 				const choice = await ctx.ui.select(title, [...labels, toggle]);
 				if (!choice) return;
 				if (choice === toggle) {
 					saveMemoryEnabled(agentDir(), !enabled);
+					// pi's /reload keeps a tool left out of the active set at session start left out.
 					ctx.ui.notify(
-						`Memory turned ${enabled ? "off" : "on"}. It applies from the next session or /reload.`,
+						enabled
+							? "Memory turned off. It applies from the next session or /reload."
+							: ["Memory turned on. It applies from the next session.", ...toolNote].join("\n"),
 						"info",
 					);
 					return;

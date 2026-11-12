@@ -335,6 +335,8 @@ const backgroundBash: InlineExtension = {
 			pi.registerTool({
 				name: "schedule_wakeup",
 				label: "ScheduleWakeup",
+				// Off unless the user's `defaultTools` or `--tools` names it: few sessions call it, and every request pays for it.
+				defaultActive: false,
 				description: [
 					"- Schedules a turn of your own: once it is due, you get a notice with the prompt you give here and start a turn",
 					"- Give exactly one of delay (seconds from now) or at (a local 24-hour clock time, HH:MM; its next occurrence)",
@@ -380,7 +382,6 @@ const backgroundBash: InlineExtension = {
 				"- Takes a task_id parameter identifying the task to stop",
 				"- Returns a success or failure status",
 				"- Use this tool when you need to terminate a long-running task",
-				"- Also cancels a pending wake-up (schedule_wakeup) by its ID",
 			].join("\n"),
 			parameters: Type.Object({
 				task_id: Type.Optional(Type.String({ description: "The ID of the background task to stop" })),

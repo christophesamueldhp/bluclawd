@@ -47,10 +47,11 @@ const textOf = (content: unknown) =>
 /**
  * A pi on a faux model with background-bash, its session persisted under `dir` (a new one, or `sessionFile` opened
  * as pi started on it would). The clock is faked from 13:30 (and still moving, so pi's own timers run); a second
- * start in the same test keeps it. Each model call records the context it saw.
+ * start in the same test keeps it. Each model call records the context it saw. Unless `wakeupTool` is false,
+ * pi's `--tools +schedule_wakeup` turns the tool on.
  */
 async function startSession(
-	options: { dir?: string; sessionFile?: string; provider?: string; lateAuth?: boolean } = {},
+	options: { dir?: string; sessionFile?: string; provider?: string; lateAuth?: boolean; wakeupTool?: boolean } = {},
 ) {
 	if (!vi.isFakeTimers()) {
 		vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"], shouldAdvanceTime: true, now: NOW });
@@ -103,6 +104,7 @@ async function startSession(
 				model: options.lateAuth ? undefined : faux.getModel("faux-main"),
 				thinkingLevel: "low",
 				noTools: "builtin",
+				tools: options.wakeupTool === false ? undefined : ["+schedule_wakeup"],
 			});
 			return { ...created, services, diagnostics: services.diagnostics };
 		},
@@ -347,6 +349,31 @@ describe("a wake-up's lifetime", () => {
 		expect(textOf(second.at(-2)?.content)).toBe("Did the first.");
 		expect(textOf(second.at(-1)?.content)).toContain("Second thing.");
 		expect(textOf(second.at(-1)?.content)).toContain("it was due at 2026-11-10 13:35");
+		expect(wakeups.list()).toEqual([]);
+	});
+
+	it("fires, or is cancelled by task_stop, in a session reopened without schedule_wakeup", async () => {
+		const first = await startSession();
+		first.replies([
+			call("schedule_wakeup", { prompt: "Check the deploy.", delay: 120 }),
+			call("schedule_wakeup", { prompt: "Never.", delay: 600 }),
+			fauxAssistantMessage("Scheduled."),
+		]);
+		await first.session.prompt("deploy", { expandPromptTemplates: false });
+		const never = wakeupId(lastText(first.seen[2]));
+		const sessionFile = first.session.sessionFile;
+		crash(first.runtime);
+
+		const reopened = await startSession({ dir: first.dir, sessionFile, wakeupTool: false });
+		expect(reopened.session.getActiveToolNames()).not.toContain("schedule_wakeup");
+		reopened.replies([call("task_stop", { task_id: never ?? "" }), fauxAssistantMessage("Cancelled.")]);
+		await reopened.session.prompt("cancel it", { expandPromptTemplates: false });
+		expect(lastText(reopened.seen[1])).toContain(`Successfully cancelled wake-up: ${never}`);
+
+		reopened.replies([fauxAssistantMessage("Deploy is fine.")]);
+		vi.advanceTimersByTime(2 * MINUTE);
+		await waitFor(() => reopened.seen.length === 3);
+		expect(lastText(reopened.seen[2])).toContain("Check the deploy.");
 		expect(wakeups.list()).toEqual([]);
 	});
 
