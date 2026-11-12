@@ -196,7 +196,8 @@ describe.skipIf(!hasTmux)("a run in a pane of its own", () => {
 		await waitFor(() => expect(real.shown()).toBe(pane));
 		crash(real, orchestrator);
 		const reopened = real.start(["--session", sessionFile]);
-		await waitFor(() => expect(real.tmux.capture(reopened, 80).join("\n")).toMatch(/look\s.*needs input/));
+		const panel = () => real.tmux.capture(reopened, 80).join("\n");
+		await waitFor(() => expect(panel()).toMatch(/look\s.*needs input/));
 
 		// No one watches its pane, but its reopened orchestrator's panel says it needs input: it waits, past RPC's 5 s.
 		real.tmux.moveClients(pane, reopened);
@@ -204,6 +205,7 @@ describe.skipIf(!hasTmux)("a run in a pane of its own", () => {
 		await new Promise((resolve) => setTimeout(resolve, 7000));
 		expect(real.requests("look")).toHaveLength(1);
 		expect(asking()).toContain("Allow this subagent read");
+		expect(panel()).toMatch(/look\s.*needs input/);
 
 		// Answered in its pane, it goes on; ← goes back to the reopened orchestrator.
 		real.tmux.moveClients(reopened, pane);
