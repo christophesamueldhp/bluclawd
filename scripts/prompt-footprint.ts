@@ -8,7 +8,7 @@
 // `capturePrompt` and `capturePrefixes` are also used by test/prompt-footprint.test.ts, which holds the
 // orchestrator's footprint under a ceiling and its request prefix stable.
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -35,16 +35,9 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { type AgentDefinition, discoverAgentDefinitions } from "../ext/subagents/definitions.ts";
 import { SUBAGENT_MESSAGE_TOOL } from "../ext/subagents/messages.ts";
-import {
-	executeRpcRun,
-	type RpcLaunch,
-	type RpcRunDeps,
-	rpcGrantableTools,
-	rpcRunTools,
-	WORKTREE_TOOLS,
-} from "../ext/subagents/rpc-runs.ts";
+import { REPORT_INSTRUCTIONS, rpcGrantableTools, rpcRunTools, WORKTREE_TOOLS } from "../ext/subagents/rpc-runs.ts";
 import { type IsolatedWorkspace, workspaceInstructions } from "../ext/subagents/run-worktree.ts";
-import { createRunId, type SubagentRunExecuteParams } from "../ext/subagents/runs.ts";
+import { createRunId } from "../ext/subagents/runs.ts";
 
 const REPO = fileURLToPath(new URL("..", import.meta.url));
 
@@ -89,13 +82,12 @@ export interface CapturedPrompt {
 interface Scratch {
 	cwd: string;
 	agentDir: string;
-	runsDir: string;
 }
 
 /** Runs `fn` in fresh directories, with pi's agent and server directories in them; removes them after. */
 async function inScratch<T>(fn: (scratch: Scratch) => Promise<T>): Promise<T> {
 	const base = realpathSync(mkdtempSync(join(tmpdir(), "bluclawd-footprint-")));
-	const scratch = { cwd: join(base, "work"), agentDir: join(base, "agent"), runsDir: join(base, "runs") };
+	const scratch = { cwd: join(base, "work"), agentDir: join(base, "agent") };
 	for (const dir of Object.values(scratch)) mkdirSync(dir);
 	mkdirSync(join(base, "server"));
 	// Its own Project: no Memories, roles or instructions of the checkout it runs from.
@@ -284,37 +276,10 @@ function contributions(measured: Prompt, baseline: Prompt): Contribution[] {
 
 /**
  * What a run of `definition` is told besides pi's prompt, as rpc-runs.ts writes it: its role's instructions, its
- * workspace's, then its Report's. rpc-runs.ts keeps the Report's text to itself, so a launch with no tools and no
- * workspace, stopped before it queues, writes it out after the role's instructions.
+ * workspace's, then its Report's.
  */
-async function runInstructions(scratch: Scratch, definition: AgentDefinition, tools: string[]): Promise<string> {
-	const runDir = mkdtempSync(join(scratch.runsDir, `${definition.name}-`));
+function runInstructions(definition: AgentDefinition, tools: string[]): string {
 	const runId = createRunId();
-	const launch = {
-		name: definition.name,
-		definition,
-		provider: "faux-footprint",
-		modelId: "faux-main",
-		thinkingLevel: "low",
-		tools: [],
-		task: "Measure.",
-		cwd: scratch.cwd,
-		runDir,
-		agentDir: scratch.agentDir,
-		projectTrusted: true,
-		recheck: () => undefined,
-	} satisfies RpcLaunch;
-	const params = {
-		record: { runId, generation: 0, parentSessionId: "footprint", deliveryMode: "foreground" },
-		signal: AbortSignal.abort(),
-		controller: {},
-	} as unknown as SubagentRunExecuteParams;
-	const deps = {
-		slots: { release: async () => {} },
-		handOff: new AbortController().signal,
-	} as unknown as RpcRunDeps;
-	await executeRpcRun(params, launch, deps);
-	const report = readFileSync(join(runDir, "instructions.md"), "utf8").slice(definition.instructions.length);
 	// A run given a tool that changes files works in a worktree of its own, which it is told of.
 	const writes = tools.some((tool) => WORKTREE_TOOLS.includes(tool));
 	// Paths of a typical machine, not this one's: the figure does not move with where it is measured.
@@ -325,7 +290,7 @@ async function runInstructions(scratch: Scratch, definition: AgentDefinition, to
 	return (
 		definition.instructions +
 		(writes ? `\n${workspaceInstructions(workspace as IsolatedWorkspace, true, tools.includes("bash"))}` : "") +
-		report
+		REPORT_INSTRUCTIONS
 	);
 }
 
@@ -364,7 +329,7 @@ export async function capturePrompt(
 			measuredSpec = {
 				extensions,
 				tools: [...runTools, SUBAGENT_MESSAGE_TOOL],
-				appendSystemPrompt: await runInstructions(scratch, definition, runTools),
+				appendSystemPrompt: runInstructions(definition, runTools),
 				mode: "rpc",
 			};
 		}
