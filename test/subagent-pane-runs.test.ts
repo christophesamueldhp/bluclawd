@@ -558,7 +558,9 @@ describe.skipIf(!hasTmux)("a run in a pane of its own", () => {
 		expect(report).toMatch(/^Changes since its baseline: A new\.txt$/m);
 		const workspace = /^Workspace: (.+?), an isolated Git worktree/m.exec(report)?.[1] ?? "";
 		expect(readFileSync(join(workspace, "new.txt"), "utf8")).toBe("new\n");
-		expect(JSON.parse(readFileSync(join(dir, "record.json"), "utf8"))).toMatchObject({ status: "closed" });
+		await waitFor(() =>
+			expect(JSON.parse(readFileSync(join(dir, "record.json"), "utf8"))).toMatchObject({ status: "closed" }),
+		);
 		// Its slot is free.
 		await real.waitForRequests("next", 1);
 	});
