@@ -78,6 +78,8 @@ export interface RpcHostState {
 	exit?: { code: number | null; signal: string | null };
 	/** Set when a Resume opened for the user to type in ended with nothing typed: there is no Report to deliver. */
 	idle?: true;
+	/** Why its pi was never started: a host in a pane could not take the run's environment from the daemon. */
+	notStarted?: string;
 }
 
 /** What a run's pi in a pane stores of its work (pane-child.ts), which its host takes into its state once it exits. */
@@ -575,7 +577,15 @@ async function paneHost(
 	process.on("SIGINT", () => {});
 	// What an earlier generation's pi stored is not this one's.
 	rmSync(paneChildStatePath(runDir), { force: true });
-	const launched = await new OrchestratorClient().takeRunEnv(spec.pane.session);
+	let launched: Record<string, string>;
+	try {
+		launched = await new OrchestratorClient().takeRunEnv(spec.pane.session);
+	} catch (error) {
+		// The daemon holds the environment in memory only: one started since it launched this host has none to give.
+		state.notStarted = `the daemon restarted, or could not be reached, between launching the run's host and that host taking the run's environment (${error instanceof Error ? error.message : String(error)})`;
+		save();
+		return;
+	}
 	const child = spawn(process.execPath, [piEntry(), ...spec.args], {
 		cwd: spec.cwd,
 		env: paneChildEnv(launched, process.env, runDir, spec.pane, spec.agentDir),

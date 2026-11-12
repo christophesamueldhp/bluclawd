@@ -703,6 +703,16 @@ export async function executeRpcRun(
 	const terminated = gone ? !contained || (await endRunProcesses(contained)) : await endHostGroup(hostPid, contained);
 	if (deps.handOff.aborted) return new Promise<never>(() => {});
 	if (terminated && contained) rmSync(runShellTmp(launch.agentDir, record.runId), { recursive: true, force: true });
+	// Its host gave up before it started a pi: the run did not start, as when the daemon could not start its host.
+	const notStarted = terminated ? ownState()?.notStarted : undefined;
+	if (notStarted) {
+		if (record.deliveryMode === "background" && !deps.reports.awaited(record.runId)) deps.notStarted(notStarted);
+		return {
+			status: launch.sessionFile ? "closed" : "failed",
+			summaryText: "",
+			errorMessage: `It did not start: ${notStarted}${untakenNote()}`,
+		};
+	}
 	// Once nothing of it runs, a worktree it left as it was made goes, a Resume making it again; any other stays.
 	if (workspace && terminated && !launch.keepWorktree) {
 		await releaseUnchangedWorktree(workspace, {

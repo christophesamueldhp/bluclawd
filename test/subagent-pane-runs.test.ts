@@ -1,6 +1,7 @@
 import { spawnSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { readdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { runPaneSession } from "../daemon/run-queue.ts";
@@ -18,6 +19,8 @@ import {
 import { waitFor } from "./helpers/wait-for.ts";
 
 const GATE = fileURLToPath(new URL("./fixtures/real-pi/approval-gate.ts", import.meta.url));
+const ROOT = fileURLToPath(new URL("../", import.meta.url));
+const ENV_PROBE = fileURLToPath(new URL("./fixtures/real-pi/env-probe.ts", import.meta.url));
 
 /** A run's record, as its orchestrator stored it, by the run's name. */
 function runRecord(agentDir: string, name: string): { runId: string; dir: string } {
@@ -255,6 +258,99 @@ describe.skipIf(!hasTmux)("a run in a pane of its own", () => {
 			status: "stopped",
 		});
 	});
+
+	it("does not start when the daemon restarted before its host took the run's environment, and frees its slot", async () => {
+		const real = await startOrchestrator();
+		pi = real;
+		vi.stubEnv("BLUCLAWD_RPC_PROVIDER_EXTENSIONS", [FAUX, ENV_PROBE].join(":"));
+		const settings = join(real.agentDir, "settings.json");
+		writeFileSync(
+			settings,
+			JSON.stringify({ ...JSON.parse(readFileSync(settings, "utf8")), subagents: { maxActive: 1 } }),
+		);
+		const [holdGo, lookGo, nextGo, nextDone, hostGo] = ["hold", "look", "next", "next.done", "host"].map((name) =>
+			join(real.cwd, `${name}.go`),
+		);
+		const launch = (name: string) => ({
+			tool: "subagent",
+			args: { agent: "explorer", name, task: "Look.", background: true },
+		});
+		real.script("main", [
+			launch("hold"),
+			{ ...launch("look"), until: lookGo },
+			{ ...launch("next"), until: nextGo },
+			...Array(6).fill({ text: "waiting" }),
+		]);
+		real.script("hold", [{ text: "Held.", until: holdGo }]);
+		real.script("look", [{ text: "Looked." }]);
+		real.script("next", [{ text: "Next.", until: nextDone }]);
+		// In the orchestrator's environment only, not tmux's once it started: a run gets it from the daemon alone.
+		const secret = `SECRET-${randomUUID()}`;
+		vi.stubEnv("BC_TEST_SECRET", secret);
+		real.start(["--", "delegate"]);
+		spawnSync("tmux", ["-S", real.tmux.socket, "set-environment", "-g", "-u", "BC_TEST_SECRET"]);
+		await real.waitForRequests("hold", 1);
+		writeFileSync(lookGo, "");
+		const record = (name: string) =>
+			JSON.parse(readFileSync(join(runRecord(real.agentDir, name).dir, "record.json"), "utf8"));
+		await waitFor(() => expect(record("look").status).toBe("starting"));
+
+		// Its host waits in its pane until the daemon that launched it is gone and another runs.
+		const { runId, dir } = runRecord(real.agentDir, "look");
+		const host = [
+			process.execPath,
+			"--import",
+			join(ROOT, "daemon/pi-resolve-hook.mjs"),
+			join(ROOT, "ext/subagents/rpc-host.ts"),
+			dir,
+		];
+		real.tmux.startRunHost(runPaneSession(runId, 0), dir, [
+			"/bin/sh",
+			"-c",
+			`while [ ! -e '${hostGo}' ]; do sleep 0.05; done; exec "$@"`,
+			"sh",
+			...host,
+		]);
+		writeFileSync(holdGo, "");
+		await waitFor(() => expect(record("look").status).toBe("running"));
+		writeFileSync(nextGo, "");
+		await waitFor(() => expect(record("next").status).toBe("starting"));
+		expect((await real.client.shutdownDaemon()).ok).toBe(true);
+		// Its orchestrator starts the next daemon, claiming next's turn.
+		await waitFor(async () => expect(await real.client.isRunning()).toBe(true));
+		writeFileSync(hostGo, "");
+
+		await waitFor(() =>
+			expect(record("look")).toMatchObject({
+				status: "failed",
+				errorMessage: expect.stringMatching(
+					/^It did not start: the daemon restarted, or could not be reached, between launching the run.s host and that host taking/,
+				),
+			}),
+		);
+		await waitFor(() =>
+			expect(JSON.stringify(real.requests("main").map(conversation))).toMatch(
+				/Subagent \\"look\\" \(sub_[^)]+\) did not start: the daemon restarted/,
+			),
+		);
+		expect(real.requests("look")).toEqual([]);
+		// Its slot is free: next starts, with the orchestrator's environment from the daemon.
+		await real.waitForRequests("next", 1);
+		const next = runRecord(real.agentDir, "next").dir;
+		await waitFor(() => expect(readFileSync(join(next, "env-probe"), "utf8")).toBe("set"));
+		// Neither on disk nor on a command line.
+		const base = dirname(real.agentDir);
+		expect(spawnSync("grep", ["-rlF", "-D", "skip", secret, base], { encoding: "utf8" }).stdout).toBe("");
+		const commands = spawnSync("ps", ["-axww", "-o", "command="], { encoding: "utf8" })
+			.stdout.split("\n")
+			.filter((line) => line.includes(basename(base)))
+			.join("\n");
+		const panes = spawnSync("tmux", ["-S", real.tmux.socket, "list-panes", "-a", "-F", "#{pane_start_command}"], {
+			encoding: "utf8",
+		}).stdout;
+		expect(`${commands}${panes}`).not.toContain(secret);
+		writeFileSync(nextDone, "");
+	}, 90_000);
 
 	it("opens from its orchestrator's panel by switching the terminal to its pane, and ← goes back", async () => {
 		const real = await startOrchestrator();
