@@ -70,6 +70,7 @@ import type {
 import { isKeyRelease, isKeyRepeat, matchesKey } from "@earendil-works/pi-tui";
 import { focusedComponent, isPromptEditor } from "../_shared/focus.ts";
 import { holdTui } from "../_shared/hold-tui.ts";
+import { readSettings } from "../_shared/startup-settings.ts";
 import { timed } from "../_shared/timing.ts";
 
 const CHECKPOINT_CUSTOM_TYPE = "checkpoint";
@@ -733,8 +734,9 @@ export function factory(pi: ExtensionAPI): void {
 	});
 
 	/**
-	 * Esc twice on an empty, idle prompt opens /rewind, as it opens rewind in bluclawd; pi's own
-	 * double Esc (its /tree) never sees the second press.
+	 * Esc twice on an empty, idle prompt opens /rewind only when pi's `doubleEscapeAction` is
+	 * "none"; otherwise pi's own action (its /tree by default) runs. Read at the press, as pi
+	 * does, so a change from pi's /settings applies at once.
 	 */
 	let offDoubleEscape: (() => void) | undefined;
 	const listenForDoubleEscape = (ctx: ExtensionContext): void => {
@@ -759,6 +761,7 @@ export function factory(pi: ExtensionAPI): void {
 			const now = Date.now();
 			if (now - escapeAt < DOUBLE_ESCAPE_MS) {
 				escapeAt = 0;
+				if (readSettings(ctx).settings.getDoubleEscapeAction() !== "none") return undefined;
 				pi.sendUserMessage("/rewind", { expandPromptTemplates: true });
 				return { consume: true };
 			}
