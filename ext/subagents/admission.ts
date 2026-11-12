@@ -168,52 +168,68 @@ const RUN_PARAMETERS = Type.Object({
 /** What each entry of a `tasks` batch chooses for itself; the call's other parameters apply to every entry. */
 const TASK_ENTRY_KEYS = ["agent", "task", "name", "cwd", "model", "thinkingLevel"] as const;
 const run = RUN_PARAMETERS.properties;
-/** The properties of a `tasks` entry, and of a `chain` step besides `resume`. */
-const entryRun = Object.fromEntries(TASK_ENTRY_KEYS.map((key) => [key, run[key]])) as Pick<
-	typeof run,
-	(typeof TASK_ENTRY_KEYS)[number]
->;
 /** `schema` named and typed only: a `tasks` or `chain` entry's properties are described once, at the top level. */
 const typeOnly = <T extends TSchema>(schema: T): T =>
 	JSON.parse(
 		JSON.stringify(schema, (key, value) => (key === "description" && typeof value === "string" ? undefined : value)),
 	);
-const chainRun = typeOnly(
-	Type.Object({ ...entryRun, agent: Type.Optional(entryRun.agent) }, { additionalProperties: false }),
+/** A `chain` step's own: described here alone. */
+const RESUME = Type.Optional(
+	Type.String({
+		description:
+			"In place of agent, name and cwd: the name of an earlier step of this chain, which goes on in its own session, with its context, role and workspace.",
+	}),
 );
-const { agent: stepAgent, ...stepRun } = chainRun.properties;
-/** A `chain` step: a run's properties, and its own `resume`, described here alone. */
-const chainStep = {
-	...chainRun,
-	properties: {
-		agent: stepAgent,
-		resume: Type.Optional(
-			Type.String({
-				description:
-					"In place of agent, name and cwd: the name of an earlier step of this chain, which goes on in its own session, with its context, role and workspace.",
-			}),
-		),
-		...stepRun,
-	},
-};
+const chainStep = typeOnly(
+	Type.Object(
+		{
+			agent: Type.Optional(run.agent),
+			resume: RESUME,
+			task: run.task,
+			name: run.name,
+			cwd: run.cwd,
+			model: run.model,
+			thinkingLevel: run.thinkingLevel,
+		},
+		{ additionalProperties: false },
+	),
+);
 
 export const SUBAGENT_TOOL_PARAMETERS = Type.Object({
 	...run,
 	agent: Type.Optional(run.agent),
 	task: Type.Optional(run.task),
 	tasks: Type.Optional(
-		Type.Array(typeOnly(Type.Object(entryRun, { additionalProperties: false })), {
-			minItems: 1,
-			description:
-				"Independent assignments to run side by side, in place of agent and task: each entry is a subagent of its own, and its fields are a single run's, described above.",
-		}),
+		Type.Array(
+			typeOnly(
+				Type.Object(
+					{
+						agent: run.agent,
+						task: run.task,
+						name: run.name,
+						cwd: run.cwd,
+						model: run.model,
+						thinkingLevel: run.thinkingLevel,
+					},
+					{ additionalProperties: false },
+				),
+			),
+			{
+				minItems: 1,
+				description:
+					"Independent assignments to run side by side, in place of agent and task: each entry is a subagent of its own, and its fields are a single run's, described above.",
+			},
+		),
 	),
 	chain: Type.Optional(
-		Type.Array(chainStep, {
-			minItems: 1,
-			description:
-				"Dependent steps to run one after another, in place of agent and task: a step's fields are a single run's, described above. Each starts once the one before it completed, given that step's Report. When a step edits, every step works in one isolated worktree, one at a time. A failed, cancelled or blocked step halts the chain; a review that finds defects has completed.",
-		}),
+		Type.Array(
+			{ ...chainStep, properties: { ...chainStep.properties, resume: RESUME } },
+			{
+				minItems: 1,
+				description:
+					"Dependent steps to run one after another, in place of agent and task: a step's fields are a single run's, described above. Each starts once the one before it completed, given that step's Report. When a step edits, every step works in one isolated worktree, one at a time. A failed, cancelled or blocked step halts the chain; a review that finds defects has completed.",
+			},
+		),
 	),
 });
 
