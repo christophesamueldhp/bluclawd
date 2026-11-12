@@ -2,6 +2,7 @@ import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { readFileSync, realpathSync } from "node:fs";
 import { basename, join, relative } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import {
 	type ExtensionContext,
 	parseSessionEntries,
@@ -284,13 +285,6 @@ export function subagentInvocation(params: SubagentCallParams): SubagentInvocati
 			steps.push({ run: { ...step, agent: step.agent, agentScope, background } });
 			continue;
 		}
-		const extra = (["agent", "name", "cwd"] as const).filter((key) => step[key] !== undefined);
-		if (extra.length > 0) {
-			return {
-				ok: false,
-				error: `chain[${i}]: a step that resumes an earlier one goes on with its role, name and cwd: leave out ${extra.map((key) => `\`${key}\``).join(", ")}.`,
-			};
-		}
 		const target = (chain ?? []).findIndex(
 			(earlier, j) => j < i && earlier.resume === undefined && earlier.name?.trim() === resume.trim(),
 		);
@@ -298,6 +292,20 @@ export function subagentInvocation(params: SubagentCallParams): SubagentInvocati
 			return {
 				ok: false,
 				error: `chain[${i}]: \`resume\` names an earlier step of this chain by the name it was given, and no earlier step is named "${resume}".`,
+			};
+		}
+		// Repeating the resumed step's role, name or cwd is harmless and ignored; only a different one is refused.
+		const resumed = (chain ?? [])[target];
+		const differing = (["agent", "name", "cwd"] as const).filter((key) =>
+			key === "name"
+				? step.name !== undefined && step.name.trim() !== resumed.name?.trim()
+				: step[key] !== undefined && !isDeepStrictEqual(step[key], resumed[key]),
+		);
+		if (differing.length > 0) {
+			const fields = differing.map((key) => `\`${key}\``).join(", ");
+			return {
+				ok: false,
+				error: `chain[${i}]: a step that resumes an earlier one goes on with its role, name and cwd, and its ${fields} ${differing.length > 1 ? "differ" : "differs"} from chain[${target}]'s ("${resume}"): leave out ${fields}.`,
 			};
 		}
 		const { task, model, thinkingLevel } = step;
