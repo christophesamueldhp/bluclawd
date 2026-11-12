@@ -7,6 +7,7 @@ import {
 	createAgentSession,
 	DefaultResourceLoader,
 	type ExtensionUIContext,
+	getAgentDir,
 	ModelRuntime,
 	SessionManager,
 	SettingsManager,
@@ -24,8 +25,12 @@ function makeTempDir(prefix: string): string {
 	return dir;
 }
 
+/** The user's settings file, which the extension reads: the test file's agent directory, not a session's `agentDir`. */
+const settingsFile = () => join(getAgentDir(), "settings.json");
+
 afterEach(() => {
 	for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+	rmSync(settingsFile(), { force: true });
 });
 
 function gitRepo(): string {
@@ -49,7 +54,12 @@ const textOf = (content: unknown) =>
  * A pi session on a faux model with the memory extension; each prompt records the system prompt the model saw. Unless
  * `memoryTool` is false, pi's `--tools +memory` turns the memory tool on, or its `"defaultTools": ["+memory"]` setting.
  */
-async function startSession(cwd: string, agentDir: string, memoryTool: boolean | "defaultTools" = true) {
+async function startSession(
+	cwd: string,
+	agentDir: string,
+	memoryTool: boolean | "defaultTools" = true,
+	sessionManager = SessionManager.inMemory(cwd),
+) {
 	const modelRuntime = await ModelRuntime.create({
 		authPath: join(agentDir, "auth.json"),
 		modelsPath: join(agentDir, "models.json"),
@@ -88,7 +98,7 @@ async function startSession(cwd: string, agentDir: string, memoryTool: boolean |
 		noTools: memoryTool === "defaultTools" ? undefined : "builtin",
 		tools: memoryTool === true ? ["+memory"] : undefined,
 		resourceLoader,
-		sessionManager: SessionManager.inMemory(cwd),
+		sessionManager,
 		settingsManager,
 	});
 	/** The user's picks for each select, in order: each gets the options and returns one, or undefined to cancel. */
@@ -128,6 +138,31 @@ async function startSession(cwd: string, agentDir: string, memoryTool: boolean |
 		await session.prompt("/memory");
 	};
 	return { session, prompt, seen, toolResults, command, selects, notices };
+}
+
+/**
+ * A session recorded without the memory tool, resumed with a Memory after the user put `"+memory"` in `defaultTools`.
+ * pi restores a resumed session's recorded tools, so the setting does not reach it.
+ */
+async function resumedAfterDefaultTools(repo: string, agentDir: string) {
+	const sessionDir = makeTempDir("sessions");
+	const first = await startSession(repo, agentDir, false, SessionManager.create(repo, sessionDir));
+	await first.prompt([fauxAssistantMessage("Hi.")]);
+	const file = first.session.sessionFile;
+	if (!file) throw new Error("the first session has no session file");
+	first.session.dispose();
+
+	saveMemory(memoryDir(agentDir, repo), {
+		name: "tabs",
+		description: "The user prefers tabs",
+		type: "feedback",
+		body: "Tabs.",
+	});
+	mkdirSync(getAgentDir(), { recursive: true });
+	writeFileSync(settingsFile(), JSON.stringify({ defaultTools: ["+memory"] }));
+	const resumed = await startSession(repo, agentDir, "defaultTools", SessionManager.open(file, sessionDir));
+	expect(resumed.session.getActiveToolNames()).not.toContain("memory");
+	return resumed;
 }
 
 const save = (memory: { name: string; description: string; type: string; body: string }) =>
@@ -264,6 +299,14 @@ describe("memory", () => {
 		const later = await startSession(repo, agentDir, false);
 		expect(later.notices).toEqual([]);
 		later.session.dispose();
+	});
+
+	it("in a session resumed without the tool, tells the user that a defaultTools entry they have applies from a new session", async () => {
+		const s = await resumedAfterDefaultTools(gitRepo(), makeTempDir("agent"));
+		expect(s.notices).toEqual([
+			'This Project has Memories, but this session was started without the memory tool, so it neither loads nor saves them. Your "defaultTools" setting has it, so it applies from a new session. For this session, resume it with pi --tools +memory.',
+		]);
+		s.session.dispose();
 	});
 
 	it("keeps the session's system prompt unchanged after a save mid-session", async () => {
@@ -526,6 +569,17 @@ describe("/memory", () => {
 		expect(s.notices.at(-1)).not.toMatch(/memory tool is off/i);
 		await s.command(option("Turn memory on"));
 		expect(s.notices.at(-1)).toMatch(/memory tool is off/i);
+		s.session.dispose();
+	});
+
+	it("in a session resumed without the tool, says a defaultTools entry the user has applies from a new session", async () => {
+		const s = await resumedAfterDefaultTools(gitRepo(), makeTempDir("agent"));
+		await s.command(() => undefined);
+		const [list] = s.selects;
+		expect(list.title).toContain(
+			'The memory tool is off, so this session neither loads nor saves Memories. Your "defaultTools" setting has it, but this session was started without it, so it applies from a new session. For this session, resume it with pi --tools +memory.',
+		);
+		expect(list.title).not.toContain('Turn it on with "defaultTools"');
 		s.session.dispose();
 	});
 });
