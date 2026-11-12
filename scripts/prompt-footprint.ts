@@ -1,12 +1,13 @@
 // Measures the Prompt footprint (GLOSSARY.md): the text bluclawd adds to what a session's model reads with a request.
 // Each session runs in-process on a faux provider, so no model is called, and what the provider receives is compared
-// with pi's own baseline: the same session without bluclawd. Prints the orchestrator's, then a run's for each bundled
-// role.
+// with pi's own baseline: the same session without bluclawd. Prints the orchestrator's in its default profile and with
+// all tools declared, then a run's for each bundled role.
 //
 //   node scripts/prompt-footprint.ts
 //
 // `capturePrompt` and `capturePrefixes` are also used by test/prompt-footprint.test.ts, which holds the
-// orchestrator's footprint and each bundled role's run footprint under a ceiling, and the request prefix stable.
+// orchestrator's footprint in both profiles and each bundled role's run footprint under a ceiling, and the request
+// prefix stable.
 import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -59,6 +60,15 @@ const DISABLED_BUILTINS = ["mcp", "codemode", "tool_search"];
 const PROMPT_ENV = ["BASH_DEFAULT_TIMEOUT_MS", "BASH_MAX_TIMEOUT_MS", "BLUCLAWD_DISABLE_BACKGROUND_TASKS"];
 
 const CHARS_PER_TOKEN = 4;
+
+/** The tools a session declares, as the user picks them in pi: its `defaultTools` setting, or `--tools`; pi's defaults when neither is set. */
+export interface Profile {
+	defaultTools?: string[];
+	tools?: string[];
+}
+
+/** Every tool bluclawd registers inactive turned on, except `collaborator_message`, which a collaboration turns on. */
+export const ALL_TOOLS: Profile = { defaultTools: ["+monitor"] };
 
 export interface Contribution {
 	name: string;
@@ -121,10 +131,8 @@ async function loadExtensions(paths: readonly string[]): Promise<ExtensionFactor
 	);
 }
 
-interface SessionSpec {
+interface SessionSpec extends Profile {
 	extensions?: ExtensionFactory[];
-	/** The tools it has, as pi's `--tools`; pi's defaults when absent. */
-	tools?: string[];
 	appendSystemPrompt?: string;
 	/** An orchestrator runs in pi's TUI, a run on its RPC. */
 	mode: "tui" | "rpc";
@@ -143,7 +151,11 @@ async function openSession({ cwd, agentDir }: Scratch, spec: SessionSpec) {
 	const faux = fauxProvider({ provider: "faux-footprint", models: [{ id: "faux-main" }] });
 	modelRuntime.registerNativeProvider(faux.provider);
 	await modelRuntime.refresh({ allowNetwork: false });
-	const settingsManager = SettingsManager.inMemory({ compaction: { enabled: false }, retry: { enabled: false } });
+	const settingsManager = SettingsManager.inMemory({
+		compaction: { enabled: false },
+		retry: { enabled: false },
+		...(spec.defaultTools ? { defaultTools: spec.defaultTools } : {}),
+	});
 	const resourceLoader = new DefaultResourceLoader({
 		cwd,
 		agentDir,
@@ -295,18 +307,18 @@ function runInstructions(definition: AgentDefinition, tools: string[]): string {
 }
 
 /**
- * The prompt of a session loading `extensions`, with what each contributes against pi's own baseline. With `role`,
- * the session is a run of that bundled role, given what pi's default orchestrator can give it, with a shell where
- * this platform contains a run's commands.
+ * The prompt of a session loading `extensions` in `profile`, with what each contributes against pi's own baseline.
+ * With `role`, the session is a run of that bundled role, given what pi's default orchestrator can give it, with a
+ * shell where this platform contains a run's commands.
  */
 export async function capturePrompt(
-	options: { extensions?: readonly string[]; role?: string } = {},
+	options: { extensions?: readonly string[]; role?: string } & Profile = {},
 ): Promise<CapturedPrompt> {
-	const { role } = options;
-	const extensions = await loadExtensions(options.extensions ?? (role ? RUN_EXTENSIONS : ORCHESTRATOR_EXTENSIONS));
+	const { role, extensions: paths, ...profile } = options;
+	const extensions = await loadExtensions(paths ?? (role ? RUN_EXTENSIONS : ORCHESTRATOR_EXTENSIONS));
 	return inScratch(async (scratch) => {
 		const piDefault = await firstRequest(scratch, { mode: "tui" });
-		let measuredSpec: SessionSpec = { extensions, mode: "tui" };
+		let measuredSpec: SessionSpec = { extensions, ...profile, mode: "tui" };
 		let baselineSpec: SessionSpec | undefined;
 		let runTools: string[] | undefined;
 		if (role) {
@@ -350,13 +362,16 @@ export async function capturePrompt(
 }
 
 /**
- * The system messages and tools of three requests in a row of a session loading `extensions`: a tool call, its
- * result, then a second prompt. The provider caches a request's prefix only while these stay the same.
+ * The system messages and tools of three requests in a row of a session loading `extensions` in `profile`: a tool
+ * call, its result, then a second prompt. The provider caches a request's prefix only while these stay the same.
  */
-export async function capturePrefixes(extensions: readonly string[] = ORCHESTRATOR_EXTENSIONS): Promise<string[]> {
+export async function capturePrefixes(
+	profile: Profile = {},
+	extensions: readonly string[] = ORCHESTRATOR_EXTENSIONS,
+): Promise<string[]> {
 	const factories = await loadExtensions(extensions);
 	return inScratch(async (scratch) => {
-		const { session, faux } = await openSession(scratch, { extensions: factories, mode: "tui" });
+		const { session, faux } = await openSession(scratch, { extensions: factories, ...profile, mode: "tui" });
 		const prefixes: string[] = [];
 		const prefix = (context: Context) => {
 			const system = context.messages
@@ -413,7 +428,11 @@ if (import.meta.url === `file://${process.argv[1]}`) {
 	console.log(
 		`Prompt footprint on ${process.platform}, TUI mode, empty Memory index, no AGENTS.md or skills, the bundled roles.`,
 	);
-	print("Orchestrator", await capturePrompt());
+	print("Orchestrator, default profile", await capturePrompt());
+	print(
+		`Orchestrator, all tools declared (defaultTools ${ALL_TOOLS.defaultTools?.join(", ")})`,
+		await capturePrompt(ALL_TOOLS),
+	);
 	const roles = readdirSync(resolve(REPO, "ext/subagents/agents")).map((file) => file.replace(/\.md$/, ""));
 	for (const name of roles) print(`Run of ${name}`, await capturePrompt({ role: name }));
 }

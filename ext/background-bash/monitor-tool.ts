@@ -170,6 +170,8 @@ export function createMonitorTool(deps: MonitorToolDeps): ToolDefinition<typeof 
 	return {
 		name: "monitor",
 		label: "monitor",
+		// Off unless the user's `defaultTools` or `--tools` names it: few sessions call it, and every request pays for it.
+		defaultActive: false,
 		description: MONITOR_DESCRIPTION,
 		promptSnippet: "Watch a long-running command or a WebSocket and get each output line or frame as an event",
 		parameters: monitorSchema,

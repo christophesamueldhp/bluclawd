@@ -77,6 +77,8 @@ export interface Scenario {
 	answer?: RegExp;
 	/** Grades the final tree in place of the fixture's tests: why the outcome is wrong, or nothing when it is right. */
 	check?: (cwd: string) => string | undefined;
+	/** pi's `--tools` for every arm: turns on a tool the scenario measures that is off by default. */
+	tools?: string[];
 }
 
 const PACKAGE = JSON.stringify({ name: "fixture", private: true, type: "module" });
@@ -195,6 +197,8 @@ export const SCENARIOS: readonly Scenario[] = [
 			"Start the server in server.js (`node server.js`) and keep it running in the background. Once it is up, which takes a few seconds, it prints a line with READY and its port. Tell me when that line appears: do not poll for it. Then write the port number alone to port.txt and stop the server.",
 		functions: [],
 		check: checkWatch,
+		// It measures `monitor`, which is off by default. pi ignores the name in an arm that does not load it.
+		tools: ["+monitor"],
 	},
 	{
 		// A limit sent as `10` is 10 ms: the build moves to the background at once and may still finish. The count of
@@ -610,6 +614,7 @@ async function trialIn(base: string, agentDir: string, cwd: string, options: Tri
 	const extensions = [...providers, ...ARM_SETUP[arm].extensions(options.checkout)].flatMap((path) => ["-e", path]);
 	const args = [PI_CLI, "--mode", "rpc", "-ne", ...extensions, "--model", options.model];
 	args.push("--thinking", options.thinking);
+	if (scenario.tools) args.push("--tools", scenario.tools.join(","));
 
 	const started = Date.now();
 	const pi = spawn(process.execPath, args, { cwd, env, stdio: ["pipe", "pipe", "pipe"] });

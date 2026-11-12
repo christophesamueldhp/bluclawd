@@ -23,6 +23,7 @@ import {
 	formatSummary,
 	runTrial,
 	SCENARIOS,
+	type Scenario,
 	summarize,
 	type TrialResult,
 } from "../scripts/eval-delegation.ts";
@@ -63,7 +64,7 @@ type Stop = { stop: true; after?: (cwd: string) => boolean };
  * background task, named once the parent has been told its ID and `after` holds for the trial's checkout: the step
  * before it is held until then.
  */
-async function trial(name: string, steps: (FauxStep | Stop)[], timeoutMs = 2 * readinessMs) {
+async function trial(name: string | Scenario, steps: (FauxStep | Stop)[], timeoutMs = 2 * readinessMs) {
 	const at = steps.findIndex((step) => "stop" in step);
 	const gate = (agentDir: string) => join(agentDir, "..", "stop.go");
 	let dirs: { agentDir: string; cwd: string } | undefined;
@@ -78,7 +79,7 @@ async function trial(name: string, steps: (FauxStep | Stop)[], timeoutMs = 2 * r
 	const running = runTrial({
 		arm: "after",
 		checkout: ROOT,
-		scenario: SCENARIOS.find((s) => s.name === name)!,
+		scenario: typeof name === "string" ? SCENARIOS.find((s) => s.name === name)! : name,
 		model: "faux/faux-1",
 		thinking: "off",
 		providerExtensions: [FAUX],
@@ -119,6 +120,19 @@ const WATCH = (stop: boolean) => [
 	{ text: "The server was ready; its port is in port.txt and it is stopped." },
 ];
 
+/**
+ * Waiting for the line without monitor: the server runs as one background job, and a second exits once the line is
+ * there, which wakes the model as any finished job does.
+ */
+const WATCH_WITHOUT_MONITOR = [
+	bash("node server.js > server.log", { run_in_background: true }),
+	bash("until grep -q READY server.log; do sleep 0.2; done", { run_in_background: true }),
+	{ text: "I will tell you once it is ready." },
+	bash("sed -n 's/^READY port=//p' server.log > port.txt"),
+	{ stop: true } as const,
+	{ text: "The server was ready; its port is in port.txt and it is stopped." },
+];
+
 function expectOutcome(result: TrialResult, correct: boolean): void {
 	expect(result.correct, JSON.stringify({ ...result, parentUsage: undefined, childUsage: undefined })).toBe(correct);
 }
@@ -130,6 +144,14 @@ describe("background shells in the delegation evaluation, on a scripted model", 
 		// Woken once, by the line.
 		expect(result).toMatchObject({ parentWakeups: 1, leftover: 0, failedToolCalls: 0, bashTimeouts: 0 });
 		expect(result.toolCalls).toEqual({ monitor: 1, bash: 1, task_stop: 1 });
+	});
+
+	it("watch: passes without monitor, woken by a background bash that exits once the line is there", async () => {
+		const { tools: _, ...withoutMonitor } = SCENARIOS.find((s) => s.name === "watch")!;
+		const result = await trial(withoutMonitor, WATCH_WITHOUT_MONITOR);
+		expectOutcome(result, true);
+		expect(result).toMatchObject({ leftover: 0, failedToolCalls: 0, bashTimeouts: 0 });
+		expect(result.toolCalls).toEqual({ bash: 3, task_stop: 1 });
 	});
 
 	it("watch: fails when the server is left running, once the trial's time is up", async () => {
