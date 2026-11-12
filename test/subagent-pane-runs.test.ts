@@ -36,6 +36,18 @@ function runRecord(agentDir: string, name: string): { runId: string; dir: string
 	throw new Error(`no run named ${name}`);
 }
 
+/** Kills the pi in `pane` as a crash does: it never ends its session, and its pane goes with it. */
+function crash(real: RealPi, pane: string): void {
+	const pid = Number(
+		spawnSync("tmux", ["-S", real.tmux.socket, "display-message", "-p", "-t", `=${pane}:`, "#{pane_pid}"], {
+			encoding: "utf8",
+		}).stdout.trim(),
+	);
+	// Never 0, which would kill this whole process group.
+	expect(pid).toBeGreaterThan(0);
+	process.kill(pid, "SIGKILL");
+}
+
 /** An orchestrator pane whose runs run in panes of their own (ADR-0013), loading the faux provider as it does. */
 async function startOrchestrator(extensions?: string[]): Promise<RealPi> {
 	vi.stubEnv("BLUCLAWD_RPC_PROVIDER_EXTENSIONS", FAUX);
@@ -142,22 +154,75 @@ describe.skipIf(!hasTmux)("a run in a pane of its own", () => {
 		expect(real.tmux.capture(pane, 200).join("\n")).toContain("Allow this subagent read");
 
 		// Its orchestrator crashed, and its pane with it: no one is left to answer, so it is blocked, and the run goes on.
-		const pid = Number(
-			spawnSync(
-				"tmux",
-				["-S", real.tmux.socket, "display-message", "-p", "-t", `=${orchestrator}:`, "#{pane_pid}"],
-				{
-					encoding: "utf8",
-				},
-			).stdout.trim(),
-		);
-		expect(pid).toBeGreaterThan(0);
-		process.kill(pid, "SIGKILL");
+		// Another session, not its orchestrator's, takes nothing over.
+		crash(real, orchestrator);
+		real.start([]);
 		const look = await real.waitForRequests("look", 2);
 		expect(conversation(look[1]).at(-1)?.text).toContain("Blocked: read");
 		await waitFor(() => expect(real.tmux.hasSession(pane)).toBe(false));
 		expect(JSON.parse(readFileSync(join(dir, "reports", "1.json"), "utf8")).outcome).toEqual({ status: "completed" });
 	}, 60_000);
+
+	it("follows its orchestrator to the pane its session is reopened in after a crash: its approval waits for it there", async () => {
+		const real = await startOrchestrator();
+		pi = real;
+		vi.stubEnv("BLUCLAWD_RPC_PROVIDER_EXTENSIONS", [FAUX, GATE].join(":"));
+		writeFileSync(join(real.cwd, "secret.gated"), "OSPREY\n");
+		const gate = join(real.cwd, "look.go");
+		real.script("main", [
+			{ tool: "subagent", args: { agent: "explorer", name: "look", task: "Read secret.gated.", background: true } },
+			{ text: "waiting" },
+			{ text: "read the report" },
+		]);
+		real.script("look", [
+			{ tool: "read", args: { path: "secret.gated" } },
+			{ text: "It says OSPREY.", until: gate },
+		]);
+		const orchestrator = real.start(["--", "Delegate the look."]);
+		await real.waitForRequests("main", 2);
+		await real.waitForRequests("look", 1);
+		const sessionFile = await waitFor(async () => {
+			const file = (await real.rows()).find((row) => row.pane === orchestrator)?.sessionFile;
+			expect(file).toBeDefined();
+			return file ?? "";
+		});
+		const { runId } = runRecord(real.agentDir, "look");
+		const pane = runPaneSession(runId, 0);
+		const asking = () => real.tmux.capture(pane, 200).join("\n");
+		await waitFor(() => expect(asking()).toContain("Allow this subagent read"));
+
+		// Watched until its session is reopened, however long that takes: its approval is not blocked meanwhile.
+		real.attach(pane);
+		await waitFor(() => expect(real.shown()).toBe(pane));
+		crash(real, orchestrator);
+		const reopened = real.start(["--session", sessionFile]);
+		await waitFor(() => expect(real.tmux.capture(reopened, 80).join("\n")).toMatch(/look\s.*needs input/));
+
+		// No one watches its pane, but its reopened orchestrator's panel says it needs input: it waits, past RPC's 5 s.
+		real.tmux.moveClients(pane, reopened);
+		await waitFor(() => expect(real.shown()).toBe(reopened));
+		await new Promise((resolve) => setTimeout(resolve, 7000));
+		expect(real.requests("look")).toHaveLength(1);
+		expect(asking()).toContain("Allow this subagent read");
+
+		// Answered in its pane, it goes on; ← goes back to the reopened orchestrator.
+		real.tmux.moveClients(reopened, pane);
+		await waitFor(() => expect(real.shown()).toBe(pane));
+		real.tmux.sendKeys(pane, ["Enter"]);
+		const look = await real.waitForRequests("look", 2);
+		expect(conversation(look[1]).at(-1)?.text).toContain("OSPREY");
+		real.tmux.sendKeys(pane, ["Left"]);
+		await waitFor(() => expect(real.shown()).toBe(reopened));
+
+		// Shown when it ends, its pane hands the terminal to the reopened orchestrator, which gets its Report.
+		real.tmux.moveClients(reopened, pane);
+		await waitFor(() => expect(real.shown()).toBe(pane));
+		writeFileSync(gate, "");
+		const main = await real.waitForRequests("main", 3);
+		expect(conversation(main[2]).at(-1)?.text).toContain("It says OSPREY.");
+		await waitFor(() => expect(real.tmux.hasSession(pane)).toBe(false));
+		await waitFor(() => expect(real.shown()).toBe(reopened));
+	}, 90_000);
 
 	it("stops when its orchestrator stops it: its pane closes, and its work so far is its Report", async () => {
 		const real = await startOrchestrator();
