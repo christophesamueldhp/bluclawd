@@ -216,7 +216,7 @@ const backgroundBash: InlineExtension = {
 		};
 		const localCwd = process.cwd();
 
-		// Overrides the built-in bash tool with timeouts in ms and run_in_background.
+		// Overrides the built-in bash tool with a default timeout and run_in_background.
 		pi.registerTool(
 			createBackgroundBashTool({
 				cwd: localCwd,

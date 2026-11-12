@@ -201,8 +201,9 @@ export const SCENARIOS: readonly Scenario[] = [
 		tools: ["+monitor"],
 	},
 	{
-		// A limit sent as `10` is 10 ms: the build moves to the background at once and may still finish. The count of
-		// bash calls ended at their timeout is this scenario's signal, more than its outcome.
+		// A limit in the wrong unit is this scenario's signal, more than its outcome: in milliseconds where seconds are
+		// meant it is only capped, so it shows in the limits sent; in seconds where milliseconds are meant the build moves
+		// to the background at once and may still finish, so it shows in the bash calls ended at their timeout.
 		name: "slow",
 		files: {
 			"package.json": PACKAGE,
@@ -248,9 +249,14 @@ export interface TrialResult {
 	failedCalls: string[];
 	/**
 	 * The parent's `bash` calls that ended at their timeout: moved to the background, which is not an error, or
-	 * killed. A timeout given in seconds where milliseconds are meant shows here, even when the trial passes.
+	 * killed. A timeout shorter than the command shows here, even when the trial passes.
 	 */
 	bashTimeouts: number;
+	/**
+	 * The `timeout` of each of the parent's `bash` calls that gave one, as sent: a unit the model got wrong shows here
+	 * even where the cap hides it.
+	 */
+	bashTimeoutsSent: number[];
 	answer: string;
 	/** A hash of every file of the final tree but `.git`, to compare arms. */
 	finalTree: string;
@@ -332,12 +338,15 @@ interface SessionLog {
 function toolOutcomes(messages: SessionLog["messages"]) {
 	const toolCalls: Record<string, number> = {};
 	const backgrounded = new Set<string>();
+	const bashTimeoutsSent: number[] = [];
 	for (const message of messages) {
 		if (message.role !== "assistant" || !Array.isArray(message.content)) continue;
 		for (const block of message.content) {
 			if (block.type !== "toolCall") continue;
 			toolCalls[block.name] = (toolCalls[block.name] ?? 0) + 1;
 			if (block.name === "bash" && block.arguments?.run_in_background === true) backgrounded.add(block.id);
+			if (block.name === "bash" && block.arguments?.timeout !== undefined)
+				bashTimeoutsSent.push(block.arguments.timeout);
 		}
 	}
 	let failedToolCalls = 0;
@@ -358,7 +367,7 @@ function toolOutcomes(messages: SessionLog["messages"]) {
 		const killed = message.isError === true && /^Command timed out after /m.test(text);
 		if (moved || killed) bashTimeouts++;
 	}
-	return { toolCalls, failedToolCalls, failedCalls, bashTimeouts };
+	return { toolCalls, failedToolCalls, failedCalls, bashTimeouts, bashTimeoutsSent };
 }
 
 function jsonl(path: string): any[] {
@@ -986,7 +995,7 @@ async function main(argv: string[]): Promise<void> {
 						);
 						results.push(result);
 						console.error(
-							`${model} ${scenario.name} ${arm} #${trial + 1}: ${result.correct ? "correct" : "incorrect"}, ${result.failedToolCalls} failed calls, ${result.bashTimeouts} bash timeouts`,
+							`${model} ${scenario.name} ${arm} #${trial + 1}: ${result.correct ? "correct" : "incorrect"}, ${result.failedToolCalls} failed calls, ${result.bashTimeouts} bash timeouts, bash limits sent [${result.bashTimeoutsSent.join(", ")}]`,
 						);
 						// Not a wrong answer: the setup is wrong, and every later trial would fail the same way.
 						if (result.failure) throw new Error(result.failure);
