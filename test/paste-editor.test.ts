@@ -31,29 +31,16 @@ describe("bluclawd's paste in pi's prompt", () => {
 		expect(editorSupportsPasteTokens()).toBe(true);
 	});
 
-	it("a long paste is a [Pasted text] token, deleted in one go, expanded on send", () => {
+	it("a long paste is pi's own marker, deleted in one go, sent in full", () => {
 		const { e, submitted } = editor();
 		e.handleInput("see ");
-		e.handleInput(PASTE(lines(5)));
-		expect(e.getText()).toBe("see [Pasted text #1 +4 lines]");
+		e.handleInput(PASTE(lines(12)));
+		expect(e.getText()).toBe("see [paste #1 +12 lines]");
 		e.handleInput(BACKSPACE);
 		expect(e.getText()).toBe("see ");
-		e.handleInput(PASTE(lines(3)));
+		e.handleInput(PASTE(lines(11)));
 		e.handleInput("\r");
-		expect(submitted()).toBe(`see ${lines(3)}`);
-	});
-
-	it("a short paste goes in as typed", () => {
-		const { e } = editor();
-		e.handleInput(PASTE("two\nlines"));
-		expect(e.getText()).toBe("two\nlines");
-	});
-
-	it("pasting the same text again right after shows it", () => {
-		const { e } = editor();
-		e.handleInput(PASTE(lines(4)));
-		e.handleInput(PASTE(lines(4)));
-		expect(e.getText()).toBe(lines(4));
+		expect(submitted()).toBe(`see ${lines(11)}`);
 	});
 
 	it("a ctrl+v image is an [Image #N] token; the same image again shows its path; the image goes along on send", () => {
@@ -74,12 +61,6 @@ describe("bluclawd's paste in pi's prompt", () => {
 		expect(imageBlocks(other.e.submittedImages)).toEqual([
 			{ type: "image", data: Buffer.from("other-bytes").toString("base64"), mimeType: "image/png" },
 		]);
-	});
-
-	it("ctrl+v text over the limit collapses too", () => {
-		const { e } = editor();
-		e.insertTextAtCursor("x".repeat(900));
-		expect(e.getText()).toBe("[Pasted text #1]");
 	});
 
 	it("shows pi's working spinner in its top border, as pi's own editor does", () => {
