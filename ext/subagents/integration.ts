@@ -684,12 +684,13 @@ async function runCheck(
 	const shellPath = settings.getShellPath();
 	const local = createLocalBashOperations({ shellPath }).exec;
 	const exec = sandboxed ? wrapExec(local, () => shellPath) : local;
+	const prefix = settings.getShellCommandPrefix();
 	const chunks: Buffer[] = [];
 	const started = Date.now();
 	const timeout = AbortSignal.timeout(CHECK_TIMEOUT_MS);
 	let exitCode: number | null;
 	try {
-		({ exitCode } = await exec(command, where, {
+		({ exitCode } = await exec(prefix ? `${prefix}\n${command}` : command, where, {
 			onData: (data) => chunks.push(data),
 			signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
 		}));

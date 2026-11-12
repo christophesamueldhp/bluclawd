@@ -159,6 +159,8 @@ export interface MonitorToolDeps {
 	sendMessage: (message: OutgoingMessage<unknown>, options: EventDelivery) => void;
 	cwd: string;
 	exec: BackgroundExec;
+	/** pi's `shellCommandPrefix`, read per command: the settings are read after the tool is built. */
+	commandPrefix?: () => string | undefined;
 	registry?: BackgroundJobRegistry;
 	rateLimit?: { capacity: number; refillMs: number; maxSuppressMs: number };
 }
@@ -181,6 +183,12 @@ export function createMonitorTool(deps: MonitorToolDeps): ToolDefinition<typeof 
 				return { content: [{ type: "text", text: source.reason }], isError: true, details: undefined };
 			}
 			const command = source.kind === "command" ? source.command : undefined;
+			const prefix = deps.commandPrefix?.();
+			const watched = stdoutOnly(deps.exec);
+			// Prefixed inside the stdout-only wrapping, so the prefix's stderr is not an event either.
+			const exec: BackgroundExec = prefix
+				? (cmd, dir, options) => watched(`${prefix}\n${cmd}`, dir, options)
+				: watched;
 			// In seconds, as the registry takes it.
 			const timeout = Math.min(params.timeout_ms ?? DEFAULT_TIMEOUT_MS, CAP_TIMEOUT_MS) / 1000;
 
@@ -244,7 +252,7 @@ export function createMonitorTool(deps: MonitorToolDeps): ToolDefinition<typeof 
 			current = registry.start({
 				command: source.kind === "ws" ? source.url : source.command,
 				cwd: deps.cwd,
-				exec: source.kind === "ws" ? websocketExec(source.url, source.protocols) : stdoutOnly(deps.exec),
+				exec: source.kind === "ws" ? websocketExec(source.url, source.protocols) : exec,
 				owner: ctx?.sessionManager?.getSessionId(),
 				idPrefix: command === undefined ? "s" : "b",
 				description: params.description,

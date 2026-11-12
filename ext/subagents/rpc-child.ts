@@ -23,6 +23,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { resolveToCwd } from "../_shared/path-resolve.ts";
+import { startupSettings } from "../_shared/startup-settings.ts";
 import { evaluateToolCallDeny, filterDeniedGrepToolResult } from "../permissions/policy.ts";
 import { sandboxSetting } from "../sandbox/config.ts";
 import type { AskNetwork } from "../sandbox/runtime.ts";
@@ -170,7 +171,17 @@ export default function rpcChild(pi: ExtensionAPI): void {
 	pi.on("tool_execution_end", (event) => {
 		fileToolsRunning.delete(event.toolCallId);
 	});
-	const shell = runShell(currentPolicy, async (run) => {
+	// pi's `shellCommandPrefix`, as the run's own pi read its settings.
+	let commandPrefix: string | undefined;
+	pi.on("session_start", (event, ctx) => {
+		try {
+			commandPrefix = startupSettings(event, ctx).settings.getShellCommandPrefix();
+		} catch {
+			commandPrefix = undefined;
+		}
+	});
+	const currentPrefix = () => commandPrefix;
+	const shell = runShell(currentPolicy, currentPrefix, async (run) => {
 		while (commandRunning) await commandRunning;
 		let done = () => {};
 		commandRunning = new Promise((resolve) => {
@@ -306,7 +317,11 @@ export default function rpcChild(pi: ExtensionAPI): void {
  * The run's `bash`, pi's own with its commands run in the run's sandbox (run-shell.ts), one at a time and each through
  * `exclusive`. Its network asks go to the user through the run's orchestrator, once per host and port.
  */
-function runShell(policy: () => RunPolicy | undefined, exclusive: <T>(run: () => Promise<T>) => Promise<T>) {
+function runShell(
+	policy: () => RunPolicy | undefined,
+	commandPrefix: () => string | undefined,
+	exclusive: <T>(run: () => Promise<T>) => Promise<T>,
+) {
 	let ui: Pick<ExtensionUIContext, "select"> | undefined;
 	const answers = new Map<string, Promise<boolean>>();
 	// pi's dialog replaces an open one without settling it, so one opens only after the last settled.
@@ -333,7 +348,9 @@ function runShell(policy: () => RunPolicy | undefined, exclusive: <T>(run: () =>
 			{ agentDir, user: () => sandboxSetting(SettingsManager.create(cwd, agentDir)), ask },
 		);
 		const current = shell;
-		return exclusive(() => current.exec(command, cwd, options));
+		const prefix = commandPrefix();
+		// Below the tool, as pi's own bash prefixes: its deny rules judged the command as the model wrote it.
+		return exclusive(() => current.exec(prefix ? `${prefix}\n${command}` : command, cwd, options));
 	};
 	const base = createBashToolDefinition(process.cwd(), { operations: { exec } });
 	return {
