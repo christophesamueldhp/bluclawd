@@ -590,7 +590,12 @@ export async function checkCredentials(options: {
 			"--thinking",
 			options.thinking,
 		];
-		const call = await new Promise<{ code: number | null; stderr: string }>((done) => {
+		const call = await new Promise<{
+			code: number | null;
+			signal: NodeJS.Signals | null;
+			stderr: string;
+			timedOut: boolean;
+		}>((done) => {
 			const pi = spawn(process.execPath, [...args, "Reply with the single word ok."], {
 				cwd: base,
 				env: piEnv(dirs, live),
@@ -600,10 +605,14 @@ export async function checkCredentials(options: {
 			pi.stderr?.on("data", (data) => {
 				stderr = (stderr + data).slice(-2000);
 			});
-			const timer = setTimeout(() => pi.kill("SIGKILL"), 120_000);
-			pi.on("exit", (code) => {
+			let timedOut = false;
+			const timer = setTimeout(() => {
+				timedOut = true;
+				pi.kill("SIGKILL");
+			}, 120_000);
+			pi.on("exit", (code, signal) => {
 				clearTimeout(timer);
-				done({ code, stderr });
+				done({ code, signal, stderr, timedOut });
 			});
 		});
 		keepUnlessLinked(base, dirs.agentDir, options.auth);
@@ -613,8 +622,10 @@ export async function checkCredentials(options: {
 			checked.push({ provider, model, writtenThrough });
 			continue;
 		}
-		// A call killed at its timeout has no exit code and may have said nothing.
-		const failure = `The call to ${model} failed: ${call.stderr.trim() || `exit ${call.code ?? "on timeout"}`}`;
+		const said = call.stderr.trim();
+		const exit = call.code === null ? `killed by ${call.signal}` : `exit ${call.code}`;
+		const reasons = call.timedOut ? ["timed out after 120 s", said] : [said || exit];
+		const failure = `The call to ${model} failed: ${reasons.filter(Boolean).join("\n")}`;
 		checked.push({ provider, model, writtenThrough, failure });
 		if (options.strict) break;
 	}
@@ -956,7 +967,7 @@ export async function main(argv: string[], scripted?: { providerExtensions: stri
 	const auth = flag(argv, "auth");
 	const agentDir = flag(argv, "agent-dir");
 	if (
-		(!scripted && !argv.includes("--live")) ||
+		!argv.includes("--live") ||
 		!models ||
 		!thinking ||
 		!(maxTokens > 0) ||
@@ -983,16 +994,16 @@ export async function main(argv: string[], scripted?: { providerExtensions: stri
 		if (auth) {
 			const strict = argv.includes("--strict-auth");
 			const checks = await checkCredentials({ auth: resolve(auth), models, thinking, strict, ...scripted });
+			for (const { provider, failure } of checks) {
+				if (failure === undefined) continue;
+				for (const model of models.filter((m) => m.split("/")[0] === provider))
+					skipped.push({ model, reason: failure });
+			}
 			const failures = checks.flatMap((check) => check.failure ?? []);
 			if (failures.length > 0 && (strict || failures.length === checks.length)) throw new Error(failures.join("\n"));
+			for (const { model, reason } of skipped) console.error(`Skipped ${model}: ${reason}`);
 			for (const check of checks) {
-				if (check.failure !== undefined) {
-					for (const model of models.filter((m) => m.split("/")[0] === check.provider)) {
-						skipped.push({ model, reason: check.failure });
-						console.error(`Skipped ${model}: ${check.failure}`);
-					}
-					continue;
-				}
+				if (check.failure !== undefined) continue;
 				const saved = check.writtenThrough ? ", and pi saved auth.json through the link" : "";
 				console.error(`Credentials: ${check.provider} answered on ${check.model}${saved}.`);
 			}

@@ -262,6 +262,29 @@ describe("credentials of a live comparison, on a scripted model", { timeout: 4 *
 		}
 	});
 
+	it("with strict, checks no provider after the first whose call failed", async () => {
+		const { auth, dir } = standIn();
+		try {
+			const checked = await checkCredentials({
+				auth,
+				models: ["gone/model-1", "faux/faux-1"],
+				thinking: "off",
+				strict: true,
+				providerExtensions: [FAUX],
+			});
+			expect(checked).toEqual([
+				{
+					provider: "gone",
+					model: "gone/model-1",
+					writtenThrough: false,
+					failure: expect.stringMatching(/^The call to gone\/model-1 failed: .*not found/s),
+				},
+			]);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
 	it("keeps a trial's agent dir, and says so, when its auth.json is no longer the link", async () => {
 		const { auth, dir } = standIn();
 		let agentDir = "";
@@ -305,7 +328,8 @@ describe("credentials of a live comparison, on a scripted model", { timeout: 4 *
 			const out = join(dir, "results.json");
 			await main(
 				[
-					...["--models", models.join(","), "--thinking", "off", "--max-tokens", "1000000", "--max-dollars", "1"],
+					...["--live", "--models", models.join(","), "--thinking", "off"],
+					...["--max-tokens", "1000000", "--max-dollars", "1"],
 					...["--arms", "stock", "--scenarios", "trivial", "--trials", "1", "--auth", auth, "--out", out],
 					...extra,
 				],
@@ -337,12 +361,17 @@ describe("credentials of a live comparison, on a scripted model", { timeout: 4 *
 	it("with --strict-auth, stops at the first failed check, before any trial or later check", async () => {
 		const { said, report } = await compare(["gone/model-1", "faux/faux-1"], ["--strict-auth"]);
 		expect(report.results).toEqual([]);
+		expect(report.skipped).toEqual([{ model: "gone/model-1", reason: expect.stringContaining("not found") }]);
 		expect(said).toEqual([expect.stringMatching(/^Stopped: The call to gone\/model-1 failed: .*not found/s)]);
 	});
 
 	it("stops before any trial when every provider's check fails, naming each failure", async () => {
 		const { said, report } = await compare(["gone/model-1", "lost/model-2"]);
 		expect(report.results).toEqual([]);
+		expect(report.skipped).toEqual([
+			{ model: "gone/model-1", reason: expect.stringContaining('Model "gone/model-1" not found') },
+			{ model: "lost/model-2", reason: expect.stringContaining('Model "lost/model-2" not found') },
+		]);
 		const stopped = said.find((line) => line.startsWith("Stopped:"));
 		expect(stopped).toMatch(/The call to gone\/model-1 failed: .*not found/s);
 		expect(stopped).toMatch(/The call to lost\/model-2 failed: .*not found/s);
