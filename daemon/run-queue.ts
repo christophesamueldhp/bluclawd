@@ -33,6 +33,8 @@ export const LOADER_ENV = ["NODE_OPTIONS", "DYLD_INSERT_LIBRARIES", "LD_PRELOAD"
 
 /** The tmux session a run's generation runs in, when it runs in a pane: named after both, so it is found by them. */
 export const runPaneSession = (runId: string, generation: number) => `${runId}-${generation}`;
+/** A run's generation, as it claims its slot in the queue. */
+export const runQueueKey = (runId: string, generation: number) => `${runId}/${generation}`;
 const RUN_PANE = /^sub_[\w-]+-\d+$/;
 
 /** How long a claim waits for a slot before it is answered without one; the orchestrator then claims again. */
@@ -185,6 +187,22 @@ export class RunQueue {
 			claimed.answer = answer;
 			this.schedule();
 		});
+	}
+
+	/**
+	 * Grants run `run` of orchestrator `parent` a slot now if one is free, never queuing it: for a run only someone
+	 * waiting for it now would see start. Says how many slots are taken, of how many.
+	 */
+	claimNow(run: string, parent: string): { granted: boolean; active: number; capacity: number } {
+		this.capacity = this.deps.capacity() ?? this.capacity;
+		this.schedule();
+		const active = [...this.entries.values()].filter((entry) => entry.state !== "queued").length;
+		if (this.entries.has(run) || active >= this.capacity) return { granted: false, active, capacity: this.capacity };
+		const now = this.deps.now();
+		this.entries.set(run, { parent, state: "granted", claimedAt: now, grantedAt: now });
+		this.served.set(parent, ++this.sequence);
+		this.schedule();
+		return { granted: true, active: active + 1, capacity: this.capacity };
 	}
 
 	/** Launches granted run `run`'s host; returns its pid. A run launched already is not launched again. */

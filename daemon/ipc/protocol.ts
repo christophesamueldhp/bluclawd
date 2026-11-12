@@ -193,6 +193,8 @@ export interface WakeupsRequest {
  */
 export type RunQueueRequest = { type: "run_queue" } & (
 	| { action: "claim"; run: string; parent: string }
+	/** A slot granted at once, or none: the run is never queued. */
+	| { action: "claim_now"; run: string; parent: string }
 	| { action: "launch"; run: string; host: RunHostLaunch }
 	| { action: "release"; run: string }
 	/** From a run's host in a pane (ADR-0013): the environment its run was launched with, given once. */
@@ -534,6 +536,9 @@ export interface RunQueueResponse extends ResponseBase {
 	type: "run_queue_result";
 	/** A claim's answer. */
 	granted?: boolean;
+	/** claim_now's: how many slots are taken, of how many. */
+	active?: number;
+	capacity?: number;
 	/** A launch's host. */
 	hostPid?: number;
 	/** take_env's answer. */

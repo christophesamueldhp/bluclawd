@@ -74,6 +74,8 @@ interface AnyResponse {
 	superseded?: boolean;
 	id?: string;
 	granted?: boolean;
+	active?: number;
+	capacity?: number;
 	hostPid?: number;
 	env?: Record<string, string>;
 	collaboration?: Collaboration;
@@ -313,6 +315,15 @@ export class OrchestratorClient {
 		const res = await this.request({ type: "run_queue", action: "claim", run, parent }, 30_000, signal);
 		if (res.type !== "run_queue_result") throw new Error(OUT_OF_DATE);
 		return res.granted === true;
+	}
+
+	/** Claims a slot for run `run` that is granted at once or not at all, never queued: how many are taken, of how many. */
+	async claimRunNow(run: string, parent: string): Promise<{ granted: boolean; active: number; capacity: number }> {
+		const res = await this.request({ type: "run_queue", action: "claim_now", run, parent });
+		if (res.type !== "run_queue_result" || res.active === undefined || res.capacity === undefined) {
+			throw new Error(OUT_OF_DATE);
+		}
+		return { granted: res.granted === true, active: res.active, capacity: res.capacity };
 	}
 
 	/** Has the daemon launch granted run `run`'s host; returns the host's pid. */

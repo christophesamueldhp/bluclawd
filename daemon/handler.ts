@@ -309,6 +309,9 @@ export async function handleIpcRequest(supervisor: ServerSupervisor, request: Se
 				const granted = await runQueue.claim(request.run, request.parent);
 				return { type: "run_queue_result", ok: true, granted };
 			}
+			if (request.action === "claim_now") {
+				return { type: "run_queue_result", ok: true, ...runQueue.claimNow(request.run, request.parent) };
+			}
 			if (request.action === "release") {
 				runQueue.release(request.run);
 				return { type: "run_queue_result", ok: true };

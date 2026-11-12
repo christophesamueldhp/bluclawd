@@ -209,6 +209,28 @@ describe("the daemon's queue of runs", () => {
 		await settle();
 		expect(again.state.granted).toBe(true);
 	});
+
+	it("grants a run a slot at once only when one is free, never queuing it (#353)", async () => {
+		const f = fixture(() => 1);
+		f.claim("a1", "alpha");
+		await settle();
+		f.launch("a1");
+
+		// Every slot is taken: it is told how many, and nothing of it waits for one.
+		expect(f.queue.claimNow("k/1", "beta")).toEqual({ granted: false, active: 1, capacity: 1 });
+		const next = f.claim("a2", "alpha");
+		f.end("a1");
+		await settle();
+		expect(next.state.granted).toBe(true);
+		f.launch("a2");
+		f.end("a2");
+
+		// A slot is free: it is granted, and its claim then is at once.
+		expect(f.queue.claimNow("k/1", "beta")).toEqual({ granted: true, active: 1, capacity: 1 });
+		expect(await f.queue.claim("k/1", "beta")).toBe(true);
+		f.launch("k/1");
+		expect(f.spawned.map(({ runDir }) => runDir)).toEqual(["/runs/a1", "/runs/a2", "/runs/k/1"]);
+	});
 });
 
 describe("maxActiveRuns: the user's bound on active runs", () => {
