@@ -6,7 +6,7 @@
 //   node scripts/prompt-footprint.ts
 //
 // `capturePrompt` and `capturePrefixes` are also used by test/prompt-footprint.test.ts, which holds the
-// orchestrator's footprint under a ceiling and its request prefix stable.
+// orchestrator's footprint and each bundled role's run footprint under a ceiling, and the request prefix stable.
 import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";

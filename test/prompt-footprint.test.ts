@@ -7,6 +7,9 @@ import { capturePrefixes, capturePrompt } from "../scripts/prompt-footprint.ts";
  */
 const CEILING = 22_738;
 
+/** Each bundled role's run footprint, held the same way. */
+const RUN_CEILINGS = { explorer: 2_972, "general-purpose": 4_030, reviewer: 3_281 };
+
 const platform = Object.getOwnPropertyDescriptor(process, "platform");
 
 afterEach(() => {
@@ -19,6 +22,13 @@ describe("Prompt footprint", () => {
 		Object.defineProperty(process, "platform", { value: "darwin" });
 		const { footprint } = await capturePrompt();
 		expect(footprint).toBeLessThanOrEqual(CEILING);
+	});
+
+	it.each(Object.entries(RUN_CEILINGS))("a run of %s stays at or under its ceiling", async (role, ceiling) => {
+		// Off darwin a run gets no shell, which changes what general-purpose is told.
+		Object.defineProperty(process, "platform", { value: "darwin" });
+		const { footprint } = await capturePrompt({ role });
+		expect(footprint).toBeLessThanOrEqual(ceiling);
 	});
 
 	it("keeps the system message and the tools byte-identical across consecutive requests", async () => {
