@@ -547,6 +547,16 @@ export async function executeRpcRun(
 		const untaken = sealRunInbox(launch.runDir, record.generation).length;
 		return untaken ? `; ${untakenText(untaken, launch.runDir, record.generation)}.` : "";
 	};
+	/** What a generation that did not start for `reason` ends with; a background run's orchestrator is told why. */
+	const didNotStart = (reason: string): SubagentRunOutcome => {
+		if (record.deliveryMode === "background" && !deps.reports.awaited(record.runId)) deps.notStarted(reason);
+		// A Resume that did not start leaves its session as it was, to be resumed again.
+		return {
+			status: launch.sessionFile ? "closed" : "failed",
+			summaryText: "",
+			errorMessage: `It did not start: ${reason}${untakenNote()}`,
+		};
+	};
 	/** What finds the processes its commands start, for a run with a shell: none may outlive its generation. */
 	let contained: RunContainment | undefined;
 	// Built before anything is awaited, so within its Admission: the run starts as admitted, however long it queues.
@@ -573,14 +583,7 @@ export async function executeRpcRun(
 	if (launch.tools.includes("bash")) {
 		const ready = await prepareRunContainment();
 		if (!ready.ok) {
-			const reason = `its shell cannot be contained (${ready.reason})`;
-			if (record.deliveryMode === "background") deps.notStarted(reason);
-			// A Resume that did not start leaves its session as it was, to be resumed again.
-			return {
-				status: launch.sessionFile ? "closed" : "failed",
-				summaryText: "",
-				errorMessage: `It did not start: ${reason}${untakenNote()}`,
-			};
+			return didNotStart(`its shell cannot be contained (${ready.reason})`);
 		}
 		contained = { helper: ready.helper, marker: runMarker(record.runId) };
 	}
@@ -597,9 +600,9 @@ export async function executeRpcRun(
 		try {
 			await materializeWorktree(workspace);
 		} catch (error) {
-			const reason = `its worktree could not be made (${error instanceof Error ? error.message : String(error)})`;
-			if (record.deliveryMode === "background") deps.notStarted(reason);
-			return { status: "failed", summaryText: "", errorMessage: `It did not start: ${reason}${untakenNote()}` };
+			return didNotStart(
+				`its worktree could not be made (${error instanceof Error ? error.message : String(error)})`,
+			);
 		}
 	}
 	// Its session's entries from here on are this generation's: an earlier one ended before it was claimed. A generation
@@ -622,13 +625,7 @@ export async function executeRpcRun(
 	}
 	if (!("hostPid" in turn)) {
 		const reason = "refused" in turn ? turn.refused : `the daemon could not start it (${turn.error})`;
-		if (record.deliveryMode === "background" && !deps.reports.awaited(record.runId)) deps.notStarted(reason);
-		// A Resume that did not start leaves its session as it was, to be resumed again.
-		return {
-			status: launch.sessionFile ? "closed" : "failed",
-			summaryText: "",
-			errorMessage: `It did not start: ${reason}${untakenNote()}`,
-		};
+		return didNotStart(reason);
 	}
 	controller.markRunning();
 	/** The generation's host: the one that took it, which a host launched again leaves it to, or the one launched. */
@@ -704,14 +701,7 @@ export async function executeRpcRun(
 	if (terminated && contained) rmSync(runShellTmp(launch.agentDir, record.runId), { recursive: true, force: true });
 	// Its host gave up before it started a pi: the run did not start, as when the daemon could not start its host.
 	const notStarted = terminated ? ownState()?.notStarted : undefined;
-	if (notStarted) {
-		if (record.deliveryMode === "background" && !deps.reports.awaited(record.runId)) deps.notStarted(notStarted);
-		return {
-			status: launch.sessionFile ? "closed" : "failed",
-			summaryText: "",
-			errorMessage: `It did not start: ${notStarted}${untakenNote()}`,
-		};
-	}
+	if (notStarted) return didNotStart(notStarted);
 	// Once nothing of it runs, a worktree it left as it was made goes, a Resume making it again; any other stays.
 	if (workspace && terminated && !launch.keepWorktree) {
 		await releaseUnchangedWorktree(workspace, {
