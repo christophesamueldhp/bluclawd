@@ -137,7 +137,7 @@ function buildBaseSubagentDescription(catalog?: AgentDefinitionCatalog, oneShot 
 					...RPC_RUNS_END,
 					"",
 				]),
-		"Available subagent roles, as found from your directory (a run given a `cwd` of its own finds roles from there):",
+		"Available subagent roles, as found from your directory:",
 		rolesSection,
 	].join("\n");
 }
