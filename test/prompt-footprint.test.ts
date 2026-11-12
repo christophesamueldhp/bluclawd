@@ -7,7 +7,7 @@ import { ALL_TOOLS, capturePrefixes, capturePrompt } from "../scripts/prompt-foo
  * smaller.
  */
 const PROFILES = { "the default profile": {}, "all tools declared": ALL_TOOLS };
-const CEILINGS = { "the default profile": 19_240, "all tools declared": 22_727 };
+const CEILINGS = { "the default profile": 15_748, "all tools declared": 22_070 };
 
 /** Each bundled role's run footprint, held the same way. */
 const RUN_CEILINGS = { explorer: 2_789, "general-purpose": 3_858, reviewer: 2_989 };
@@ -43,6 +43,23 @@ describe("Prompt footprint", () => {
 		const { tools, system } = await capturePrompt(profile);
 		expect(tools.map((tool) => tool.name)).toContain("monitor");
 		expect(system.sections?.tools).toMatch(/^- monitor: /m);
+	});
+
+	it("a session with no setting declares neither schedule_wakeup nor memory, nor names them, nor has <memory>", async () => {
+		const { tools, system } = await capturePrompt();
+		expect(tools.map((tool) => tool.name)).not.toContain("schedule_wakeup");
+		expect(tools.map((tool) => tool.name)).not.toContain("memory");
+		expect(system.sections?.memory).toBeUndefined();
+		expect(JSON.stringify({ system, tools })).not.toMatch(/schedule_wakeup|\bmemory\b/i);
+	});
+
+	it.each([
+		["the defaultTools setting", { defaultTools: ["+schedule_wakeup", "+memory"] }],
+		["--tools", { tools: ["+schedule_wakeup", "+memory"] }],
+	])("a session given schedule_wakeup and memory by %s declares both, with <memory>", async (_route, profile) => {
+		const { tools, system } = await capturePrompt(profile);
+		expect(tools.map((tool) => tool.name)).toEqual(expect.arrayContaining(["schedule_wakeup", "memory"]));
+		expect(system.sections?.memory).toContain("Memory index");
 	});
 
 	it.each(Object.entries(RUN_CEILINGS))("a run of %s stays at or under its ceiling", async (role, ceiling) => {

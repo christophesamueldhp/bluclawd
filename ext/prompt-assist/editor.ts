@@ -43,7 +43,7 @@ export function attachSuggestions(
 		clear();
 		if (!canSuggest()) return;
 		const text = editor.getText();
-		if (/\[(?:Pasted text|Image) #/.test(text)) return;
+		if (/\[(?:paste|Image) #/.test(text)) return;
 		const version = revision;
 		timer = setTimeout(async () => {
 			if (!eligible()) return;

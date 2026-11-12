@@ -269,7 +269,9 @@ describe.skipIf(!hasTmux)("a chain of RPC runs", () => {
 		expect(unknownResume).toMatch(
 			/chain\[0\]: `resume` names an earlier step of this chain .* no earlier step is named "w"/,
 		);
-		expect(resumeWithAgent).toMatch(/chain\[1\]: a step that resumes an earlier one .* leave out `agent`/);
+		expect(resumeWithAgent).toMatch(
+			/chain\[1\]: a step that resumes an earlier one .*`agent` differs from chain\[0\]'s .* leave out `agent`/,
+		);
 		expect(invalid).toMatch(/^No step of the chain was started:/);
 		expect(invalid).not.toMatch(/^- chain\[0\]/m);
 		// One worktree for every step: a step in another repository cannot share it.
@@ -394,6 +396,17 @@ describe.skipIf(!hasTmux)("a chain of RPC runs", () => {
 		const [, launched] = await real.waitForRequests("main", 2);
 		const [result] = toolResults(launched);
 		expect(result).toMatch(/^Background chain launched: chain_\w+, 3 steps, from chain\[0\] \("w"\) "w" \(sub_/);
+		// What to do after a call is said in its result.
+		expect(result).toContain("do not redo or touch its work, including the files in its scope");
+		expect(result).toContain("Never predict or invent its results; if the user asks, say it is still running.");
+		expect(result).toContain("Progress does not wake you; findings, questions and blockers reach you as messages.");
+		expect(result).toContain("Its processes end by themselves once it reports: there is nothing to close.");
+		expect(result).toContain(
+			[
+				"While it runs, do not redo or touch its work, including the files in its scope, and do not poll `subagent_status` by reflex. With no independent work left, end your turn and say you are waiting for the chain: its report will wake you. Never predict or invent its results; if the user asks, say it is still running.",
+				"Progress does not wake you; findings, questions and blockers reach you as messages. Its processes end by themselves once it reports: there is nothing to close.",
+			].join("\n"),
+		);
 		const chain = /chain_\w+/.exec(result)?.[0] ?? "";
 		real.script("main", steps(chain));
 

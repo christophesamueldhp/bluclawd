@@ -44,20 +44,19 @@ afterEach(() => {
 });
 
 describe("schema and prompt", () => {
-	it("takes timeout in milliseconds and CC's parameter texts", () => {
+	it("takes timeout in seconds, as pi's own bash does, and CC's parameter texts", () => {
 		const { tool } = makeTool(fakeOps().ops);
 		const props = (tool.parameters as { properties: Record<string, { description?: string }> }).properties;
 		expect(Object.keys(props)).toEqual(["command", "timeout", "description", "run_in_background"]);
-		expect(props.timeout.description).toBe("Optional timeout in milliseconds (max 600000)");
+		expect(props.timeout.description).toBe("Timeout in seconds (optional, default 120, max 600)");
 		expect(props.run_in_background.description).toBeUndefined();
 		expect(props.description.description).toMatch(/^Clear, concise description of what this command does/);
-		expect(tool.promptGuidelines).toContain("`timeout` defaults to 120000.");
 		expect(tool.promptGuidelines).toContain(
 			"`run_in_background` runs the command detached: it keeps running across turns and re-invokes you when it exits. No `&` needed.",
 		);
-		// Milliseconds are said once, where the model fills the timeout.
-		expect(tool.description).not.toContain("timeout");
-		expect(tool.promptGuidelines?.join("\n")).not.toContain("milliseconds");
+		// pi's own description, which names seconds.
+		expect(tool.description).toMatch(/ Optionally provide a timeout in seconds\.$/);
+		expect(JSON.stringify([tool.description, tool.promptGuidelines, tool.parameters])).not.toMatch(/milli|\bms\b/i);
 	});
 
 	it("drops every background path when background tasks are disabled", () => {
@@ -72,13 +71,12 @@ describe("schema and prompt", () => {
 		vi.stubEnv("BASH_DEFAULT_TIMEOUT_MS", "900000");
 		const { tool } = makeTool(fakeOps().ops);
 		const props = (tool.parameters as { properties: Record<string, { description?: string }> }).properties;
-		expect(props.timeout.description).toBe("Optional timeout in milliseconds (max 900000)");
-		expect(tool.promptGuidelines).toContain("`timeout` defaults to 900000.");
+		expect(props.timeout.description).toBe("Timeout in seconds (optional, default 900, max 900)");
 	});
 });
 
 describe("timeouts", () => {
-	it("gives the default 120s when the model names none, and converts milliseconds", async () => {
+	it("gives the default 120s when the model names none", async () => {
 		const { ops, calls } = fakeOps();
 		const { tool } = makeTool(ops);
 		const run = tool.execute("t1", { command: "echo hi" } as never, undefined, undefined, ctx);
@@ -94,7 +92,7 @@ describe("timeouts", () => {
 		const { tool } = makeTool(ops);
 		const result = await tool.execute(
 			"t2",
-			{ command: "npm run dev", timeout: 20 } as never,
+			{ command: "npm run dev", timeout: 0.02 } as never,
 			undefined,
 			undefined,
 			ctx,
@@ -110,7 +108,7 @@ describe("timeouts", () => {
 		const { ops, calls } = fakeOps();
 		const { tool } = makeTool(ops);
 		const err = await tool
-			.execute("t3", { command: "sleep 30", timeout: 20 } as never, undefined, undefined, ctx)
+			.execute("t3", { command: "sleep 30", timeout: 0.02 } as never, undefined, undefined, ctx)
 			.catch((e: Error) => e);
 		expect((err as Error).message).toMatch(/Command timed out after 0s$/);
 		expect(calls[0].aborted()).toBe(true);
@@ -121,7 +119,7 @@ describe("timeouts", () => {
 		const { tool } = makeTool(ops);
 		const result = await tool.execute(
 			"t4",
-			{ command: "tail -f log", run_in_background: true, timeout: 20 } as never,
+			{ command: "tail -f log", run_in_background: true, timeout: 0.02 } as never,
 			undefined,
 			undefined,
 			ctx,
@@ -135,16 +133,17 @@ describe("timeouts", () => {
 		);
 	});
 
-	it("with background tasks off, kills at the timeout instead", async () => {
+	it("with background tasks off, kills at the timeout instead, given in seconds and capped at 600", async () => {
 		vi.stubEnv("BLUCLAWD_DISABLE_BACKGROUND_TASKS", "true");
 		const { ops, calls } = fakeOps();
 		const { tool } = makeTool(ops);
-		const run = tool.execute("t5", { command: "npm run dev", timeout: 5000 } as never, undefined, undefined, ctx);
-		await waitFor(() => expect(calls.length).toBe(1));
+		const run = tool.execute("t5", { command: "npm run dev", timeout: 5 } as never, undefined, undefined, ctx);
+		const capped = tool.execute("t6", { command: "npm run dev", timeout: 5000 } as never, undefined, undefined, ctx);
+		await waitFor(() => expect(calls.length).toBe(2));
 		// Handed straight to the exec, which kills at it.
-		expect(calls[0].timeout).toBe(5);
-		calls[0].finish(0);
-		await run;
+		expect(calls.map((call) => call.timeout)).toEqual([5, 600]);
+		for (const call of calls) call.finish(0);
+		await Promise.all([run, capped]);
 	});
 
 	it("BLUCLAWD_AUTO_BACKGROUND_TIMEOUT_MS moves the main agent's command sooner, never under 2s", async () => {
@@ -153,6 +152,53 @@ describe("timeouts", () => {
 		expect(autoBackgroundTimeoutMs(120_000, { isMain: true, canAutoBackground: true })).toBe(2000);
 		expect(autoBackgroundTimeoutMs(120_000, { isMain: false, canAutoBackground: true })).toBe(120_000);
 		expect(autoBackgroundTimeoutMs(120_000, { isMain: true, canAutoBackground: false })).toBe(120_000);
+	});
+});
+
+describe("pi's shellCommandPrefix", () => {
+	const commandPrefix = () => "export PFX=applied";
+
+	it("runs a run_in_background command after the prefix, and lists it as the model wrote it", async () => {
+		const { ops, calls } = fakeOps();
+		const { tool } = makeTool(ops, { commandPrefix });
+		const result = await tool.execute(
+			"p1",
+			{ command: "npm run dev", run_in_background: true } as never,
+			undefined,
+			undefined,
+			ctx,
+		);
+		await waitFor(() => expect(calls.length).toBe(1));
+		expect(calls[0].command).toBe("export PFX=applied\nnpm run dev");
+		const id = (result.details as { backgroundTaskId: string }).backgroundTaskId;
+		expect(backgroundBashJobs.get(id)?.command).toBe("npm run dev");
+	});
+
+	it("runs a foreground command after the prefix once, and keeps it as written when it moves at its timeout", async () => {
+		const { ops, calls } = fakeOps();
+		const { tool } = makeTool(ops, { commandPrefix });
+		const result = await tool.execute(
+			"p2",
+			{ command: "npm run dev", timeout: 0.02 } as never,
+			undefined,
+			undefined,
+			ctx,
+		);
+		expect(calls[0].command).toBe("export PFX=applied\nnpm run dev");
+		const id = (result.details as { backgroundTaskId: string }).backgroundTaskId;
+		expect(backgroundBashJobs.get(id)?.command).toBe("npm run dev");
+	});
+
+	it("runs commands as written when the setting is absent", async () => {
+		const { ops, calls } = fakeOps();
+		const { tool } = makeTool(ops, { commandPrefix: () => undefined });
+		const run = tool.execute("p3", { command: "echo hi" } as never, undefined, undefined, ctx);
+		await waitFor(() => expect(calls.length).toBe(1));
+		calls[0].finish(0);
+		await run;
+		await tool.execute("p4", { command: "tail -f log", run_in_background: true } as never, undefined, undefined, ctx);
+		await waitFor(() => expect(calls.length).toBe(2));
+		expect(calls.map((call) => call.command)).toEqual(["echo hi", "tail -f log"]);
 	});
 });
 
@@ -247,7 +293,7 @@ describe("structured results for codemode scripts", () => {
 		const { tool } = makeTool(fakeOps().ops);
 		const result = await tool.execute(
 			"s3",
-			{ command: "npm run dev", timeout: 20 } as never,
+			{ command: "npm run dev", timeout: 0.02 } as never,
 			undefined,
 			undefined,
 			ctx,

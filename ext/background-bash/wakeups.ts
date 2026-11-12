@@ -9,6 +9,7 @@
 
 import type { WakeupEnd } from "../../daemon/wakeups.ts";
 import { notifyListeners, sharedRef } from "../_shared/global-state.ts";
+import { turnOnHint } from "../_shared/notice-once.ts";
 import { randomTaskId } from "./background-bash.ts";
 import { escapeXml, notificationContent, type OutgoingMessage, taskNotification } from "./monitor-events.ts";
 
@@ -184,6 +185,11 @@ export function wakeupMessage(wakeup: Wakeup, now: number): OutgoingMessage<Wake
 		display: true,
 		details: { id: wakeup.id, prompt: wakeup.prompt, dueAt: wakeup.dueAt },
 	};
+}
+
+export function wakeupToolOffNotice(count: number): string {
+	const found = count === 1 ? "a pending wake-up: it still fires" : `${count} pending wake-ups: they still fire`;
+	return `This session has ${found}, but schedule_wakeup is off by default now, so the agent cannot schedule another. ${turnOnHint("schedule_wakeup")}`;
 }
 
 /** What schedule_wakeup answers: the task id, and when it falls due. */

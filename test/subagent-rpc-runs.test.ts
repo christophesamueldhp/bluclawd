@@ -92,6 +92,10 @@ describe.skipIf(!hasTmux)("a read-only run on pi's RPC", () => {
 		expect(result?.text).toContain("The codeword is PELICAN.");
 		expect(result?.text).toContain("Outcome: completed");
 		expect(result?.text).toContain("Process: exited with code 0");
+		// What to do after the call is said in its result.
+		expect(result?.text).toContain("after its Report was stored: there is nothing to close.");
+		expect(result?.text).toContain("What the run says above is its own claim; the runtime verified none of it.");
+		expect(result?.text).toContain("Checks: ");
 		expect(result?.text).toContain(`Transcript: ${host.sessionFile}`);
 
 		// The Report and the session it came from stay on disk.

@@ -13,6 +13,7 @@ import {
 	createAgentSessionFromServices,
 	createAgentSessionRuntime,
 	createAgentSessionServices,
+	type ExtensionUIContext,
 	ModelRuntime,
 	SessionManager,
 	SettingsManager,
@@ -47,10 +48,18 @@ const textOf = (content: unknown) =>
 /**
  * A pi on a faux model with background-bash, its session persisted under `dir` (a new one, or `sessionFile` opened
  * as pi started on it would). The clock is faked from 13:30 (and still moving, so pi's own timers run); a second
- * start in the same test keeps it. Each model call records the context it saw.
+ * start in the same test keeps it. Each model call records the context it saw. Unless `wakeupTool` is false,
+ * pi's `--tools +schedule_wakeup` turns the tool on. With `notices`, it has a UI, whose notices go there.
  */
 async function startSession(
-	options: { dir?: string; sessionFile?: string; provider?: string; lateAuth?: boolean } = {},
+	options: {
+		dir?: string;
+		sessionFile?: string;
+		provider?: string;
+		lateAuth?: boolean;
+		wakeupTool?: boolean;
+		notices?: string[];
+	} = {},
 ) {
 	if (!vi.isFakeTimers()) {
 		vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"], shouldAdvanceTime: true, now: NOW });
@@ -103,6 +112,7 @@ async function startSession(
 				model: options.lateAuth ? undefined : faux.getModel("faux-main"),
 				thinkingLevel: "low",
 				noTools: "builtin",
+				tools: options.wakeupTool === false ? undefined : ["+schedule_wakeup"],
 			});
 			return { ...created, services, diagnostics: services.diagnostics };
 		},
@@ -117,8 +127,16 @@ async function startSession(
 	runtimes.push(runtime);
 	authChecked = true;
 	// As pi binds a session; without a binding a reload starts no new session.
+	const notices = options.notices;
+	// Any other UI call does nothing, and what it returns undoes nothing.
+	const uiContext = notices
+		? (new Proxy(
+				{ notify: (message: string) => notices.push(message) },
+				{ get: (target, key) => (target as Record<string | symbol, unknown>)[key] ?? (() => () => {}) },
+			) as unknown as ExtensionUIContext)
+		: undefined;
 	const bind = (session: AgentSessionRuntime["session"]) =>
-		session.bindExtensions({ mode: "print", shutdownHandler: () => {} });
+		session.bindExtensions({ mode: "print", uiContext, shutdownHandler: () => {} });
 	runtime.setRebindSession(bind);
 	await bind(runtime.session);
 	const seen: Context[] = [];
@@ -348,6 +366,72 @@ describe("a wake-up's lifetime", () => {
 		expect(textOf(second.at(-1)?.content)).toContain("Second thing.");
 		expect(textOf(second.at(-1)?.content)).toContain("it was due at 2026-11-10 13:35");
 		expect(wakeups.list()).toEqual([]);
+	});
+
+	it("fires, or is cancelled by task_stop, in a session reopened without schedule_wakeup", async () => {
+		const first = await startSession();
+		first.replies([
+			call("schedule_wakeup", { prompt: "Check the deploy.", delay: 120 }),
+			call("schedule_wakeup", { prompt: "Never.", delay: 600 }),
+			fauxAssistantMessage("Scheduled."),
+		]);
+		await first.session.prompt("deploy", { expandPromptTemplates: false });
+		const never = wakeupId(lastText(first.seen[2]));
+		const sessionFile = first.session.sessionFile;
+		crash(first.runtime);
+
+		const reopened = await startSession({ dir: first.dir, sessionFile, wakeupTool: false });
+		expect(reopened.session.getActiveToolNames()).not.toContain("schedule_wakeup");
+		reopened.replies([call("task_stop", { task_id: never ?? "" }), fauxAssistantMessage("Cancelled.")]);
+		await reopened.session.prompt("cancel it", { expandPromptTemplates: false });
+		expect(lastText(reopened.seen[1])).toContain(`Successfully cancelled wake-up: ${never}`);
+
+		reopened.replies([fauxAssistantMessage("Deploy is fine.")]);
+		vi.advanceTimersByTime(2 * MINUTE);
+		await waitFor(() => reopened.seen.length === 3);
+		expect(lastText(reopened.seen[2])).toContain("Check the deploy.");
+		expect(wakeups.list()).toEqual([]);
+	});
+
+	it("tells the user once, not the model, that a reopened session's wake-ups still fire without schedule_wakeup", async () => {
+		const agentDir = realpathSync(mkdtempSync(join(tmpdir(), "bluclawd-wakeups-agent-")));
+		tempDirs.push(agentDir);
+		vi.stubEnv("PI_CODING_AGENT_DIR", agentDir);
+		const first = await startSession({ notices: [] });
+		first.replies([
+			call("schedule_wakeup", { prompt: "Check the deploy.", delay: 600 }),
+			fauxAssistantMessage("Ok."),
+		]);
+		await first.session.prompt("deploy", { expandPromptTemplates: false });
+		const sessionFile = first.session.sessionFile;
+		crash(first.runtime);
+
+		const notices: string[] = [];
+		const withTool = await startSession({ dir: first.dir, sessionFile, notices });
+		expect(withTool.session.getActiveToolNames()).toContain("schedule_wakeup");
+		crash(withTool.runtime);
+		const empty = await startSession({ wakeupTool: false, notices });
+		crash(empty.runtime);
+		expect(notices).toEqual([]);
+
+		const reopened = await startSession({ dir: first.dir, sessionFile, wakeupTool: false, notices });
+		expect(notices).toHaveLength(1);
+		expect(notices[0]).toMatch(/pending wake-up/);
+		expect(notices[0]).toMatch(/still fires/);
+		expect(notices[0]).toContain('"defaultTools": ["+schedule_wakeup"]');
+		expect(notices[0]).toBe(
+			'This session has a pending wake-up: it still fires, but schedule_wakeup is off by default now, so the agent cannot schedule another. Turn it on with "defaultTools": ["+schedule_wakeup"] in ~/.pi/agent/settings.json, or for one session with pi --tools +schedule_wakeup.',
+		);
+		await reopened.session.reload();
+		expect(notices).toHaveLength(1);
+		reopened.replies([fauxAssistantMessage("Hi.")]);
+		await reopened.session.prompt("hi", { expandPromptTemplates: false });
+		expect(JSON.stringify(reopened.seen[0])).not.toMatch(/off by default/);
+		crash(reopened.runtime);
+
+		const again = await startSession({ dir: first.dir, sessionFile, wakeupTool: false, notices });
+		expect(notices).toHaveLength(1);
+		crash(again.runtime);
 	});
 
 	it("fires in the model the session recorded, though pi resumed it before that provider's auth was checked", async () => {

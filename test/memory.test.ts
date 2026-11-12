@@ -14,6 +14,7 @@ import {
 import { afterEach, describe, expect, it } from "vitest";
 import { createMemoryExtension } from "../ext/memory/index.ts";
 import { saveMemoryEnabled } from "../ext/memory/prefs.ts";
+import { memoryDir, saveMemory } from "../ext/memory/store.ts";
 
 const tempDirs: string[] = [];
 
@@ -44,8 +45,11 @@ function systemText(context: { messages: Array<{ role: string }> }): string {
 const textOf = (content: unknown) =>
 	(content as Array<{ type: string; text?: string }>).map((part) => part.text ?? "").join("\n");
 
-/** A pi session on a faux model with the memory extension; each prompt records the system prompt the model saw. */
-async function startSession(cwd: string, agentDir: string) {
+/**
+ * A pi session on a faux model with the memory extension; each prompt records the system prompt the model saw. Unless
+ * `memoryTool` is false, pi's `--tools +memory` turns the memory tool on, or its `"defaultTools": ["+memory"]` setting.
+ */
+async function startSession(cwd: string, agentDir: string, memoryTool: boolean | "defaultTools" = true) {
 	const modelRuntime = await ModelRuntime.create({
 		authPath: join(agentDir, "auth.json"),
 		modelsPath: join(agentDir, "models.json"),
@@ -56,7 +60,11 @@ async function startSession(cwd: string, agentDir: string) {
 	const faux = fauxProvider({ provider: "faux-memory", models: [{ id: "faux-main" }] });
 	modelRuntime.registerNativeProvider(faux.provider);
 	await modelRuntime.refresh({ allowNetwork: false });
-	const settingsManager = SettingsManager.inMemory({ compaction: { enabled: false }, retry: { enabled: false } });
+	const settingsManager = SettingsManager.inMemory({
+		compaction: { enabled: false },
+		retry: { enabled: false },
+		...(memoryTool === "defaultTools" ? { defaultTools: ["+memory"] } : {}),
+	});
 	const resourceLoader = new DefaultResourceLoader({
 		cwd,
 		agentDir,
@@ -76,7 +84,9 @@ async function startSession(cwd: string, agentDir: string) {
 		modelRuntime,
 		model: faux.getModel("faux-main"),
 		thinkingLevel: "low",
-		noTools: "builtin",
+		// pi reads defaultTools only when noTools is unset; it then gives pi's own read, bash, edit and write too.
+		noTools: memoryTool === "defaultTools" ? undefined : "builtin",
+		tools: memoryTool === true ? ["+memory"] : undefined,
 		resourceLoader,
 		sessionManager: SessionManager.inMemory(cwd),
 		settingsManager,
@@ -205,6 +215,55 @@ describe("memory", () => {
 		expect(on.session.getActiveToolNames()).toContain("memory");
 		expect(on.seen[0]).toContain("Memory index");
 		on.session.dispose();
+	});
+
+	it("declares neither the memory tool nor its section unless --tools or defaultTools turns the tool on", async () => {
+		const s = await startSession(gitRepo(), makeTempDir("agent"), false);
+		await s.prompt([fauxAssistantMessage("Hi.")]);
+		expect(s.session.getActiveToolNames()).not.toContain("memory");
+		expect(s.seen[0]).not.toContain("Memory index");
+		expect(s.seen[0]).not.toContain("# Memory");
+		s.session.dispose();
+	});
+
+	it("tells the user once, not the model, that a Project's Memories go unread without the memory tool", async () => {
+		const repo = gitRepo();
+		const agentDir = makeTempDir("agent");
+		const none = await startSession(repo, agentDir, false);
+		expect(none.notices).toEqual([]);
+		none.session.dispose();
+
+		const first = await startSession(repo, agentDir);
+		await first.prompt([
+			save({ name: "tabs", description: "The user prefers tabs", type: "feedback", body: "Tabs." }),
+			fauxAssistantMessage("Saved."),
+		]);
+		expect(first.notices).toEqual([]);
+		first.session.dispose();
+
+		saveMemoryEnabled(agentDir, false);
+		const turnedOff = await startSession(repo, agentDir, false);
+		expect(turnedOff.notices).toEqual([]);
+		turnedOff.session.dispose();
+		saveMemoryEnabled(agentDir, true);
+
+		const off = await startSession(repo, agentDir, false);
+		expect(off.notices).toHaveLength(1);
+		expect(off.notices[0]).toMatch(/Memories/);
+		expect(off.notices[0]).toMatch(/off by default/);
+		expect(off.notices[0]).toContain('"defaultTools": ["+memory"]');
+		expect(off.notices[0]).toBe(
+			'This Project has Memories, but the memory tool is off by default now, so this session neither loads nor saves them. Turn it on with "defaultTools": ["+memory"] in ~/.pi/agent/settings.json, or for one session with pi --tools +memory.',
+		);
+		await off.prompt([fauxAssistantMessage("Hi.")]);
+		expect(off.seen[0]).not.toMatch(/off by default/);
+		await off.session.reload();
+		expect(off.notices).toHaveLength(1);
+		off.session.dispose();
+
+		const later = await startSession(repo, agentDir, false);
+		expect(later.notices).toEqual([]);
+		later.session.dispose();
 	});
 
 	it("keeps the session's system prompt unchanged after a save mid-session", async () => {
@@ -401,5 +460,72 @@ describe("/memory", () => {
 		const on = await startSession(gitRepo(), agentDir);
 		expect(on.session.getActiveToolNames()).toContain("memory");
 		on.session.dispose();
+	});
+
+	it("turned on, applies from the next session only: /reload does not give back a tool left out at its start", async () => {
+		const agentDir = makeTempDir("agent");
+		saveMemoryEnabled(agentDir, false);
+		const s = await startSession(gitRepo(), agentDir);
+		await s.command(option("Turn memory on"));
+		expect(s.notices.at(-1)).toMatch(/next session/i);
+		expect(s.notices.at(-1)).not.toMatch(/\/reload/);
+		await s.session.reload();
+		expect(s.session.getActiveToolNames()).not.toContain("memory");
+		s.session.dispose();
+	});
+
+	it("after a /reload, does not ask for a defaultTools entry the session already has, nor sends <memory> without the tool", async () => {
+		const repo = gitRepo();
+		const agentDir = makeTempDir("agent");
+		saveMemory(memoryDir(agentDir, repo), {
+			name: "tabs",
+			description: "The user prefers tabs",
+			type: "feedback",
+			body: "Tabs.",
+		});
+		saveMemoryEnabled(agentDir, false);
+		const s = await startSession(repo, agentDir, "defaultTools");
+		await s.session.reload();
+		await s.command(() => undefined);
+		expect(s.selects.at(-1)?.title).not.toMatch(/memory tool is off/i);
+
+		await s.command(option("Turn memory on"));
+		expect(s.notices.at(-1)).not.toMatch(/memory tool is off/i);
+		await s.session.reload();
+		await s.command(() => undefined);
+		expect(s.selects.at(-1)?.title).not.toMatch(/memory tool is off/i);
+		await s.prompt([fauxAssistantMessage("Hi.")]);
+		expect(s.session.getActiveToolNames()).not.toContain("memory");
+		expect(s.seen[0]).not.toContain("# Memory");
+		expect(s.notices.join("\n")).not.toMatch(/off by default/);
+		s.session.dispose();
+	});
+
+	it("says plainly when the memory tool is off, and how to turn it on, and still lists the Memories", async () => {
+		const repo = gitRepo();
+		const agentDir = makeTempDir("agent");
+		const first = await startSession(repo, agentDir);
+		await first.prompt([
+			save({ name: "tabs", description: "The user prefers tabs", type: "feedback", body: "Tabs." }),
+			fauxAssistantMessage("Saved."),
+		]);
+		first.session.dispose();
+
+		const s = await startSession(repo, agentDir, false);
+		await s.command(() => undefined);
+		const [list] = s.selects;
+		expect(list.title).toMatch(/memory tool is off/i);
+		expect(list.title).toContain('"defaultTools": ["+memory"]');
+		expect(list.title).toContain("--tools +memory");
+		expect(list.title).toContain(
+			'The memory tool is off, so this session neither loads nor saves Memories. Turn it on with "defaultTools": ["+memory"] in ~/.pi/agent/settings.json, or for one session with pi --tools +memory.',
+		);
+		expect(list.options).toContain("tabs (feedback) — The user prefers tabs");
+
+		await s.command(option("Turn memory off"));
+		expect(s.notices.at(-1)).not.toMatch(/memory tool is off/i);
+		await s.command(option("Turn memory on"));
+		expect(s.notices.at(-1)).toMatch(/memory tool is off/i);
+		s.session.dispose();
 	});
 });

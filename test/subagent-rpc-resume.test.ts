@@ -86,7 +86,26 @@ describe.skipIf(!hasTmux)("resuming an RPC run", () => {
 		const dir = runDir(real.agentDir, "look");
 		const first = readJson(join(dir, "reports", "1.json"));
 
-		expect(lastToolResult(main[2])?.text).toMatch(/Resuming "look" \(sub_[^)]+\) in the background/);
+		const receipt = lastToolResult(main[2])?.text;
+		expect(receipt).toMatch(/Resuming "look" \(sub_[^)]+\) in the background/);
+		// What to do after a call is said in its result.
+		expect(receipt).toContain(
+			"While it runs, do not redo or touch its work, including the files in its scope, and do not poll `subagent_status` by reflex.",
+		);
+		expect(receipt).toContain(
+			"With no independent work left, end your turn and say you are waiting: its report will wake you.",
+		);
+		expect(receipt).toContain("Never predict or invent its result; if the user asks, say it is still running.");
+		expect(receipt).toContain(
+			"Its progress does not wake you; its findings, questions and blockers reach you as messages.",
+		);
+		expect(receipt).toContain(
+			[
+				"Its report will be delivered when it finishes.",
+				"While it runs, do not redo or touch its work, including the files in its scope, and do not poll `subagent_status` by reflex. With no independent work left, end your turn and say you are waiting: its report will wake you. Never predict or invent its result; if the user asks, say it is still running.",
+				"Its progress does not wake you; its findings, questions and blockers reach you as messages.",
+			].join("\n"),
+		);
 		// Its earlier conversation, then the instruction, as from its orchestrator.
 		const look = real.requests("look");
 		expect(look).toHaveLength(2);
@@ -296,7 +315,9 @@ describe.skipIf(!hasTmux)("resuming an RPC run", () => {
 			.map(({ text }) => text);
 		expect(results).toHaveLength(2);
 		expect(results.filter((text) => text.startsWith("Resuming"))).toHaveLength(1);
-		expect(results.filter((text) => /Cannot resume|still (starting|running)/.test(text))).toHaveLength(1);
+		expect(
+			results.filter((text) => !text.startsWith("Resuming") && /Cannot resume|still (starting|running)/.test(text)),
+		).toHaveLength(1);
 		// Proves only that no second pi asked within this while.
 		await new Promise((resolve) => setTimeout(resolve, 1000));
 		const look = real.requests("look");

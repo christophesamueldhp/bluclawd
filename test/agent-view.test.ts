@@ -162,6 +162,7 @@ function makeView(
 		mode?: string;
 		listModels?: () => Array<{ provider: string; id: string }>;
 		instances?: InstanceSummary[];
+		externalEditor?: () => string;
 	} = {},
 ) {
 	const calls: Calls = [];
@@ -170,7 +171,12 @@ function makeView(
 	const resumed: boolean[] = [];
 	let stopped = 0;
 	let closed = 0;
-	const ui = { terminal: { rows: opts.rows ?? 40 }, requestRender: () => {} } as unknown as TUI;
+	const ui = {
+		terminal: { rows: opts.rows ?? 40 },
+		requestRender: () => {},
+		stop: () => {},
+		start: () => {},
+	} as unknown as TUI;
 	const view = new AgentView({
 		ui,
 		client: fakeClient(calls, opts.list ?? (() => instances)),
@@ -188,6 +194,7 @@ function makeView(
 		mode: opts.mode,
 		listModels: opts.listModels,
 		instances,
+		externalEditor: opts.externalEditor ?? (() => "true"),
 	});
 	const flush = () => new Promise((r) => setTimeout(r, 0));
 	return {
@@ -200,6 +207,13 @@ function makeView(
 		text: () => view.render(100).map(stripAnsi),
 		flush,
 	};
+}
+
+/** An executable shell script standing in for an editor; `$1` is the prompt file. */
+function editorScript(body: string): string {
+	const file = join(mkdtempSync(join(tmpdir(), "bluclawd-editor-")), "editor.sh");
+	writeFileSync(file, `#!/bin/sh\n${body}\n`, { mode: 0o755 });
+	return file;
 }
 
 beforeAll(() => setSharedTheme(plainTheme));
@@ -740,6 +754,7 @@ describe("AgentView keys", () => {
 			appName: "bluclawd",
 			cwd: HERE,
 			home: HOME,
+			externalEditor: () => "true",
 			onClose: () => {},
 			panes: fakePanes([]),
 			self: () => {
@@ -814,6 +829,33 @@ describe("AgentView keys", () => {
 		const shown = text().join("\n");
 		expect(shown).toContain("No image found in clipboard");
 		expect(shown).toContain("❯ describe");
+	});
+
+	it("Ctrl+G writes the prompt in the external editor pi's settings name", async () => {
+		const editor = editorScript(`printf 'from the editor' > "$1"`);
+		const { view, text } = makeView({ externalEditor: () => editor });
+		for (const ch of "draft") view.handleInput(ch);
+		view.handleInput("\x07");
+		await waitFor(() => expect(text().join("\n")).toContain("❯ from the editor"));
+	});
+
+	it("Ctrl+G with an editor that cannot start says so and keeps the prompt", async () => {
+		const missing = "bluclawd-no-such-editor";
+		const { view, text } = makeView({ externalEditor: () => missing });
+		for (const ch of "draft") view.handleInput(ch);
+		view.handleInput("\x07");
+		await waitFor(() => expect(text().join("\n")).toContain(`Failed to launch external editor: ${missing}`));
+		view.handleInput("s");
+		expect(text().join("\n")).toContain("❯ drafts");
+	});
+
+	it("Ctrl+G with an editor that exits non-zero says so and keeps the prompt", async () => {
+		const editor = editorScript(`printf 'discarded' > "$1"; exit 3`);
+		const { view, text } = makeView({ externalEditor: () => editor });
+		for (const ch of "draft") view.handleInput(ch);
+		view.handleInput("\x07");
+		await waitFor(() => expect(text().join("\n")).toContain("External editor exited with code 3; prompt unchanged"));
+		expect(text().join("\n")).toContain("❯ draft");
 	});
 
 	it("Esc clears pasted images rather than unexpectedly opening the selected session", async () => {
@@ -1458,6 +1500,7 @@ describe("AgentView look", () => {
 			appName: "bluclawd",
 			cwd: HERE,
 			home: HOME,
+			externalEditor: () => "true",
 			self: () => self,
 			onClose: () => {},
 			instances: sessions,
@@ -1476,6 +1519,7 @@ describe("AgentView look", () => {
 			appName: "bluclawd",
 			cwd: HERE,
 			home: HOME,
+			externalEditor: () => "true",
 			self: () => self,
 			onClose: () => {},
 		});
@@ -1512,6 +1556,7 @@ describe("AgentView look", () => {
 				appName: "bluclawd",
 				cwd: HERE,
 				home: HOME,
+				externalEditor: () => "true",
 				onClose: () => {},
 				instances: [pane],
 			});

@@ -1,5 +1,5 @@
 /**
- * The model's bash tool: `timeout` in milliseconds with a 2-minute default,
+ * The model's bash tool: `timeout` in seconds, as pi's own, with a 2-minute default,
  * `run_in_background`, and a command still running at its timeout (or on Ctrl+B,
  * or when the user sends a message) moved to the background rather than killed.
  * Every session builds its bash here so they cannot drift apart; what differs is
@@ -66,7 +66,8 @@ export const wentToBackground = (details: unknown) => Boolean((details as BashDe
 export interface BackgroundBashOptions {
 	cwd: string;
 	shellPath?: string;
-	commandPrefix?: string;
+	/** pi's `shellCommandPrefix`, read per command: the settings are read after the tool is built. */
+	commandPrefix?: () => string | undefined;
 	/** What every command runs through. */
 	operations: BashOperations;
 	/** Where a job's notifications go: the session that started it. */
@@ -127,13 +128,17 @@ function timeoutError(err: unknown, timeoutMs: number): unknown {
 }
 
 export function createBackgroundBashTool(options: BackgroundBashOptions): ToolDefinition {
-	const { cwd, shellPath, commandPrefix } = options;
-	const base = createBashToolDefinition(cwd, { shellPath, commandPrefix });
+	const { cwd, shellPath } = options;
+	const base = createBashToolDefinition(cwd, { shellPath });
 	const disabled = backgroundTasksDisabled();
 
 	const parameters = Type.Object({
 		command: base.parameters.properties.command,
-		timeout: Type.Optional(Type.Number({ description: `Optional timeout in milliseconds (max ${maxTimeoutMs()})` })),
+		timeout: Type.Optional(
+			Type.Number({
+				description: `Timeout in seconds (optional, default ${defaultTimeoutMs() / 1000}, max ${maxTimeoutMs() / 1000})`,
+			}),
+		),
 		description: Type.Optional(Type.String({ description: DESCRIPTION_TEXT })),
 		...(disabled
 			? {}
@@ -146,11 +151,8 @@ export function createBackgroundBashTool(options: BackgroundBashOptions): ToolDe
 
 	return {
 		...base,
-		// The timeout's unit is said where the model fills it: pi's description names seconds.
-		description: base.description.replace(" Optionally provide a timeout in seconds.", ""),
 		promptGuidelines: [
 			...(base.promptGuidelines ?? []),
-			`\`timeout\` defaults to ${defaultTimeoutMs()}.`,
 			...(disabled
 				? []
 				: [
@@ -159,13 +161,6 @@ export function createBackgroundBashTool(options: BackgroundBashOptions): ToolDe
 		],
 		parameters,
 		outputSchema,
-		// pi draws `(timeout Ns)` from the argument, which is milliseconds here.
-		renderCall(args, theme, context) {
-			const timeout = (args as { timeout?: unknown }).timeout;
-			const shown =
-				typeof timeout === "number" && timeout > 0 ? { ...(args as object), timeout: timeout / 1000 } : args;
-			return base.renderCall?.(shown as never, theme, context as never) as never;
-		},
 		renderResult(result, renderOptions, theme, context) {
 			if (wentToBackground(result.details)) return new Text(theme.fg("dim", RUNNING_IN_BACKGROUND), 0, 0);
 			return base.renderResult?.(result as never, renderOptions, theme, context as never) as never;
@@ -174,7 +169,11 @@ export function createBackgroundBashTool(options: BackgroundBashOptions): ToolDe
 			const { description, run_in_background, timeout, ...rest } = rawParams as Params;
 			const command = String(rest.command ?? "");
 			const startedAt = performance.now();
-			const ops = options.operations;
+			const prefix = options.commandPrefix?.();
+			// Prefixed as pi's own bash does, but below the job and the foreground shell, which keep the model's command.
+			const ops: BashOperations = prefix
+				? { exec: (cmd, dir, execOptions) => options.operations.exec(`${prefix}\n${cmd}`, dir, execOptions) }
+				: options.operations;
 			const owner = ctx?.sessionManager?.getSessionId();
 			// A child session's jobs carry its session id as their agent id: the main
 			// session sees and may stop them, another child may not.
@@ -232,7 +231,8 @@ export function createBackgroundBashTool(options: BackgroundBashOptions): ToolDe
 			}
 
 			const auto = canAutoBackground(command);
-			const timeoutMs = autoBackgroundTimeoutMs(effectiveTimeoutMs(timeout), {
+			const asked = timeout === undefined ? undefined : timeout * 1000;
+			const timeoutMs = autoBackgroundTimeoutMs(effectiveTimeoutMs(asked), {
 				isMain: options.isMain,
 				canAutoBackground: auto,
 			});
@@ -241,7 +241,7 @@ export function createBackgroundBashTool(options: BackgroundBashOptions): ToolDe
 			const exec = disabled
 				? ops.exec
 				: detachableExec(ops.exec, { description, owner, agentId, onExit, onStall, autoBackground: auto });
-			const tool = createBashTool(cwd, { shellPath, commandPrefix, operations: { exec } });
+			const tool = createBashTool(cwd, { shellPath, operations: { exec } });
 			try {
 				return (await tool.execute(id, { ...rest, timeout: timeoutMs / 1000 } as never, signal, onUpdate)) as never;
 			} catch (err) {

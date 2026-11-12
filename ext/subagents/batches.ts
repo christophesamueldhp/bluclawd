@@ -17,7 +17,7 @@ import {
 	nameTaken,
 	type RunAdmission,
 } from "./admission.ts";
-import { NOT_APPROVAL } from "./messages.ts";
+import { GROUP_PROGRESS, NOT_APPROVAL, NOTHING_TO_CLOSE, whileRunning } from "./messages.ts";
 import { sanitizeReportText, truncateUtf8Safe } from "./results.ts";
 import { readRunDefinition, runDefinitionPath, sessionFileEntries } from "./rpc-runs.ts";
 import { checksSummary, commandsRun } from "./run-evidence.ts";
@@ -501,7 +501,8 @@ export async function runTaskBatch(
 							: []),
 						`Every member's status, kept current as each settles: ${manifestPath}`,
 						`Their reports arrive together, as one message, once every one of them has finished. subagent_stop "${batch}" stops the whole batch; a member's name stops only that member.`,
-						"While they run, do not redo or touch their work, and do not poll `subagent_status` by reflex. With no independent work left, end your turn and say you are waiting for the batch: its report will wake you. Never predict or invent its results.",
+						whileRunning({ runs: "they run", its: "their", waitingFor: "the batch", result: "results" }),
+						`${GROUP_PROGRESS} Their processes end by themselves once they report: ${NOTHING_TO_CLOSE}`,
 					].join("\n"),
 				},
 			],

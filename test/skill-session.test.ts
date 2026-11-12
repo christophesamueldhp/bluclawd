@@ -358,7 +358,7 @@ describe("explicit terminal skills in a real session", () => {
 	it("delivers pasted text and image content together with the selected instructions", async () => {
 		const c = await composer();
 		await choose(c.editor);
-		const text = "\nPasted reference /skill:plan".repeat(5);
+		const text = "\nPasted reference /skill:plan".repeat(11);
 		c.editor.handleInput(`\x1b[200~${text}\x1b[201~`);
 		c.editor.handleInput(" ");
 		const image = join(c.cwd, "pi-clipboard-fixture.png");
@@ -368,7 +368,7 @@ describe("explicit terminal skills in a real session", () => {
 		writeFileSync(image, bytes);
 		c.editor.insertTextAtCursor(image);
 		await c.submit();
-		expect(c.lastText()).toContain(`${block("review", c.paths.review)}\n\n/skill:review${text} [Image #2]`);
+		expect(c.lastText()).toContain(`${block("review", c.paths.review)}\n\n/skill:review${text} [Image #1]`);
 		const user = c.requests
 			.at(-1)
 			?.messages.filter((m) => m.role === "user")

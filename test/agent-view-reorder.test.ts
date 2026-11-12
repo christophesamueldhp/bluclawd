@@ -96,6 +96,7 @@ function view(
 		appName: "bluclawd",
 		cwd: w.dir,
 		home: "/nohome",
+		externalEditor: () => "true",
 		onClose: () => {},
 		loadViewMode: () => extra.mode ?? "directory",
 		...(extra.self ? { self: extra.self } : {}),

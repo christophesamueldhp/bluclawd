@@ -100,6 +100,8 @@ export interface AgentViewOptions {
 	panes: PaneOps;
 	/** A peek reply to this window's own session: sent as its next prompt once the view closes. */
 	onSelfReply?: (text: string) => void;
+	/** ctrl+g's editor command, as pi resolves it: `externalEditor`, else $VISUAL / $EDITOR, else its default. */
+	externalEditor: () => string;
 	/** Clipboard IO is separate from the view so asynchronous paste never blocks rendering. */
 	readClipboard?: () => Promise<AgentClipboard>;
 	/** `/resume`: this repository's past sessions, newest first. */
@@ -489,28 +491,29 @@ export class AgentView implements Component, Focusable {
 		}
 	}
 
-	/** ctrl+g: edit the dispatch prompt in $VISUAL / $EDITOR, as pi's own editor does. */
+	/** ctrl+g: edit the dispatch prompt in the editor pi's own ctrl+g opens. */
 	private async editExternally(): Promise<void> {
-		const command = process.env.VISUAL || process.env.EDITOR;
-		if (!command) {
-			this.say("Set $VISUAL or $EDITOR to write the prompt in an editor");
-			this.render_();
-			return;
-		}
+		const command = this.opts.externalEditor();
 		const dir = mkdtempSync(join(tmpdir(), "pi-agents-"));
 		const file = join(dir, "prompt.md");
 		writeFileSync(file, this.composerText(), "utf-8");
 		const tui = this.opts.ui;
 		this.editing = true;
 		tui.stop();
+		// pi's own wording for an editor that failed.
+		let failure: string | undefined;
 		try {
 			const [bin, ...args] = command.split(" ");
-			const code = await new Promise<number | null>((resolve) => {
+			// Null means the editor could not be started.
+			const exit = await new Promise<number | NodeJS.Signals | null>((resolve) => {
 				const child = spawn(bin, [...args, file], { stdio: "inherit" });
 				child.on("error", () => resolve(null));
-				child.on("close", (exit) => resolve(exit));
+				child.on("close", (code, signal) => resolve(code ?? signal));
 			});
-			if (code === 0) this.setComposer(readFileSync(file, "utf-8").replace(/\n$/, ""));
+			if (exit === 0) this.setComposer(readFileSync(file, "utf-8").replace(/\n$/, ""));
+			else if (exit === null) failure = `Failed to launch external editor: ${command}`;
+			else
+				failure = `External editor exited with ${typeof exit === "number" ? `code ${exit}` : exit}; prompt unchanged`;
 		} finally {
 			rmSync(dir, { recursive: true, force: true });
 			this.editing = false;
@@ -518,7 +521,8 @@ export class AgentView implements Component, Focusable {
 			tui.requestRender(true);
 		}
 		this.recompute();
-		this.render_();
+		if (failure) this.say(failure, "error");
+		else this.render_();
 	}
 
 	private render_(): void {

@@ -25,7 +25,10 @@ describe.skipIf(!hasTmux)("a session's row with wake-ups pending", () => {
 	});
 
 	it("is Idle and shows when it next wakes, the next one once the earliest is cancelled, and none once none is pending", async () => {
-		const real = await startRealPi({ extensions: [...DEFAULT_EXTENSIONS, "background-bash"] });
+		const real = await startRealPi({
+			extensions: [...DEFAULT_EXTENSIONS, "background-bash"],
+			defaultTools: ["+schedule_wakeup"],
+		});
 		pi = real;
 		const steps: FauxStep[] = [
 			{ tool: "schedule_wakeup", args: { prompt: "Check CI later.", delay: 1200 } },

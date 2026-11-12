@@ -24,7 +24,7 @@ import {
 	type RunAdmission,
 } from "./admission.ts";
 import { type BatchMember, capAggregate, fullReportOf, inlineReports, memberOutcome, settleBatch } from "./batches.ts";
-import { NOT_APPROVAL } from "./messages.ts";
+import { GROUP_PROGRESS, NOT_APPROVAL, NOTHING_TO_CLOSE, whileRunning } from "./messages.ts";
 import type { ParentScopeChecks } from "./parent-scope.ts";
 import { sanitizeReportText, truncateUtf8Safe } from "./results.ts";
 import { readRunDefinition, runDefinitionPath } from "./rpc-runs.ts";
@@ -243,7 +243,8 @@ export async function runChain(
 					text: [
 						`Background chain launched: ${chain}, ${steps.length} step${steps.length === 1 ? "" : "s"}, from ${label(0)} ${formatRunLabel(start)}: ${start.agentName} (${start.provider}/${start.modelId}).`,
 						`Each step starts once the one before it completed; their reports arrive together, as one message, once the chain has finished or halted. subagent_stop "${chain}" stops the whole chain.`,
-						"While it runs, do not redo or touch its work, and do not poll `subagent_status` by reflex. With no independent work left, end your turn and say you are waiting for the chain: its report will wake you. Never predict or invent its results.",
+						whileRunning({ runs: "it runs", waitingFor: "the chain", result: "results" }),
+						`${GROUP_PROGRESS} Its processes end by themselves once it reports: ${NOTHING_TO_CLOSE}`,
 					].join("\n"),
 				},
 			],

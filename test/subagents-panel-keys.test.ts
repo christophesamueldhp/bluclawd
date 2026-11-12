@@ -293,7 +293,7 @@ describe("the prompt's editor wrappers with the panel present", () => {
 		const pasted = Array.from({ length: 20 }, (_, i) => `line ${i}`).join("\n");
 		t.press(DOWN, `\x1b[200~${pasted}\x1b[201~`);
 		expect(t.editorFocused()).toBe(true);
-		expect(t.editorText()).toMatch(/^\[Pasted text #1/);
+		expect(t.editorText()).toMatch(/^\[paste #1 /);
 	});
 });
 

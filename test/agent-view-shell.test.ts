@@ -112,6 +112,7 @@ function setup(shells: ShellInfo[]) {
 		appName: "bluclawd",
 		cwd: HERE,
 		home: "/home/me",
+		externalEditor: () => "true",
 		onClose: () => {},
 		panes,
 	});

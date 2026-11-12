@@ -19,7 +19,7 @@ import type {
 	InlineExtension,
 	SessionStartEvent,
 } from "@earendil-works/pi-coding-agent";
-import { createLocalBashOperations } from "@earendil-works/pi-coding-agent";
+import { createLocalBashOperations, getAgentDir } from "@earendil-works/pi-coding-agent";
 import {
 	Box,
 	type Component,
@@ -38,6 +38,7 @@ import { cancelledByDelete, forgetCancelled, type HeldWakeups, processStart } fr
 import { agentTasks, isAgentTaskId, subscribeAgentTasks } from "../_shared/agent-tasks.ts";
 import { commandBlock } from "../_shared/command-block.ts";
 import { sharedRef } from "../_shared/global-state.ts";
+import { toolOffNoticeOnce } from "../_shared/notice-once.ts";
 import { startupSettings } from "../_shared/startup-settings.ts";
 import { STATUS_KEYS } from "../_shared/status-keys.ts";
 import { subagentPanelHasRows } from "../_shared/subagent-panel.ts";
@@ -82,6 +83,7 @@ import {
 	wakeupMessage,
 	wakeupScheduledText,
 	wakeups,
+	wakeupToolOffNotice,
 } from "./wakeups.ts";
 
 const MAX_COMMAND_CHARS = 80;
@@ -202,8 +204,9 @@ const backgroundBash: InlineExtension = {
 
 		const owner = () => ctx?.sessionManager?.getSessionId();
 
-		// The user's configured shell, read per session.
+		// The user's configured shell and command prefix, read per session.
 		let shellPath: string | undefined;
+		let commandPrefix: string | undefined;
 		// Inside the sandbox when it is on (ext/sandbox): every model shell command runs through here.
 		const operations: BashOperations = {
 			exec: wrapExec(
@@ -213,11 +216,12 @@ const backgroundBash: InlineExtension = {
 		};
 		const localCwd = process.cwd();
 
-		// Overrides the built-in bash tool with timeouts in ms and run_in_background.
+		// Overrides the built-in bash tool with a default timeout and run_in_background.
 		pi.registerTool(
 			createBackgroundBashTool({
 				cwd: localCwd,
 				operations,
+				commandPrefix: () => commandPrefix,
 				sendMessage: (message, delivery) => deliverOrHold(() => mainSession.sendMessage(message, delivery)),
 				isMain: true,
 				record: {
@@ -335,6 +339,8 @@ const backgroundBash: InlineExtension = {
 			pi.registerTool({
 				name: "schedule_wakeup",
 				label: "ScheduleWakeup",
+				// Off unless the user's `defaultTools` or `--tools` names it: few sessions call it, and every request pays for it.
+				defaultActive: false,
 				description: [
 					"- Schedules a turn of your own: once it is due, you get a notice with the prompt you give here and start a turn",
 					"- Give exactly one of delay (seconds from now) or at (a local 24-hour clock time, HH:MM; its next occurrence)",
@@ -380,7 +386,6 @@ const backgroundBash: InlineExtension = {
 				"- Takes a task_id parameter identifying the task to stop",
 				"- Returns a success or failure status",
 				"- Use this tool when you need to terminate a long-running task",
-				"- Also cancels a pending wake-up (schedule_wakeup) by its ID",
 			].join("\n"),
 			parameters: Type.Object({
 				task_id: Type.Optional(Type.String({ description: "The ID of the background task to stop" })),
@@ -527,9 +532,12 @@ const backgroundBash: InlineExtension = {
 				appendEntry: (customType, data) => pi.appendEntry(customType, data),
 			});
 			try {
-				shellPath = startupSettings(event, startCtx).settings.getShellPath();
+				const { settings } = startupSettings(event, startCtx);
+				shellPath = settings.getShellPath();
+				commandPrefix = settings.getShellCommandPrefix();
 			} catch {
 				shellPath = undefined;
+				commandPrefix = undefined;
 			}
 			const session = startCtx.sessionManager.getSessionId();
 			// Background shells survive /clear: the new session owns them.
@@ -537,8 +545,12 @@ const backgroundBash: InlineExtension = {
 			if (event.reason === "new" && previous && previous !== session) backgroundBashJobs.reown(previous, session);
 			lastMainSession.set(session);
 			if (!runParent()) restoreWakeups(event, startCtx);
+			const stored = wakeups.list(session).length;
+			if (!runParent() && stored > 0 && !pi.getActiveTools().includes("schedule_wakeup")) {
+				toolOffNoticeOnce(startCtx, getAgentDir(), "schedule-wakeup-tool-off", wakeupToolOffNotice(stored));
+			}
 			// This pi holds them now: the daemon leaves them to it while it runs.
-			if (wakeups.list(session).length > 0) handOff();
+			if (stored > 0) handOff();
 			// Only pi's own TUI ends on its signal handlers; a listener here would keep a print run from ending on one.
 			if (startCtx.mode === "tui") watchSignals();
 			if (event.reason === "startup" || event.reason === "resume") reportOrphanShells(startCtx);

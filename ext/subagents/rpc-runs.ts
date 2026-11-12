@@ -32,7 +32,7 @@ import {
 	type RunContainmentReady,
 } from "../sandbox/run-containment.ts";
 import type { AgentDefinition } from "./definitions.ts";
-import { SUBAGENT_MESSAGE_TOOL } from "./messages.ts";
+import { NOTHING_TO_CLOSE, SUBAGENT_MESSAGE_TOOL } from "./messages.ts";
 import { truncateUtf8Safe } from "./results.ts";
 import { type RpcDenyRules, RUN_DEFINITION_FLAG, WRITE_TOOLS } from "./rpc-child.ts";
 import {
@@ -782,7 +782,7 @@ export async function executeRpcRun(
 	const runtime = [
 		"---",
 		`Outcome: ${outcome.status}${outcome.status === "completed" ? ": its pi settled its work without an error. What the run says above is its own claim; the runtime verified none of it." : `: ${cutReason(outcome.error)}.`}`,
-		`Process: exited with ${state.exit.signal ? `signal ${state.exit.signal}` : `code ${state.exit.code}`}, after its Report was stored.`,
+		`Process: exited with ${state.exit.signal ? `signal ${state.exit.signal}` : `code ${state.exit.code}`}, after its Report was stored: ${NOTHING_TO_CLOSE}`,
 		...checksLines(launch.tools, commandsRun(entries ?? [], queuedAt)),
 		...(workspace ? workspaceLines : ["Changes: none: it had no tool that changes files."]),
 		// A step of a chain is integrated with its chain, once the chain has completed.
