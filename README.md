@@ -233,6 +233,9 @@ cache holds.
 - Memory needs both the `memory` tool and `/memory` on: the Memory index and the guidance on keeping
   Memories reach the model only then. Without the tool, `/memory` still lists and deletes Memories,
   and says the tool is off.
+- The first session that finds a pending wake-up without `schedule_wakeup`, or the Project's Memories
+  without `memory` (and `/memory` on), tells you once, with the setting that turns the tool on; the
+  model is not told.
 
 
 ## Updating
