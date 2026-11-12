@@ -30,7 +30,7 @@ Two mechanisms, both pi's own:
 
 | Need | pi's mechanism |
 |---|---|
-| What ships | `package.json`'s `pi.extensions` — an explicit, ordered list of files (`permissions` must load first: it must see `tool_call` before anything that might answer it) |
+| What ships | `package.json`'s `pi.extensions` — an explicit, ordered list of files; pi runs each event's handlers in that order. `tmux-launch` is first: outside tmux its `session_start` moves the session into an agent-view pane and exits, so the others' startup does not run a second time in a process about to end (a startup cost, not correctness). `permissions` is next, ahead of `sandbox` and `checkpoints`, the other extensions that handle `tool_call`: pi stops at the first handler that blocks, so a deny rule blocks wherever it sits, but first it is the reason the model is told, and `checkpoints` does no Git scan for a call that never runs. `tmux-launch` handles no tool calls, so being ahead of `permissions` costs nothing |
 | What a feature does | `ExtensionAPI`: `registerCommand`, `registerTool`, `registerShortcut`, `appendEntry` + `registerEntryRenderer`, `ui.custom`, `setHeader`, `resources_discover`, … |
 
 `bin.mjs` is a convenience entry point for trying this out without a separate
@@ -605,8 +605,11 @@ also covers write and `Read(...)` also covers grep, find and ls; `//path` is
 absolute, `~/path` is home, anything else is relative to the working directory;
 `WebFetch(domain:x.com)`, `WebSearch(...)`, `Subagent` or `Subagent(explorer)`, and MCP tools as `mcp__server`,
 `mcp__server__*`, `mcp__server__tool` or `Mcp(server:tool)` — the web rules apply
-to bluclawd's own `websearch` and `webfetch` (each of a fetch's URLs is checked), and
-bluclawd ships no MCP tools, so those rules apply to another pi package's; `dir/**` covers
+to bluclawd's own `websearch` and `webfetch` (each of a fetch's URLs is checked), and the MCP
+rules to the tools of the servers pi connects: MCP is pi's own (`mcp.json`, `/mcp`), every MCP call
+goes through `tool_call`, a `codemode` script's included, and bluclawd adds no MCP tools of its own.
+Name the server as its tools are named, where pi turns any character other than a letter, digit or
+`_` into `_` (`dev-radius` → `mcp__dev_radius__*`); `dir/**` covers
 `dir` itself too. A bash rule also matches the command behind wrappers (`sudo`,
 `timeout`, `nice`, `env`, `xargs`, `sh -c '…'`, `eval`, …), shell keywords,
 quoting (`'rm'`, `\rm`), `/bin/…`, `$(…)`, and any part of a `&&`/`;`/`|` chain.
@@ -629,8 +632,8 @@ like `/settings`, the change applies to projects opened from then on.
 Deliberately not ported, because pi already has them: **bash mode** (pi's `!cmd`
 runs a command and sends its output to the model, `!!cmd` runs it without
 sending), **prompt stash** (↑/↓ on the prompt browse earlier prompts, as in
-bluclawd), **web search/fetch and MCP** (install a pi package for those; deny
-rules still cover them). Also not ported: **PDF input** (would mean reimplementing four
+bluclawd), **MCP** (pi's own: servers in `mcp.json`, managed with `/mcp`; deny
+rules cover their tools). Also not ported: **PDF input** (would mean reimplementing four
 provider wire formats behind `before_provider_request` — a shared-type change
 in pi's own `packages/ai`, not reachable through the extension API at all).
 
