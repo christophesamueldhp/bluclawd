@@ -1,11 +1,11 @@
 /**
- * bluclawd's paste in pi's prompt: a long paste shows as `[Pasted text #N +L lines]`, a
- * ctrl+v image as `[Image #N]` (pi's own editor inserts the image's file path), and pasting the
- * same thing again right after shows what the last token holds. Text tokens expand on send; an
- * image token stays in the text and its image goes with the prompt as an image block.
+ * bluclawd's image paste in pi's prompt: a ctrl+v image shows as `[Image #N]` where pi's own
+ * editor inserts the image's file path, and the image goes with the prompt as an image block.
+ * Pasting the same image again right after shows its path. Pasted text is left to pi, which
+ * collapses a long paste into its own `[paste #N …]` marker and expands it on send.
  *
- * pi's editor keeps its paste handling internal, so this patches the few internal methods it
- * needs on each editor instance. When a pi update renames them, the default editor stays.
+ * pi's editor keeps its internals private, so this patches the few internal methods it needs on
+ * each editor instance. When a pi update renames them, the default editor stays.
  */
 import { readFileSync } from "node:fs";
 import { extname } from "node:path";
@@ -17,7 +17,7 @@ import {
 	type KeybindingsManager,
 } from "@earendil-works/pi-coding-agent";
 import { Editor, type EditorTheme, type TUI } from "@earendil-works/pi-tui";
-import { PasteTokens, shouldCollapse } from "../_shared/paste-tokens.ts";
+import { PasteTokens } from "../_shared/paste-tokens.ts";
 import { timed } from "../_shared/timing.ts";
 
 interface Segment {
@@ -31,26 +31,20 @@ interface EditorInternals {
 	state: { lines: string[]; cursorLine: number; cursorCol: number };
 	lastAction: unknown;
 	segment(text: string, mode: "grapheme" | "word"): Iterable<Segment>;
-	expandPasteMarkers(text: string): string;
-	handlePaste(text: string): void;
 	submitValue(): void;
 	insertTextAtCursorInternal(text: string): void;
 	pushUndoSnapshot(): void;
 	setCursorCol(col: number): void;
-	normalizeText(text: string): string;
 	cancelAutocomplete(): void;
 	exitHistoryBrowsing(): void;
 }
 
 const INTERNALS = [
 	"segment",
-	"expandPasteMarkers",
-	"handlePaste",
 	"submitValue",
 	"insertTextAtCursorInternal",
 	"pushUndoSnapshot",
 	"setCursorCol",
-	"normalizeText",
 	"cancelAutocomplete",
 	"exitHistoryBrowsing",
 ] as const;
@@ -88,8 +82,6 @@ export class PasteEditor extends CustomEditor {
 		super(tui, theme, keybindings, { embedWorkingStatus: true });
 		const self = this as unknown as EditorInternals;
 		const baseSegment = self.segment.bind(this);
-		const baseExpand = self.expandPasteMarkers.bind(this);
-		const basePaste = self.handlePaste.bind(this);
 		const baseSubmit = self.submitValue.bind(this);
 		const baseSetText = this.setText.bind(this);
 		const baseInsert = this.insertTextAtCursor.bind(this);
@@ -108,7 +100,6 @@ export class PasteEditor extends CustomEditor {
 			}
 			return out;
 		};
-		self.expandPasteMarkers = (text) => this.tokens.expandText(baseExpand(text));
 		self.submitValue = () => {
 			this.submittedImages = this.tokens.imagesIn(this.getText());
 			baseSubmit();
@@ -118,44 +109,16 @@ export class PasteEditor extends CustomEditor {
 			this.tokens.clear();
 			baseSetText(text);
 		};
-		self.handlePaste = (pasted) => {
-			const text = this.clean(pasted);
-			if (this.expandRepeat("text", text)) return;
-			if (!shouldCollapse(text)) {
-				this.tokens.settle();
-				basePaste(pasted);
-				return;
-			}
-			this.insertToken(this.tokens.addText(text));
-		};
 		// pi's ctrl+v inserts a clipboard image's path, or the clipboard's text, through here.
 		this.insertTextAtCursor = (text) => {
 			if (CLIPBOARD_IMAGE.test(text.trim())) {
-				if (this.expandRepeat("image", text.trim(), sameBytes)) return;
+				if (this.expandRepeat(text.trim())) return;
 				this.insertToken(this.tokens.addImage(text.trim()));
-				return;
-			}
-			const clean = this.clean(text);
-			if (this.expandRepeat("text", clean)) return;
-			if (shouldCollapse(clean)) {
-				this.insertToken(this.tokens.addText(clean));
 				return;
 			}
 			this.tokens.settle();
 			baseInsert(text);
 		};
-	}
-
-	/** pi's own paste cleanup: line endings, tabs, and no control characters but newlines. */
-	private clean(text: string): string {
-		const self = this as unknown as EditorInternals;
-		const decoded = text.replace(/\x1b\[(\d+);5u/g, (match, code) => {
-			const cp = Number(code);
-			if (cp >= 97 && cp <= 122) return String.fromCharCode(cp - 96);
-			if (cp >= 65 && cp <= 90) return String.fromCharCode(cp - 64);
-			return match;
-		});
-		return [...self.normalizeText(decoded)].filter((c) => c === "\n" || c.charCodeAt(0) >= 32).join("");
 	}
 
 	private insertToken(token: string): void {
@@ -167,9 +130,9 @@ export class PasteEditor extends CustomEditor {
 		self.insertTextAtCursorInternal(token);
 	}
 
-	/** The same paste again, right after its token: the token gives way to what it holds. */
-	private expandRepeat(kind: "text" | "image", content: string, same?: (a: string, b: string) => boolean): boolean {
-		const repeat = this.tokens.repeatOf(kind, content, same);
+	/** The same image again, right after its token: the token gives way to the image's path. */
+	private expandRepeat(path: string): boolean {
+		const repeat = this.tokens.repeatOf("image", path, sameBytes);
 		if (!repeat) return false;
 		const self = this as unknown as EditorInternals;
 		const line = self.state.lines[self.state.cursorLine] ?? "";

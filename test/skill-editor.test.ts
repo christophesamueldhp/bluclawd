@@ -173,15 +173,15 @@ describe("terminal skill selection", () => {
 		);
 		await choose(editor);
 		editor.handleInput(" inspect ");
-		const paste = "one\ntwo\nthree\nfour";
+		const paste = Array.from({ length: 11 }, (_, i) => `line ${i + 1}`).join("\n");
 		editor.handleInput(`\x1b[200~${paste}\x1b[201~`);
 		const image = join(mkdtempSync(join(tmpdir(), "skill-editor-")), "pi-clipboard-test.png");
 		writeFileSync(image, "image bytes");
 		editor.insertTextAtCursor(image);
-		expect(editor.getText()).toContain("[Pasted text");
+		expect(editor.getText()).toContain("[paste #");
 		expect(editor.getText()).toContain("[Image");
 		editor.handleInput("\r");
-		expect(submitted()).toBe(`/skill:review inspect ${paste}[Image #2]`);
+		expect(submitted()).toBe(`/skill:review inspect ${paste}[Image #1]`);
 		expect(editor.submittedImages).toEqual([image]);
 		expect(rendered(editor)).not.toContain("Selected skill");
 		assist.clear();
