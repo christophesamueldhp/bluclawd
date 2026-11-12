@@ -214,7 +214,6 @@ describe("usageReport", () => {
 
 		expect(usageReport(dir).total.cache).toEqual({
 			awaited: { requests: 2, input: 600, cacheRead: 6000, cacheWrite: 60 },
-			besideAwaited: { requests: 2, input: 400, cacheRead: 4000, cacheWrite: 40 },
 			other: { requests: 2, input: 400, cacheRead: 4000, cacheWrite: 40 },
 		});
 	});
@@ -232,11 +231,12 @@ describe("usageReport", () => {
 		]);
 		writeSession(dir, "no-runs.jsonl", [request(1, [], { input: 50, cacheRead: 50 })]);
 
-		expect(usageReport(dir).total.cache).toEqual({
+		const report = usageReport(dir);
+		expect(report.total.cache).toEqual({
 			awaited: { requests: 1, input: 10, cacheRead: 90, cacheWrite: 0 },
-			besideAwaited: { requests: 1, input: 20, cacheRead: 80, cacheWrite: 0 },
 			other: { requests: 2, input: 70, cacheRead: 130, cacheWrite: 0 },
 		});
+		expect(report.besideAwaited).toEqual({ requests: 1, input: 20, cacheRead: 80, cacheWrite: 0 });
 	});
 
 	it("counts only a resumed Run's first generation as awaited, as a Resume records no start", () => {
@@ -305,6 +305,8 @@ describe("formatReport", () => {
 			"RESULT-SECRET",
 			"NOTICE-SECRET",
 			"DATA-SECRET",
+			"TOOL-SECRET",
+			"TYPE-SECRET",
 		];
 		const dir = sessionsDir();
 		writeSession(dir, "work/one.jsonl", [
@@ -340,6 +342,8 @@ describe("formatReport", () => {
 				},
 			},
 			{ type: "custom_message", customType: "bluclawd:task-exit", content: "NOTICE-SECRET", display: true },
+			{ type: "custom_message", customType: "a TYPE-SECRET b", content: "x", display: true },
+			request(4, [["what TOOL-SECRET said", {}]]),
 			{ type: "custom", customType: "web-search-results", data: { query: "DATA-SECRET" } },
 		]);
 		writeFileSync(join(dir, "torn.jsonl"), "{");

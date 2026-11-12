@@ -37,12 +37,11 @@ export interface Usage {
 	/** Notices injected into the session by kind: how many, and their characters. */
 	notices: Record<string, Sizes>;
 	/**
-	 * Token figures of the requests made while a Run was awaited, of the other requests of the sessions that made
-	 * such requests, and of all other requests. A Run counts as awaited from its admission to the end of its first
+	 * Token figures of the requests made while a Run was awaited, and of the others. A Run counts as awaited from its admission to the end of its first
 	 * generation: the session files do not say when it sat idle, so this is an upper bound, and a Resume records no
 	 * start, so later generations are left out.
 	 */
-	cache: { awaited: CacheFigures; besideAwaited: CacheFigures; other: CacheFigures };
+	cache: { awaited: CacheFigures; other: CacheFigures };
 }
 
 export interface CacheFigures {
@@ -62,6 +61,8 @@ export interface UsageReport {
 	/** Files that are not session files pi could read, relative to the directory read. */
 	unparsed: string[];
 	total: Usage;
+	/** The other requests of the sessions that awaited Runs, to set beside the awaited requests. */
+	besideAwaited: CacheFigures;
 }
 
 interface Entry {
@@ -99,7 +100,7 @@ const emptyUsage = (): Usage => ({
 	declared: {},
 	subagent: { calls: 0, roles: {} },
 	notices: {},
-	cache: { awaited: emptyCache(), besideAwaited: emptyCache(), other: emptyCache() },
+	cache: { awaited: emptyCache(), other: emptyCache() },
 });
 
 const addCache = (into: CacheFigures, more: CacheFigures) => {
@@ -131,7 +132,7 @@ function textChars(content: unknown): number {
 	return content.reduce((sum, block) => sum + (typeof block?.text === "string" ? block.text.length : 0), 0);
 }
 
-const isName = (value: unknown): value is string => typeof value === "string" && /^[\w.-]{1,64}$/.test(value);
+const isName = (value: unknown): value is string => typeof value === "string" && /^[\w.:-]{1,64}$/.test(value);
 
 /** A role as the model named it; anything not shaped like a name is not printed, as it may be the user's text. */
 function roleName(agent: unknown): string {
@@ -173,7 +174,7 @@ function usageOf(entries: Entry[]): Usage {
 	const awaited = (at: number) => runs.some(({ from, to }) => at >= from && at < to);
 	for (const entry of entries) {
 		if (entry.type === "custom_message" && entry.customType) {
-			const kind = NOTICE_KINDS[entry.customType] ?? entry.customType;
+			const kind = NOTICE_KINDS[entry.customType] ?? (isName(entry.customType) ? entry.customType : "(other)");
 			// Reports that arrive together are delivered as one message.
 			const runs = entry.customType === SUBAGENT_NOTIFICATION_CUSTOM_TYPE ? entry.details?.runs : undefined;
 			addSizes(usage.notices, kind, {
@@ -200,7 +201,7 @@ function usageOf(entries: Entry[]): Usage {
 		if (message.role === "assistant" && Array.isArray(message.content)) {
 			for (const block of message.content) {
 				if (!isObject(block) || block.type !== "toolCall" || typeof block.name !== "string") continue;
-				add(usage.tools, block.name);
+				add(usage.tools, isName(block.name) ? block.name : "(other)");
 				if (block.name !== "subagent") continue;
 				usage.subagent.calls++;
 				for (const role of subagentRoles(block.arguments as SubagentArguments | undefined))
@@ -210,9 +211,8 @@ function usageOf(entries: Entry[]): Usage {
 		// The tools pi's codemode called for the model are recorded on its result.
 		if (message.role === "toolResult")
 			for (const call of message.nestedCalls?.calls ?? [])
-				if (isObject(call) && typeof call.name === "string") add(usage.tools, call.name);
+				if (isObject(call)) add(usage.tools, isName(call.name) ? call.name : "(other)");
 	}
-	if (usage.cache.awaited.requests > 0) addCache(usage.cache.besideAwaited, usage.cache.other);
 	return usage;
 }
 
@@ -223,7 +223,6 @@ function merge(total: Usage, usage: Usage): void {
 	addAll(total.subagent.roles, usage.subagent.roles);
 	for (const [kind, sizes] of Object.entries(usage.notices)) addSizes(total.notices, kind, sizes);
 	addCache(total.cache.awaited, usage.cache.awaited);
-	addCache(total.cache.besideAwaited, usage.cache.besideAwaited);
 	addCache(total.cache.other, usage.cache.other);
 }
 
@@ -245,6 +244,7 @@ export function usageReport(dir: string): UsageReport {
 	const sessions: SessionUsage[] = [];
 	const unparsed: string[] = [];
 	const total = emptyUsage();
+	const besideAwaited = emptyCache();
 	for (const path of sessionFiles(dir)) {
 		const entries = readEntries(join(dir, path));
 		if (!entries) {
@@ -254,8 +254,9 @@ export function usageReport(dir: string): UsageReport {
 		const usage = usageOf(entries);
 		sessions.push({ name: path, ...usage });
 		merge(total, usage);
+		if (usage.cache.awaited.requests > 0) addCache(besideAwaited, usage.cache.other);
 	}
-	return { sessions, unparsed, total };
+	return { sessions, unparsed, total, besideAwaited };
 }
 
 /** Rows under a header, the first column left-aligned and the others right-aligned, indented by two spaces. */
@@ -275,13 +276,13 @@ function readShare({ input, cacheRead, cacheWrite }: CacheFigures): string {
 	return prompt === 0 ? "-" : `${Math.round((cacheRead / prompt) * 100)}%`;
 }
 
-/** With `total`, the requests made while Runs were awaited are set beside the other requests of the same sessions. */
-function formatUsage(usage: Usage, total = false): string[] {
+/** With `besideAwaited`, the awaited requests are set beside the other requests of the same sessions. */
+function formatUsage(usage: Usage, besideAwaited?: CacheFigures): string[] {
 	const tools = [...new Set([...Object.keys(usage.tools), ...Object.keys(usage.declared)])]
 		.map((name) => [name, usage.tools[name] ?? 0, usage.declared[name] ?? 0] as const)
 		.sort((a, b) => b[1] - a[1] || b[2] - a[2] || a[0].localeCompare(b[0]));
 	const lines = table(
-		["Tool", "Calls", total ? "Declared in" : "Declared"],
+		["Tool", "Calls", "Declared"],
 		tools.map((row) => [...row]),
 	);
 	lines.push(`  subagent calls: ${usage.subagent.calls}`);
@@ -293,7 +294,7 @@ function formatUsage(usage: Usage, total = false): string[] {
 			notices.map(([kind, { count, chars }]) => [kind, count, chars]),
 		),
 	);
-	const { awaited, besideAwaited, other } = usage.cache;
+	const { awaited, other } = usage.cache;
 	const row = (name: string, figures: CacheFigures) => [
 		name,
 		figures.requests,
@@ -307,7 +308,7 @@ function formatUsage(usage: Usage, total = false): string[] {
 			["Requests", "Count", "Input", "Cache read", "Cache write", "Read share"],
 			[
 				row("while Runs awaited", awaited),
-				...(total ? [row("other, same sessions", besideAwaited)] : []),
+				...(besideAwaited ? [row("other, same sessions", besideAwaited)] : []),
 				row("other", other),
 			],
 		),
@@ -326,7 +327,7 @@ export function formatReport(report: UsageReport): string {
 		);
 	}
 	for (const session of report.sessions) lines.push(`Session ${session.name}`, ...formatUsage(session), "");
-	lines.push(`Total of ${report.sessions.length} sessions`, ...formatUsage(report.total, true));
+	lines.push(`Total of ${report.sessions.length} sessions`, ...formatUsage(report.total, report.besideAwaited));
 	return lines.join("\n");
 }
 
