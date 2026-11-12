@@ -364,6 +364,11 @@ describe.skipIf(!hasTmux)("a tasks batch of RPC runs", () => {
 		const [, launched] = await real.waitForRequests("main", 2);
 		const [result] = toolResults(launched);
 		expect(result).toMatch(/^Background batch launched: batch_\w+, 4 subagents:/);
+		// What to do after a call is said in its result.
+		expect(result).toContain("do not redo or touch their work, including the files in their scope");
+		expect(result).toContain("Never predict or invent its results; if the user asks, say it is still running.");
+		expect(result).toContain("Progress does not wake you; findings, questions and blockers reach you as messages.");
+		expect(result).toContain("Their processes end by themselves once they report: there is nothing to close.");
 		const batch = /batch_\w+/.exec(result)?.[0] ?? "";
 		real.script("main", steps(batch));
 
