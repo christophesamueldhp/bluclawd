@@ -394,10 +394,9 @@ describe("a wake-up's lifetime", () => {
 	});
 
 	it("tells the user once, not the model, that a reopened session's wake-ups still fire without schedule_wakeup", async () => {
-		vi.stubEnv(
-			"PI_CODING_AGENT_DIR",
-			join(realpathSync(mkdtempSync(join(tmpdir(), "bluclawd-wakeups-agent-"))), "agent"),
-		);
+		const agentDir = realpathSync(mkdtempSync(join(tmpdir(), "bluclawd-wakeups-agent-")));
+		tempDirs.push(agentDir);
+		vi.stubEnv("PI_CODING_AGENT_DIR", agentDir);
 		const first = await startSession({ notices: [] });
 		first.replies([
 			call("schedule_wakeup", { prompt: "Check the deploy.", delay: 600 }),
