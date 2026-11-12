@@ -336,11 +336,19 @@ describe.skipIf(!hasTmux)("a run in a pane of its own", () => {
 		expect(real.requests("look")).toEqual([]);
 		// Its slot is free: next starts, with the orchestrator's environment from the daemon.
 		await real.waitForRequests("next", 1);
-		const next = runRecord(real.agentDir, "next").dir;
-		await waitFor(() => expect(readFileSync(join(next, "env-probe"), "utf8")).toBe("set"));
-		// Neither on disk nor on a command line.
+		const next = runRecord(real.agentDir, "next");
+		await waitFor(() => expect(readFileSync(join(next.dir, "env-probe"), "utf8")).toBe("set"));
+		// Neither on disk nor on a command line: what its pane was started with holds pi's state directories only.
 		const base = dirname(real.agentDir);
-		expect(spawnSync("grep", ["-rlF", "-D", "skip", secret, base], { encoding: "utf8" }).stdout).toBe("");
+		const found = spawnSync("grep", ["-rlF", "-D", "skip", secret, base], { encoding: "utf8" });
+		expect({ status: found.status, stdout: found.stdout }).toEqual({ status: 1, stdout: "" });
+		const started = spawnSync(
+			"tmux",
+			["-S", real.tmux.socket, "show-environment", "-t", `=${runPaneSession(next.runId, 0)}`],
+			{ encoding: "utf8" },
+		).stdout;
+		expect(started).toContain("PI_SERVER_DIR=");
+		expect(started).not.toContain(secret);
 		const commands = spawnSync("ps", ["-axww", "-o", "command="], { encoding: "utf8" })
 			.stdout.split("\n")
 			.filter((line) => line.includes(basename(base)))
