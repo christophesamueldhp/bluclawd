@@ -31,8 +31,23 @@ const VERB: Record<string, string> = {
 	subagent: "Subagent",
 };
 
+/** pi shortens an over-long or colliding MCP tool name to its first 55, `_` and 8 hex of a hash. */
+const HASHED_MCP_TOOL_NAME = /^mcp__.{50}_[0-9a-f]{8}$/;
+
+/** pi accepts an MCP tool with an empty name, so nothing is required after the server's `__`. */
 function isMcpToolName(tool: string): boolean {
-	return /^mcp__.+__.+$/.test(tool);
+	return /^mcp__.+__/.test(tool) || HASHED_MCP_TOOL_NAME.test(tool);
+}
+
+/**
+ * A server rule (`mcp__<server>__*` once spelled) as pi's hashed names: from a 50-character
+ * server on, the kept 55 characters lose the `__` after it, so the glob alone misses them. This
+ * also covers any server whose spelled name shares those first 50 characters.
+ */
+function hashedMcpToolNames(ruleSubject: string): RegExp[] {
+	const prefix = ruleSubject.slice(0, -1);
+	if (!ruleSubject.endsWith("__*") || prefix.slice(0, 55).includes("*") || prefix.length <= 55) return [];
+	return [new RegExp(`^${prefix.slice(0, 55)}_[0-9a-f]{8}$`)];
 }
 
 /** The rule verb for a tool name, or undefined when no rule can name it. */
@@ -632,6 +647,7 @@ export function deniedBy(
 			}
 			const patterns =
 				cwd && PATH_VERBS.has(verb) ? pathRulePatterns(parts.subject, cwd) : [globToRegExp(parts.subject, !isBash)];
+			if (verb === "Mcp") patterns.push(...hashedMcpToolNames(parts.subject));
 			return [subj, ...respellings(), ...pathCandidates].some((candidate) =>
 				patterns.some((pattern) => pattern.test(candidate)),
 			);

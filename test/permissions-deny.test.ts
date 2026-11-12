@@ -110,6 +110,68 @@ describe("deniedBy", () => {
 		expect(denied(["Mcp(github:get-me)"], "mcp__github__get_mex", {})).toBe(false);
 	});
 
+	describe("a tool name pi shortened with a hash, past a 50-character server", () => {
+		const longServer = (length: number) => "s".repeat(length);
+		// Asserts the name lost the `__` after the server, so only the hashed form can match it.
+		const hashedName = (server: string) => {
+			const name = createMcpToolName(server, "a_tool_long_enough_to_be_hashed");
+			expect(name).toHaveLength(64);
+			expect(name.startsWith(`mcp__${server.replace(/[^A-Za-z0-9_]/g, "_")}__`)).toBe(false);
+			return name;
+		};
+
+		it("is blocked by a bare Mcp rule", () => {
+			for (const length of [50, 55, 60]) {
+				expect(denied(["Mcp"], hashedName(longServer(length)), {}), `${length}`).toBe(true);
+			}
+		});
+
+		it("is blocked by every server-level rule for its server", () => {
+			for (const length of [50, 55, 60]) {
+				const server = longServer(length);
+				const name = hashedName(server);
+				for (const rule of [`mcp__${server}`, `mcp__${server}__*`, `Mcp(${server})`, `Mcp(${server}:*)`]) {
+					expect(denied([rule], name, {}), `${rule} vs ${name}`).toBe(true);
+				}
+			}
+		});
+
+		it("is blocked by a server rule written as in mcp.json, with - or .", () => {
+			for (const server of [`dev-${"r".repeat(46)}`, `my.${"s".repeat(52)}`]) {
+				const name = hashedName(server);
+				for (const rule of [`mcp__${server}`, `mcp__${server}__*`, `Mcp(${server})`, `Mcp(${server}:*)`]) {
+					expect(denied([rule], name, {}), `${rule} vs ${name}`).toBe(true);
+				}
+			}
+		});
+
+		it("is blocked by a rule for a server sharing its first 50 spelled characters, not by other servers", () => {
+			const name = hashedName(longServer(55));
+			expect(denied([`mcp__${longServer(50)}x`], name, {})).toBe(true);
+			expect(denied(["mcp__github", "Mcp(github:*)"], name, {})).toBe(false);
+			expect(denied([`mcp__x${longServer(54)}`], name, {})).toBe(false);
+		});
+
+		it("is not matched by an exact-tool rule or a tool glob", () => {
+			const server = longServer(55);
+			const name = hashedName(server);
+			expect(denied([`Mcp(${server}:a_tool_long_enough_to_be_hashed)`], name, {})).toBe(false);
+			expect(denied([`mcp__${server}__a_tool_*`], name, {})).toBe(false);
+		});
+
+		it("is blocked by a server glob whose `*` comes after the first 50 spelled characters", () => {
+			const name = hashedName(longServer(60));
+			expect(denied([`Mcp(${longServer(55)}*)`], name, {})).toBe(true);
+			expect(denied([`Mcp(${longServer(40)}*)`], name, {})).toBe(false);
+		});
+	});
+
+	it("a rule for an MCP server covers its tool with an empty name", () => {
+		for (const rule of ["mcp__srv", "mcp__srv__*", "Mcp"]) {
+			expect(denied([rule], "mcp__srv__", {}), rule).toBe(true);
+		}
+	});
+
 	it("reads `Mcp(server:tool)` around spaces", () => {
 		for (const rule of ["Mcp(srv: tool)", "Mcp( srv :*)", "Mcp( srv )"]) {
 			expect(denied([rule], "mcp__srv__tool", {}), rule).toBe(true);
