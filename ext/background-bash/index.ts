@@ -19,7 +19,7 @@ import type {
 	InlineExtension,
 	SessionStartEvent,
 } from "@earendil-works/pi-coding-agent";
-import { createLocalBashOperations } from "@earendil-works/pi-coding-agent";
+import { createLocalBashOperations, getAgentDir } from "@earendil-works/pi-coding-agent";
 import {
 	Box,
 	type Component,
@@ -38,6 +38,7 @@ import { cancelledByDelete, forgetCancelled, type HeldWakeups, processStart } fr
 import { agentTasks, isAgentTaskId, subscribeAgentTasks } from "../_shared/agent-tasks.ts";
 import { commandBlock } from "../_shared/command-block.ts";
 import { sharedRef } from "../_shared/global-state.ts";
+import { noticeOnce } from "../_shared/notice-once.ts";
 import { startupSettings } from "../_shared/startup-settings.ts";
 import { STATUS_KEYS } from "../_shared/status-keys.ts";
 import { subagentPanelHasRows } from "../_shared/subagent-panel.ts";
@@ -82,6 +83,7 @@ import {
 	wakeupMessage,
 	wakeupScheduledText,
 	wakeups,
+	wakeupToolOffNotice,
 } from "./wakeups.ts";
 
 const MAX_COMMAND_CHARS = 80;
@@ -542,7 +544,18 @@ const backgroundBash: InlineExtension = {
 			const previous = lastMainSession.get();
 			if (event.reason === "new" && previous && previous !== session) backgroundBashJobs.reown(previous, session);
 			lastMainSession.set(session);
-			if (!runParent()) restoreWakeups(event, startCtx);
+			if (!runParent()) {
+				restoreWakeups(event, startCtx);
+				const stored = wakeups.list(session).length;
+				if (
+					startCtx.hasUI &&
+					stored > 0 &&
+					!pi.getActiveTools().includes("schedule_wakeup") &&
+					noticeOnce(getAgentDir(), "schedule-wakeup-tool-off")
+				) {
+					startCtx.ui.notify(wakeupToolOffNotice(stored), "info");
+				}
+			}
 			// This pi holds them now: the daemon leaves them to it while it runs.
 			if (wakeups.list(session).length > 0) handOff();
 			// Only pi's own TUI ends on its signal handlers; a listener here would keep a print run from ending on one.

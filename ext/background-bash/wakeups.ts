@@ -186,6 +186,12 @@ export function wakeupMessage(wakeup: Wakeup, now: number): OutgoingMessage<Wake
 	};
 }
 
+/** Told once, to the user whose session holds wake-ups scheduled before schedule_wakeup was off by default. */
+export function wakeupToolOffNotice(count: number): string {
+	const found = count === 1 ? "a pending wake-up: it still fires" : `${count} pending wake-ups: they still fire`;
+	return `This session has ${found}, but schedule_wakeup is off by default now, so the agent cannot schedule another. Turn it on with "defaultTools": ["+schedule_wakeup"] in ~/.pi/agent/settings.json, or for one session with pi --tools +schedule_wakeup.`;
+}
+
 /** What schedule_wakeup answers: the task id, and when it falls due. */
 export function wakeupScheduledText(wakeup: Wakeup): string {
 	return `Wake-up ${wakeup.id} scheduled for ${wakeupDate(wakeup.dueAt)}. It starts a turn with its prompt then; cancel it with task_stop.`;
