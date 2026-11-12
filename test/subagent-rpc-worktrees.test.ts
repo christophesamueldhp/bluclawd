@@ -255,7 +255,7 @@ describe.skipIf(!hasTmux)("an RPC run that edits", () => {
 	it("works beside other writers, each from the state its own Admission recorded, however long it waited", async () => {
 		const real = await startOrchestrator();
 		pi = real;
-		addSettings(real, { subagents: { maxActive: 2 } });
+		addSettings(real, { subagents: { panes: false, maxActive: 2 } });
 		const repo = real.cwd;
 		write(repo, { "a.txt": "one\n" });
 		git(repo, "init", "-q");

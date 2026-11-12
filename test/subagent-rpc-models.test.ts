@@ -209,7 +209,7 @@ describe.skipIf(!hasTmux)("an RPC run's model and thinking", () => {
 		const settings = join(real.agentDir, "settings.json");
 		writeFileSync(
 			settings,
-			JSON.stringify({ ...JSON.parse(readFileSync(settings, "utf8")), subagents: { maxActive: 1 } }),
+			JSON.stringify({ ...JSON.parse(readFileSync(settings, "utf8")), subagents: { panes: false, maxActive: 1 } }),
 		);
 		const release = join(real.cwd, "release");
 		const background = (name: string) => ({

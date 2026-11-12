@@ -90,7 +90,7 @@ describe.skipIf(!hasTmux)("the user and an RPC run", () => {
 		const real = await startOrchestrator([...DEFAULT_EXTENSIONS, "background-bash"]);
 		pi = real;
 		const settings = join(real.agentDir, "settings.json");
-		writeFileSync(settings, JSON.stringify({ ...readJson(settings), subagents: { maxActive: 1 } }));
+		writeFileSync(settings, JSON.stringify({ ...readJson(settings), subagents: { panes: false, maxActive: 1 } }));
 		const gate = join(real.cwd, "hold.go");
 		real.script("main", [
 			launch("kept", "Remember PELICAN."),

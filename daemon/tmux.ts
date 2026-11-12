@@ -31,6 +31,8 @@ export const runParent = (): string | undefined => process.env[PARENT_ENV] || un
 export const RUN_TASK_ENV = "BLUCLAWD_RUN_TASK";
 /** Set with {@link PARENT_ENV}: the run's directory, where it stores each Report before sending it. */
 export const RUN_DIR_ENV = "BLUCLAWD_RUN_DIR";
+/** Set on a run's pi in a pane (ADR-0013), to its run directory: there it acts as a run, not as a session of its own. */
+export const RUN_PANE_ENV = "BLUCLAWD_RUN_PANE";
 /** The command ←← dispatches; not meant to be typed. */
 export const AGENT_VIEW_COMMAND = "agent-view";
 
@@ -238,6 +240,31 @@ export class Tmux {
 			}
 		}
 		return name;
+	}
+
+	/**
+	 * Start a run's host as the command of session `name` (ADR-0013); returns its pid, which leads the pane's process
+	 * group. Only where pi keeps its state goes on tmux's command line: the host takes the rest from the daemon.
+	 */
+	startRunHost(name: string, cwd: string, command: string[]): number {
+		try {
+			this.run([
+				"new-session",
+				"-d",
+				"-s",
+				name,
+				"-c",
+				cwd,
+				...Object.entries(piEnv()).flatMap(([key, value]) => ["-e", `${key}=${value}`]),
+				...command.map(literalArg),
+			]);
+		} catch (error) {
+			// A client killed by the timeout may still have had its session made; that pane runs the host.
+			if (!this.hasSession(name)) throw error;
+		}
+		const pid = Number(this.display(name, "#{pane_pid}").trim());
+		if (!(pid > 1)) throw new Error(`couldn't find the host running in ${name}`);
+		return pid;
 	}
 
 	/** Start a `!` command in a session of its own; returns the session's name. */

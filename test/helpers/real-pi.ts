@@ -134,7 +134,7 @@ export interface RealPi {
  * vitest restores it) before anything reads them: the tmux server, and so every pane, inherits
  * them. HOME is a temporary one too, so no pane reads the user's own skills or settings.
  */
-export async function startRealPi(options: { extensions?: string[] } = {}): Promise<RealPi> {
+export async function startRealPi(options: { extensions?: string[]; runsInPanes?: boolean } = {}): Promise<RealPi> {
 	const base = mkdtempSync(join(tmpdir(), "bc-real-"));
 	const serverDir = join(base, "s");
 	const agentDir = join(base, "agent");
@@ -157,6 +157,8 @@ export async function startRealPi(options: { extensions?: string[] } = {}): Prom
 			quietStartup: true,
 			compaction: { enabled: false },
 			retry: { enabled: false },
+			// Runs on pi's RPC unless a test opts in to panes (ADR-0013), the default for the user.
+			...(options.runsInPanes ? {} : { subagents: { panes: false } }),
 		}),
 	);
 	// A stored credential, as a real provider has: without one, pi 1.5.2 may resume a session before it has checked

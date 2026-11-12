@@ -21,7 +21,7 @@ import { pistatusline } from "./remote/pistatusline.ts";
 import { launchUsable, startSession } from "./remote/spawn.ts";
 import { statusLine } from "./remote/statusline.ts";
 import { nativeHelperPath } from "./run-members.ts";
-import { maxActiveRuns, RunQueue } from "./run-queue.ts";
+import { LOADER_ENV, maxActiveRuns, RunQueue } from "./run-queue.ts";
 import { loadActiveRuns, saveActiveRuns } from "./storage.ts";
 import { ServerSupervisor } from "./supervisor.ts";
 import { Tmux } from "./tmux.ts";
@@ -30,8 +30,6 @@ import { type HeldWakeups, processAlive, readPendingWakeups, WakeupKeeper } from
 /** The host a run gets, from the daemon's own install: node strips its types, and the hook resolves pi's packages. */
 const RUN_HOST = fileURLToPath(new URL("../ext/subagents/rpc-host.ts", import.meta.url));
 const RESOLVE_HOOK = fileURLToPath(new URL("./pi-resolve-hook.mjs", import.meta.url));
-/** What would have node, or the loader, run code of a client's choosing in a run's host or its pi. */
-const LOADER_ENV = ["NODE_OPTIONS", "DYLD_INSERT_LIBRARIES", "LD_PRELOAD"];
 
 export async function serve(): Promise<void> {
 	const socketPath = getSocketPath();
@@ -74,7 +72,10 @@ export async function serve(): Promise<void> {
 			store: { load: () => loadActiveRuns(getServerDir()), save: (runs) => saveActiveRuns(getServerDir(), runs) },
 			capacity: () => maxActiveRuns(daemonAgentDir()),
 			// Detached, so a run's host leads a process group of its own and outlives the daemon.
-			spawn: ({ runDir, env }) => {
+			spawn: ({ runDir, env, pane }) => {
+				// In a pane, so the user can watch and type in it: the host takes the run's environment from the queue.
+				if (pane)
+					return tmux.startRunHost(pane, runDir, [process.execPath, "--import", RESOLVE_HOOK, RUN_HOST, runDir]);
 				const root = process.env.PI_PACKAGE_ROOT;
 				const kept = Object.entries(env).filter(([key]) => !LOADER_ENV.includes(key) && key !== "PI_PACKAGE_ROOT");
 				const host = spawn(process.execPath, ["--import", RESOLVE_HOOK, RUN_HOST, runDir], {
