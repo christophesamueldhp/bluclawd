@@ -6,7 +6,8 @@ import checkpoints from "../ext/checkpoints/index.ts";
 
 const ESC = "\x1b";
 
-const settingsFile = () => join(process.env.PI_CODING_AGENT_DIR as string, "settings.json");
+// test/setup/agent-dir.ts sets PI_CODING_AGENT_DIR for every test file.
+const settingsFile = () => join(process.env.PI_CODING_AGENT_DIR!, "settings.json");
 
 /** pi's `doubleEscapeAction` in the user's settings; undefined leaves it unset. */
 function setDoubleEscapeAction(action: string | undefined): void {
