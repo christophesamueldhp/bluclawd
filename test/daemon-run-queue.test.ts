@@ -2,7 +2,10 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { handleIpcRequest, setRunQueue } from "../daemon/handler.ts";
+import type { RunQueueRequest } from "../daemon/ipc/protocol.ts";
 import { maxActiveRuns, RUN_CLAIM_WAIT_MS, type RunHostLaunch, RunQueue } from "../daemon/run-queue.ts";
+import { testRegistry } from "./helpers/registry.ts";
 
 let queues: RunQueue[] = [];
 beforeEach(() => {
@@ -229,9 +232,36 @@ describe("the daemon's queue of runs", () => {
 
 		// A slot is free, though the queue's own look has not freed it yet: it is granted, and its claim then is at once.
 		expect(f.queue.claimNow("k/1", "beta")).toEqual({ granted: true, active: 1, capacity: 1 });
+		// Asked again, as by a second open, it says the run's generation has claimed its slot already.
+		expect(f.queue.claimNow("k/1", "beta")).toEqual({ granted: false, claimed: true, active: 1, capacity: 1 });
 		expect(await f.queue.claim("k/1", "beta")).toBe(true);
 		f.launch("k/1");
 		expect(f.spawned.map(({ runDir }) => runDir)).toEqual(["/runs/a1", "/runs/a2", "/runs/k/1"]);
+	});
+
+	it("answers a request it does not know with an error, never as a launch", async () => {
+		const f = fixture(() => 1);
+		setRunQueue(f.queue);
+		try {
+			const supervisor = testRegistry();
+			const unknown = { type: "run_queue", action: "claim_later", run: "k/1", parent: "beta" };
+			// As a client built after this daemon would send it.
+			expect(await handleIpcRequest(supervisor, unknown as unknown as RunQueueRequest)).toMatchObject({
+				ok: false,
+				error: expect.stringMatching(/unknown run_queue action "claim_later"/),
+			});
+
+			expect(f.queue.claimNow("k/1", "beta")).toMatchObject({ granted: true });
+			const launched = await handleIpcRequest(supervisor, {
+				type: "run_queue",
+				action: "launch",
+				run: "k/1",
+				host: host("k/1"),
+			});
+			expect(launched).toMatchObject({ ok: true, hostPid: 100 });
+		} finally {
+			setRunQueue(undefined);
+		}
 	});
 });
 

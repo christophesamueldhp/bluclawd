@@ -63,4 +63,14 @@ describe("IPC socket errors", () => {
 		expect(clientSockets).toHaveLength(1);
 		expect(() => clientSockets[0].emit("error", new Error("late reset"))).not.toThrow();
 	});
+
+	it("says the daemon is out of date when it takes claim_now for a launch, as one built before it does (#353)", async () => {
+		// Such a daemon launches a run it never granted a slot: it refuses.
+		server = await startIpcServer(
+			async () => ({ type: "error", ok: false, error: "run sub_a/1 was not granted a slot" }) as never,
+		);
+		await expect(new OrchestratorClient(join(dir, "server.sock")).claimRunNow("sub_a/1", "o")).rejects.toThrow(
+			/out of date/,
+		);
+	});
 });

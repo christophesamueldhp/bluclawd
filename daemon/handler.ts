@@ -321,11 +321,16 @@ export async function handleIpcRequest(supervisor: ServerSupervisor, request: Se
 				if (!env) return { type: "error", ok: false, error: `no run's environment waits for pane ${request.pane}` };
 				return { type: "run_queue_result", ok: true, env };
 			}
-			try {
-				return { type: "run_queue_result", ok: true, hostPid: runQueue.launch(request.run, request.host) };
-			} catch (error) {
-				return { type: "error", ok: false, error: error instanceof Error ? error.message : String(error) };
+			if (request.action === "launch") {
+				try {
+					return { type: "run_queue_result", ok: true, hostPid: runQueue.launch(request.run, request.host) };
+				} catch (error) {
+					return { type: "error", ok: false, error: error instanceof Error ? error.message : String(error) };
+				}
 			}
+			// From a client built after this daemon: refused as such, never taken for another request.
+			const { action } = request as { action: unknown };
+			return { type: "error", ok: false, error: `unknown run_queue action ${JSON.stringify(action)}` };
 		}
 
 		case "collaboration":

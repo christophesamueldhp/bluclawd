@@ -369,7 +369,9 @@ describe.skipIf(!hasTmux)("a run in a pane of its own", () => {
 		real.tmux.sendKeys(orchestrator, ["tell look"]);
 		await waitFor(() => expect(screen()).toContain("tell look"));
 		real.tmux.sendKeys(orchestrator, ["Enter"]);
-		const told = await real.waitForRequests("main", 3);
+		// Its fourth request, its message's result, may follow at once.
+		await waitFor(() => expect(real.requests("main").length).toBeGreaterThanOrEqual(3));
+		const told = real.requests("main");
 		expect(conversation(told[2]).map(({ text }) => text)).toContain("tell look");
 		const typed = [
 			`The user instructed subagent "look" (${runId}) directly: Also say HERON.`,

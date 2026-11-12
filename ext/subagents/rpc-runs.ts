@@ -23,7 +23,7 @@ import type { SessionMessage, SessionUsage } from "../../daemon/ipc/protocol.ts"
 import { OrchestratorClient } from "../../daemon/orchestrator-client.ts";
 import { processAlive, processGroupAlive } from "../../daemon/processes.ts";
 import { runMarker } from "../../daemon/run-members.ts";
-import { type RunHostLaunch, runPaneSession, runQueueKey } from "../../daemon/run-queue.ts";
+import { type RunHostLaunch, runPaneSession, runQueueKey, type SlotClaim } from "../../daemon/run-queue.ts";
 import * as forkSettings from "../_shared/settings.ts";
 import {
 	endRunProcesses,
@@ -390,7 +390,7 @@ export interface RunSlots {
 	/** True once run `run` of orchestrator `parent` is granted a slot; false when the daemon's wait passed first. */
 	claim(run: string, parent: string, signal: AbortSignal): Promise<boolean>;
 	/** Grants run `run` a slot at once if one is free, never queuing it; says how many are taken, of how many. */
-	claimNow(run: string, parent: string): Promise<{ granted: boolean; active: number; capacity: number }>;
+	claimNow(run: string, parent: string): Promise<SlotClaim>;
 	/** Has the daemon start a granted run's host; returns its pid. */
 	launch(run: string, host: RunHostLaunch): Promise<number>;
 	/** Gives up a claim, or a slot not launched yet. */

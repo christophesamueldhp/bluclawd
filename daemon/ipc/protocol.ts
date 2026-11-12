@@ -536,7 +536,8 @@ export interface RunQueueResponse extends ResponseBase {
 	type: "run_queue_result";
 	/** A claim's answer. */
 	granted?: boolean;
-	/** claim_now's: how many slots are taken, of how many. */
+	/** claim_now's: whether the run claimed its slot already, and how many slots are taken, of how many. */
+	claimed?: true;
 	active?: number;
 	capacity?: number;
 	/** A launch's host. */

@@ -11,7 +11,7 @@ import { isKeyRelease, matchesKey, type TUI } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import type { SessionMessage } from "../../daemon/ipc/protocol.ts";
 import { OrchestratorClient } from "../../daemon/orchestrator-client.ts";
-import { runPaneSession, runQueueKey } from "../../daemon/run-queue.ts";
+import { runPaneSession, runQueueKey, type SlotClaim } from "../../daemon/run-queue.ts";
 import { endPane, runParent, Tmux } from "../../daemon/tmux.ts";
 import { notifyAgentTasksChanged, publishAgentTasks } from "../_shared/agent-tasks.ts";
 import { commandBlock } from "../_shared/command-block.ts";
@@ -468,7 +468,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			// No terminal would show a Resume that started later, after a wait in the queue: it takes a slot free now,
 			// or starts nothing (#353).
 			const key = runQueueKey(run.runId, run.generation + 1);
-			let slot: { granted: boolean; active: number; capacity: number };
+			let slot: SlotClaim;
 			try {
 				if (!(await slots.ensure())) throw new Error("the daemon that queues runs is not running");
 				slot = await slots.claimNow(key, run.parentSessionId);
@@ -477,6 +477,10 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 					`Could not open ${label}: ${error instanceof Error ? error.message : String(error)}`,
 					"warning",
 				);
+				return;
+			}
+			if (slot.claimed) {
+				ctx.ui.notify(`${label} is opening already: its pane shows once it starts.`, "info");
 				return;
 			}
 			if (!slot.granted) {

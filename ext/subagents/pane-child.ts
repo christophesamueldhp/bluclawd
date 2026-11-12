@@ -2,9 +2,9 @@
  * Inside a run's pi in a pane (ADR-0013), what its host does over pi's RPC (rpc-host.ts): it gives the pi its task and
  * the messages posted to it, passes on what it sends and each prompt the user types in it, for its orchestrator, and
  * stores its Report once its work settles with nothing pending, then ends the pi. The user watches and may type
- * meanwhile; work they stop with Esc, and a Resume they opened to type
- * in, wait for them, and end once they leave the pane. An approval waits for the user too, unless its orchestrator is
- * gone and no one watches the pane: then it is blocked. The host takes what this stores once the pi exits.
+ * meanwhile; work they stop with Esc, and a Resume they opened to type in, wait for them, and end once they leave the
+ * pane. An approval waits for the user too, unless its orchestrator is gone and no one watches the pane: then it is
+ * blocked. The host takes what this stores once the pi exits.
  */
 
 import { realpathSync } from "node:fs";
