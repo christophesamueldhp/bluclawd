@@ -71,7 +71,7 @@ test/           vitest suites, self-contained — no monorepo, no fixture files
 | `web` | `/web`; the `websearch` (Exa or OpenAI) and `webfetch` (Exa) tools |
 | `memory` | `/memory`; the model-only `memory` tool, which keeps Memories of the Project across sessions |
 | `accounts` | `/accounts`, `--models`, `--scoped`; named OAuth/API-key accounts and Active model selection in one chooser |
-| `paste` | bluclawd's paste in the prompt and agent view's composer: a paste over 800 characters or 2 lines shows as `[Pasted text #N +L lines]`, a ctrl+v image as `[Image #N]` (sent as an image), and pasting the same thing again right after shows the text or the image's file |
+| `paste` | a ctrl+v image in the prompt shows as `[Image #N]` where pi would insert its temporary file's path, and is sent to the model as an image; pasting the same image again right after shows its file. Pasted text is left to pi, whose `[paste #N …]` marker is sent in full. Agent view's composer has its own: a paste over 800 characters or 2 lines shows as `[Pasted text #N +L lines]` |
 
 Prompt assistance defaults to **OpenCode Go / Claude Haiku 5.5**, independently of your coding model.
 Use **`/prompt-assist`** to open the built-in Pi TUI picker, showing the current enabled state
