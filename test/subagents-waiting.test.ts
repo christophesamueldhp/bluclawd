@@ -28,7 +28,7 @@ afterEach(() => {
 const prompt = (t: SubagentTui, text: string) => t.session.prompt(text, { expandPromptTemplates: false });
 
 describe("The orchestrator's Waiting", () => {
-	it("tells the model when to use background and what to do after it delegates", async () => {
+	it("tells the model when to use background, and leaves what to do after it delegates to the results", async () => {
 		const { session, faux } = await createParentSessionWithSubagents({
 			cwd: makeTempDir("description-cwd"),
 			agentDir: makeTempDir("description-agent"),
@@ -46,23 +46,25 @@ describe("The orchestrator's Waiting", () => {
 
 			expect(description).toContain("foreground (the default) when your next step needs the result");
 			expect(description).toContain("`background: true` only when you have independent work to do meanwhile");
-			expect(description).toContain("Do not redo or touch delegated work, including the files in a run's scope");
-			expect(description).toContain("Do not poll `subagent_status` by reflex");
-			expect(description).toContain(
-				"With no independent work left, end your turn and say you are waiting: the report will wake you",
-			);
-			expect(description).toContain(
-				"Never predict or invent a pending run's result; if the user asks, say it is still running",
-			);
-			expect(description).toContain("A run's process ends by itself once it reports: there is nothing to close.");
-			expect(description).toContain("only `subagent_resume` continues a finished or stopped run");
+			// What follows a call is said in its result, where it applies, and not sent with every request.
+			for (const mechanic of [
+				"Do not redo or touch delegated work",
+				"by reflex",
+				"end your turn",
+				"Never predict or invent",
+				"Progress from a run does not wake you",
+				"nothing to close",
+				"only `subagent_resume` continues",
+			]) {
+				expect(description).not.toContain(mechanic);
+			}
 			expect(description).not.toContain("subagent_close");
 		} finally {
 			session.dispose();
 		}
 	});
 
-	it("keeps delegation selective and points the model at batches, chains, Integration and Checks", async () => {
+	it("keeps delegation selective and points the model at batches, chains and Integration", async () => {
 		const { session, faux } = await createParentSessionWithSubagents({
 			cwd: makeTempDir("selective-cwd"),
 			agentDir: makeTempDir("selective-agent"),
@@ -87,10 +89,9 @@ describe("The orchestrator's Waiting", () => {
 			// Read-only work needs no worktree; edits come back only through Integration, validated by a check.
 			expect(description).toContain("A run that only reads shares your checkout and needs no worktree");
 			expect(description).toContain("`subagent_integrate`");
-			expect(description).toContain("Checks");
+			// A Report says itself what the runtime saw and what is the run's own claim.
+			expect(description).not.toContain("A Report ends with what the runtime saw");
 			expect(description).toContain("Do not paste the conversation or large file contents");
-			expect(description).toContain("Do not redo or touch delegated work");
-			expect(description).toContain("Progress from a run does not wake you");
 			// What held only for runs in tmux, in the shared checkout, is not said any more.
 			expect(description).not.toContain("last write wins");
 			expect(description).not.toContain("Tightly coupled sequential steps");
@@ -121,6 +122,10 @@ describe("The orchestrator's Waiting", () => {
 			"With no independent work left, end your turn and say you are waiting for explorer-1: its report will wake you",
 		);
 		expect(launchResult).toContain("Never predict or invent its result; if the user asks, say it is still running");
+		expect(launchResult).toContain(
+			"Its progress does not wake you; its findings, questions and blockers reach you as messages.",
+		);
+		expect(launchResult).toContain("its process then ends by itself: there is nothing to close.");
 	});
 
 	it("reminds every turn of the working runs by name, mode and elapsed time, and not once none is working", async () => {

@@ -74,7 +74,7 @@ export function createRunAddressing(deps: RunAddressingDeps) {
 			content: [
 				{
 					type: "text" as const,
-					text: `Resuming ${formatRunLabel(run)} in the background with its earlier context, as its generation ${record.generation} on ${record.provider}/${record.modelId} at thinking ${record.thinkingLevel}. Its report will be delivered when it finishes.`,
+					text: `Resuming ${formatRunLabel(run)} in the background with its earlier context, as its generation ${record.generation} on ${record.provider}/${record.modelId} at thinking ${record.thinkingLevel}. Its report will be delivered when it finishes.\nWhile it runs, do not redo or touch its work, including the files in its scope, and do not poll \`subagent_status\` by reflex. With no independent work left, end your turn and say you are waiting: its report will wake you. Never predict or invent its result; if the user asks, say it is still running.\nIts progress does not wake you; its findings, questions and blockers reach you as messages.`,
 				},
 			],
 			details: undefined,

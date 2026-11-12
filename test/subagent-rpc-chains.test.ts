@@ -396,6 +396,11 @@ describe.skipIf(!hasTmux)("a chain of RPC runs", () => {
 		const [, launched] = await real.waitForRequests("main", 2);
 		const [result] = toolResults(launched);
 		expect(result).toMatch(/^Background chain launched: chain_\w+, 3 steps, from chain\[0\] \("w"\) "w" \(sub_/);
+		// What to do after a call is said in its result.
+		expect(result).toContain("do not redo or touch its work, including the files in its scope");
+		expect(result).toContain("Never predict or invent its results; if the user asks, say it is still running.");
+		expect(result).toContain("Progress does not wake you; findings, questions and blockers reach you as messages.");
+		expect(result).toContain("Its processes end by themselves once it reports: there is nothing to close.");
 		const chain = /chain_\w+/.exec(result)?.[0] ?? "";
 		real.script("main", steps(chain));
 

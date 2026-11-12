@@ -782,7 +782,7 @@ export async function executeRpcRun(
 	const runtime = [
 		"---",
 		`Outcome: ${outcome.status}${outcome.status === "completed" ? ": its pi settled its work without an error. What the run says above is its own claim; the runtime verified none of it." : `: ${cutReason(outcome.error)}.`}`,
-		`Process: exited with ${state.exit.signal ? `signal ${state.exit.signal}` : `code ${state.exit.code}`}, after its Report was stored.`,
+		`Process: exited with ${state.exit.signal ? `signal ${state.exit.signal}` : `code ${state.exit.code}`}, after its Report was stored: there is nothing to close.`,
 		...checksLines(launch.tools, commandsRun(entries ?? [], queuedAt)),
 		...(workspace ? workspaceLines : ["Changes: none: it had no tool that changes files."]),
 		// A step of a chain is integrated with its chain, once the chain has completed.

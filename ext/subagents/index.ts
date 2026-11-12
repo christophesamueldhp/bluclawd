@@ -84,18 +84,6 @@ const MAX_STATUS_RUNS = 30;
 const PANE_OPEN_WAIT_MS = 5000;
 const timedTmux = (): Tmux => new Tmux(undefined, undefined, { timeoutMs: 2000 });
 const SUBAGENT_DESCRIPTION_LEAD = "Delegate a task to a child agent";
-// Wording follows Codex's "After you delegate" block and Claude Code's harness text (docs/research/subagents-ux-and-waiting.md).
-const AFTER_YOU_DELEGATE = [
-	"After you delegate:",
-	"- Do not redo or touch delegated work, including the files in a run's scope; work only on what does not overlap.",
-	"- Do not poll `subagent_status` by reflex; check it only when a run seems stuck.",
-	"- With no independent work left, end your turn and say you are waiting: the report will wake you.",
-	"- Never predict or invent a pending run's result; if the user asks, say it is still running.",
-];
-const RPC_RUNS_END = [
-	"- Progress from a run does not wake you; its findings, questions and blockers reach you as messages.",
-	"- A run's process ends by itself once it reports: there is nothing to close. `subagent_stop` cancels a run's work; only `subagent_resume` continues a finished or stopped run.",
-];
 // Selective by design (spec #290 §13): no required role sequence, no quota, no full-history copying.
 const RPC_DELEGATION = [
 	`${SUBAGENT_DESCRIPTION_LEAD}: a pi of its own with a fresh context window and only the tools its role is granted. Children cannot delegate further.`,
@@ -109,8 +97,6 @@ const RPC_DELEGATION = [
 	"A run that only reads shares your checkout and needs no worktree. A run that edits works in a worktree of its own, made from your checkout as it was at the call: nothing reaches your checkout until you call `subagent_integrate` on it, or on a completed chain, with a `check` command that validates the combined result. Runs that only read may run side by side; runs that edit run one at a time unless their files are disjoint.",
 	"",
 	"Keep each task, and any inline role, short and self-contained: the goal, the files or area, and what to report. A brief states the objective, the output format, the boundaries and what done is. Do not paste the conversation or large file contents; name paths instead.",
-	"",
-	"A Report ends with what the runtime saw: its Outcome, its Checks (the commands it ran and their exit codes, or that none ran) and its Changes. The rest is the run's own claim.",
 ];
 
 export interface SubagentExtensionOptions {
@@ -137,9 +123,6 @@ function buildBaseSubagentDescription(catalog?: AgentDefinitionCatalog, oneShot 
 			? ["Background runs are unavailable in this one-shot mode: omit `background`.", ""]
 			: [
 					"Run in the foreground (the default) when your next step needs the result. Set `background: true` only when you have independent work to do meanwhile.",
-					"",
-					...AFTER_YOU_DELEGATE,
-					...RPC_RUNS_END,
 					"",
 				]),
 		"Available subagent roles, as found from your directory (a run given a `cwd` of its own finds roles from there):",
@@ -1119,8 +1102,10 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 								`Background subagent launched: ${handle.record.name} (${handle.runId})`,
 								`Agent: ${handle.record.agentName} (${handle.record.provider}/${handle.record.modelId})`,
 								`Status: ${handle.record.status}`,
-								"Its report arrives here once it has finished; its process then ends by itself.",
+								"Its report arrives here once it has finished; its process then ends by itself: there is nothing to close.",
+								// Wording follows Codex's "After you delegate" block and Claude Code's harness text (docs/research/subagents-ux-and-waiting.md).
 								`While ${handle.record.name} runs, do not redo or touch its work, including the files in its scope, and do not poll \`subagent_status\` by reflex. With no independent work left, end your turn and say you are waiting for ${handle.record.name}: its report will wake you. Never predict or invent its result; if the user asks, say it is still running.`,
+								"Its progress does not wake you; its findings, questions and blockers reach you as messages.",
 							].join("\n"),
 						},
 					],
