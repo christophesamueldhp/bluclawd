@@ -43,16 +43,22 @@ const reply = (text: string, isError = false) => ({
 
 const TIDY_UP = "Merge related Memories or delete stale ones.";
 /**
- * How to turn the memory tool on, for a session without it. pi restores a resumed session's tools without applying
- * `defaultTools`, so a user whose setting names the tool needs a new session or `--tools`.
+ * Whether the user's `defaultTools` names the memory tool. pi restores a resumed session's tools without applying
+ * that setting, so a session without the tool needs a new session or `--tools` even then.
  */
-const memoryHint = ({ settings }: StartupSettings) =>
-	settings.getDefaultTools()?.includes("memory")
+const namesMemory = ({ settings }: StartupSettings) => settings.getDefaultTools()?.includes("memory") === true;
+const memoryHint = (named: boolean) =>
+	named
 		? 'Your "defaultTools" setting has it, but this session was started without it, so it applies from a new session. For this session, resume it with pi --tools +memory.'
 		: turnOnHint("memory");
-const toolOff = (hint: string) => `The memory tool is off, so this session neither loads nor saves Memories. ${hint}`;
-const memoriesUnread = (hint: string) =>
-	`This Project has Memories, but the memory tool is off by default now, so this session neither loads nor saves them. ${hint}`;
+const toolOff = (named: boolean) =>
+	`The memory tool is off, so this session neither loads nor saves Memories. ${memoryHint(named)}`;
+const memoriesUnread = (named: boolean) =>
+	`${
+		named
+			? "This Project has Memories, but this session was started without the memory tool, so it neither loads nor saves them."
+			: "This Project has Memories, but the memory tool is off by default now, so this session neither loads nor saves them."
+	} ${memoryHint(named)}`;
 /**
  * The sessions the user's `defaultTools` or `--tools` gave the memory tool. A /reload loads this extension anew,
  * and keeps the tool left out when `/memory` was off at the session's start.
@@ -117,7 +123,7 @@ export function createMemoryExtension(options: { agentDir?: string } = {}): Exte
 					ctx,
 					agentDir(),
 					"memory-tool-off",
-					memoriesUnread(memoryHint(startupSettings(event, ctx))),
+					memoriesUnread(namesMemory(startupSettings(event, ctx))),
 				);
 		});
 
@@ -170,7 +176,7 @@ export function createMemoryExtension(options: { agentDir?: string } = {}): Exte
 				const memories = listMemories(project);
 				const labels = memories.map((m) => `${m.name} (${m.type}) — ${m.description}`);
 				const status = `Memory ${enabled ? "on" : "off"}`;
-				const toolNote = toolGiven ? [] : [toolOff(memoryHint(readSettings(ctx)))];
+				const toolNote = toolGiven ? [] : [toolOff(namesMemory(readSettings(ctx)))];
 				if (!ctx.hasUI) {
 					ctx.ui.notify([`${status}: ${project}`, ...toolNote, ...labels].join("\n"), "info");
 					return;

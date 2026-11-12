@@ -25,8 +25,12 @@ function makeTempDir(prefix: string): string {
 	return dir;
 }
 
+/** The user's settings file, which the extension reads: the test file's agent directory, not a session's `agentDir`. */
+const settingsFile = () => join(getAgentDir(), "settings.json");
+
 afterEach(() => {
 	for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+	rmSync(settingsFile(), { force: true });
 });
 
 function gitRepo(): string {
@@ -136,13 +140,6 @@ async function startSession(
 	return { session, prompt, seen, toolResults, command, selects, notices };
 }
 
-/** The user's settings file, which the extension reads: the test file's agent directory, not the `agentDir` above. */
-const settingsFile = () => join(getAgentDir(), "settings.json");
-
-afterEach(() => {
-	rmSync(settingsFile(), { force: true });
-});
-
 /**
  * A session recorded without the memory tool, resumed with a Memory after the user put `"+memory"` in `defaultTools`.
  * pi restores a resumed session's recorded tools, so the setting does not reach it.
@@ -151,7 +148,8 @@ async function resumedAfterDefaultTools(repo: string, agentDir: string) {
 	const sessionDir = makeTempDir("sessions");
 	const first = await startSession(repo, agentDir, false, SessionManager.create(repo, sessionDir));
 	await first.prompt([fauxAssistantMessage("Hi.")]);
-	const file = first.session.sessionFile as string;
+	const file = first.session.sessionFile;
+	if (!file) throw new Error("the first session has no session file");
 	first.session.dispose();
 
 	saveMemory(memoryDir(agentDir, repo), {
@@ -309,7 +307,7 @@ describe("memory", () => {
 	it("in a session resumed without the tool, tells the user that a defaultTools entry they have applies from a new session", async () => {
 		const s = await resumedAfterDefaultTools(gitRepo(), makeTempDir("agent"));
 		expect(s.notices).toEqual([
-			`This Project has Memories, but the memory tool is off by default now, so this session neither loads nor saves them. ${RESUMED_HINT}`,
+			`This Project has Memories, but this session was started without the memory tool, so it neither loads nor saves them. ${RESUMED_HINT}`,
 		]);
 		s.session.dispose();
 	});
