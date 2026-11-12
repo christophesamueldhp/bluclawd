@@ -153,10 +153,14 @@ describe.skipIf(!hasTmux)("a run in a pane of its own", () => {
 		expect(real.requests("look")).toHaveLength(1);
 		expect(real.tmux.capture(pane, 200).join("\n")).toContain("Allow this subagent read");
 
-		// Its orchestrator crashed, and its pane with it: no one is left to answer, so it is blocked, and the run goes on.
-		// Another session, not its orchestrator's, takes nothing over.
+		// Its orchestrator crashed, and its pane with it. Another session, not its orchestrator's, takes nothing over: once
+		// it is up and no terminal shows the run's pane, no one is left to answer, so it is blocked, and the run goes on.
+		real.attach(pane);
+		await waitFor(() => expect(real.shown()).toBe(pane));
 		crash(real, orchestrator);
-		real.start([]);
+		const other = real.start([]);
+		await waitFor(() => expect(real.tmux.capture(other, 80).join("\n")).toContain("← for agents"));
+		real.tmux.moveClients(pane, other);
 		const look = await real.waitForRequests("look", 2);
 		expect(conversation(look[1]).at(-1)?.text).toContain("Blocked: read");
 		await waitFor(() => expect(real.tmux.hasSession(pane)).toBe(false));

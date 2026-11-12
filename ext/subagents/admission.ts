@@ -382,7 +382,10 @@ export interface RunAdmissionDeps {
 	agentDir: () => string;
 	parentThinkingLevel: () => string;
 	scope: ParentScopeChecks;
-	/** The orchestrator's tmux session, which takes over its runs in tmux from before runs ran on pi's RPC. */
+	/**
+	 * The orchestrator's tmux session, which takes over its runs in tmux from before runs ran on pi's RPC, and becomes the
+	 * orchestrator pane of the runs in panes it recovers.
+	 */
 	pane: () => string | undefined;
 	/** The orchestrator's tmux session when its runs run in panes of their own (ADR-0013); none runs them on pi's RPC. */
 	runPane: () => string | undefined;

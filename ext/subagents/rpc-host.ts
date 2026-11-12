@@ -169,7 +169,10 @@ export function readRpcHostState(runDir: string): RpcHostState | undefined {
 	}
 }
 
-/** The spec the run's latest generation was launched with, as stored before it queued. */
+/**
+ * The spec the run's latest generation was launched with, as stored before it queued; a session that took the run
+ * over since rewrote its orchestrator's pane.
+ */
 export function readRpcHostSpec(runDir: string): RpcHostSpec | undefined {
 	try {
 		return JSON.parse(readFileSync(specPath(runDir), "utf8")) as RpcHostSpec;
@@ -184,7 +187,7 @@ export function readRpcHostSpec(runDir: string): RpcHostSpec | undefined {
  */
 export function paneParent(runDir: string, generation: number, pane: NonNullable<RpcHostSpec["pane"]>): string {
 	const spec = readRpcHostSpec(runDir);
-	return spec?.generation === generation && spec.pane?.session === pane.session ? spec.pane.parent : pane.parent;
+	return (spec?.generation === generation && spec.pane?.parent) || pane.parent;
 }
 
 /** The pid of the host that took generation `generation` of the run, once one did. */
