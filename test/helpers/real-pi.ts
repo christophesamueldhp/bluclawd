@@ -22,6 +22,7 @@ import { expect, vi } from "vitest";
 import { type InstanceSummary, OrchestratorClient, piPackageRoot } from "../../daemon/orchestrator-client.ts";
 import { Tmux } from "../../daemon/tmux.ts";
 import { type FauxStep, fauxDir } from "../fixtures/real-pi/faux.ts";
+import { readinessMs } from "./heartbeats.ts";
 import { installedPiHost } from "./pi-host.ts";
 import { waitFor, waitWhileProgressing } from "./wait-for.ts";
 
@@ -71,16 +72,49 @@ function killAll(pids: number[]): void {
 	}
 }
 
+/** Every live process: its group, and whether its command line or environment names `base`. */
+function processes(base: string): Array<{ pid: number; group: number; named: boolean }> {
+	// Not given this process's environment, which names `base`: `ps` would list itself. With every process's
+	// environment the listing runs to MBs, past spawnSync's default buffer: cut there, it would miss leftovers.
+	const listed = spawnSync("ps", ["axeww", "-o", "pid=,pgid=,stat=,command="], {
+		encoding: "utf8",
+		env: { PATH: process.env.PATH },
+		maxBuffer: Number.POSITIVE_INFINITY,
+	});
+	if (listed.status !== 0) throw new Error(`ps failed: ${listed.error ?? listed.stderr}`);
+	return listed.stdout.split("\n").flatMap((line) => {
+		const [pid, group, stat] = line.trim().split(/\s+/, 3);
+		// A zombie has ended already; only its parent has not reaped it yet.
+		if (!stat || stat.startsWith("Z")) return [];
+		return [{ pid: Number(pid), group: Number(group), named: line.includes(basename(base)) }];
+	});
+}
+
 /**
- * What still runs on files under `base` once the tmux servers are gone: the pis' hand-offs, and the RPC runs' hosts
- * and pis, which outlive the pane that launched them.
+ * Kills what still runs of `base` once the tmux servers are gone: every process whose command line or environment
+ * names it (the daemon by its environment only, the pis' hand-offs, the RPC runs' hosts), and every member of their
+ * process groups and of `groups`. A pi names nothing once it has set its title, so a run's pi is found in its host's
+ * group, a pane's pi in its pane's. It lists them again until none is left, so what one started meanwhile is ended
+ * too. Fails, naming the survivors by command line only, after readinessMs.
  */
-function leftovers(base: string): number[] {
-	return spawnSync("ps", ["-ax", "-o", "pid=,command="], { encoding: "utf8" })
-		.stdout.split("\n")
-		.filter((line) => line.includes(basename(base)))
-		.map((line) => Number.parseInt(line, 10))
-		.filter((pid) => pid !== process.pid);
+export async function endLeftovers(base: string, groups: number[] = []): Promise<void> {
+	const ours = new Set(groups);
+	const deadline = Date.now() + readinessMs;
+	for (;;) {
+		const listed = processes(base);
+		// This process's group is the test run's, which no teardown may end.
+		const own = listed.find(({ pid }) => pid === process.pid)?.group;
+		for (const { group, named } of listed) if (named && group > 1 && group !== own) ours.add(group);
+		const left = listed.filter(({ pid, group, named }) => pid !== process.pid && (named || ours.has(group)));
+		if (left.length === 0) return;
+		const pids = left.map(({ pid }) => pid);
+		if (Date.now() > deadline) {
+			const survivors = spawnSync("ps", ["-o", "pid=,command=", "-p", pids.join(",")], { encoding: "utf8" });
+			throw new Error(`still running ${readinessMs}ms into the teardown of ${base}:\n${survivors.stdout}`);
+		}
+		killAll(pids);
+		await new Promise((resolve) => setTimeout(resolve, 20));
+	}
 }
 
 function textOf(content: FauxMessage["content"]): string {
@@ -180,8 +214,29 @@ export async function startRealPi(
 	const tmux = new Tmux(serverDir);
 	const terminal = join(base, "t.sock");
 	const client = new OrchestratorClient();
-	// ensureDaemon waits 3s, too short under parallel load; calling it again would spawn a second daemon.
-	if (!(await client.ensureDaemon())) await waitFor(async () => expect(await client.isRunning()).toBe(true));
+	const stop = async (): Promise<void> => {
+		const pis = spawnSync("tmux", ["-S", tmux.socket, "list-panes", "-a", "-F", "#{pane_pid}"], {
+			encoding: "utf8",
+		})
+			.stdout.split("\n")
+			.filter(Boolean)
+			.map(Number);
+		// A hung-up pi hands its session to the daemon once it has exited (hand-off.ts), starting a daemon if
+		// none runs, which would outlive the test. Killed outright, a pi hands nothing off; the daemon, a hand-off
+		// from a run closed earlier, and an RPC run's host and pi are ended with the leftovers.
+		killAll(pis);
+		spawnSync("tmux", ["-S", tmux.socket, "kill-server"]);
+		spawnSync("tmux", ["-S", terminal, "kill-server"]);
+		await endLeftovers(base, pis);
+		rmSync(base, { recursive: true, force: true, maxRetries: 10 });
+	};
+	try {
+		// ensureDaemon waits 3s, too short under parallel load; calling it again would spawn a second daemon.
+		if (!(await client.ensureDaemon())) await waitFor(async () => expect(await client.isRunning()).toBe(true));
+	} catch (error) {
+		await stop();
+		throw error;
+	}
 
 	const requests = (session: string): FauxRequest[] => {
 		const log = join(fauxDir(agentDir), `${session}.requests.jsonl`);
@@ -237,22 +292,6 @@ export async function startRealPi(
 			spawnSync("tmux", ["-S", tmux.socket, "list-clients", "-F", "#{client_session}"], { encoding: "utf8" })
 				.stdout.split("\n")
 				.find(Boolean),
-		stop: async () => {
-			const pis = spawnSync("tmux", ["-S", tmux.socket, "list-panes", "-a", "-F", "#{pane_pid}"], {
-				encoding: "utf8",
-			})
-				.stdout.split("\n")
-				.filter(Boolean)
-				.map(Number);
-			// A hung-up pi hands its session to the daemon once it has exited (hand-off.ts), starting a daemon if
-			// none runs, which would outlive the test. Killed outright, a pi hands nothing off; a hand-off from a
-			// run closed earlier is killed before the daemon goes, and so is an RPC run's host and pi.
-			killAll(pis);
-			spawnSync("tmux", ["-S", tmux.socket, "kill-server"]);
-			spawnSync("tmux", ["-S", terminal, "kill-server"]);
-			killAll(leftovers(base));
-			await client.shutdownDaemon();
-			rmSync(base, { recursive: true, force: true, maxRetries: 10 });
-		},
+		stop,
 	};
 }
