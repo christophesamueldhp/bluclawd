@@ -4,6 +4,7 @@ import { join } from "node:path";
 import type { JsonObject } from "@earendil-works/pi-ai";
 import { ProjectTrustStore } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { readinessMs } from "./helpers/heartbeats.ts";
 import {
 	conversation,
 	FAUX,
@@ -78,48 +79,53 @@ describe.skipIf(!hasTmux)("an RPC run's directory and role", () => {
 		);
 	});
 
-	it("takes its role from an inline, the nearest project, a user or a bundled definition, looking no higher than its repository", async () => {
-		const real = await startOrchestrator();
-		pi = real;
-		const repo = join(real.cwd, "repo");
-		const pkg = join(repo, "pkg");
-		mkdirSync(pkg, { recursive: true });
-		spawnSync("git", ["init", "-q"], { cwd: repo });
-		role(real.cwd, "explorer", "Workspace explorer.");
-		role(real.cwd, "outsider", "Above the repository.");
-		role(repo, "explorer", "Repository explorer.");
-		role(pkg, "explorer", "Package explorer.");
-		// The user trusts the workspace, as /trust saves it: its directories inherit that decision.
-		new ProjectTrustStore(real.agentDir).set(realpathSync(real.cwd), true);
-		role(real.agentDir, "explorer", "User explorer.", "agents");
-		const inline = { name: "explorer", description: "Inline.", instructions: "Inline explorer." };
-		const launches: Array<JsonObject & { name: string }> = [
-			{ agent: inline, name: "inline", cwd: "repo/pkg" },
-			{ agent: "explorer", name: "project", cwd: "repo/pkg" },
-			{ agent: "explorer", name: "user", cwd: "repo/pkg", agentScope: "user" },
-			{ agent: "reviewer", name: "bundled", cwd: "repo/pkg" },
-			{ agent: "explorer", name: "default" },
-			{ agent: "outsider", name: "outside", cwd: "repo/pkg" },
-		];
-		real.script("main", [
-			...launches.map((args) => ({ tool: "subagent", args: { ...args, task: "Say hi." } })),
-			{ text: "done" },
-		]);
-		for (const { name } of launches) real.script(name, [{ text: "Hi." }]);
-		real.start(["--", "delegate"]);
-		const main = await real.waitForRequests("main", launches.length + 1);
+	// Five runs in a row, each a new pi: a readiness bound for each to start, and one for the rest.
+	it(
+		"takes its role from an inline, the nearest project, a user or a bundled definition, looking no higher than its repository",
+		{ timeout: 6 * readinessMs },
+		async () => {
+			const real = await startOrchestrator();
+			pi = real;
+			const repo = join(real.cwd, "repo");
+			const pkg = join(repo, "pkg");
+			mkdirSync(pkg, { recursive: true });
+			spawnSync("git", ["init", "-q"], { cwd: repo });
+			role(real.cwd, "explorer", "Workspace explorer.");
+			role(real.cwd, "outsider", "Above the repository.");
+			role(repo, "explorer", "Repository explorer.");
+			role(pkg, "explorer", "Package explorer.");
+			// The user trusts the workspace, as /trust saves it: its directories inherit that decision.
+			new ProjectTrustStore(real.agentDir).set(realpathSync(real.cwd), true);
+			role(real.agentDir, "explorer", "User explorer.", "agents");
+			const inline = { name: "explorer", description: "Inline.", instructions: "Inline explorer." };
+			const launches: Array<JsonObject & { name: string }> = [
+				{ agent: inline, name: "inline", cwd: "repo/pkg" },
+				{ agent: "explorer", name: "project", cwd: "repo/pkg" },
+				{ agent: "explorer", name: "user", cwd: "repo/pkg", agentScope: "user" },
+				{ agent: "reviewer", name: "bundled", cwd: "repo/pkg" },
+				{ agent: "explorer", name: "default" },
+				{ agent: "outsider", name: "outside", cwd: "repo/pkg" },
+			];
+			real.script("main", [
+				...launches.map((args) => ({ tool: "subagent", args: { ...args, task: "Say hi." } })),
+				{ text: "done" },
+			]);
+			for (const { name } of launches) real.script(name, [{ text: "Hi." }]);
+			real.start(["--", "delegate"]);
+			const main = await real.waitForRequests("main", launches.length + 1);
 
-		const prompt = (name: string) => systemPrompt(real.requests(name)[0]);
-		expect(prompt("inline")).toContain("Inline explorer.");
-		expect(prompt("project")).toContain("Package explorer.");
-		expect(prompt("user")).toContain("User explorer.");
-		expect(prompt("bundled")).toContain("You are `reviewer`");
-		expect(prompt("default")).toContain("Workspace explorer.");
-		for (const name of ["inline", "project", "user", "bundled"]) expect(prompt(name)).toContain(realpathSync(pkg));
-		expect(prompt("default")).toContain(realpathSync(real.cwd));
-		expect(lastToolResult(main[launches.length])?.text).toMatch(/Unknown subagent "outsider"/);
-		expect(real.requests("outside")).toHaveLength(0);
-	});
+			const prompt = (name: string) => systemPrompt(real.requests(name)[0]);
+			expect(prompt("inline")).toContain("Inline explorer.");
+			expect(prompt("project")).toContain("Package explorer.");
+			expect(prompt("user")).toContain("User explorer.");
+			expect(prompt("bundled")).toContain("You are `reviewer`");
+			expect(prompt("default")).toContain("Workspace explorer.");
+			for (const name of ["inline", "project", "user", "bundled"]) expect(prompt(name)).toContain(realpathSync(pkg));
+			expect(prompt("default")).toContain(realpathSync(real.cwd));
+			expect(lastToolResult(main[launches.length])?.text).toMatch(/Unknown subagent "outsider"/);
+			expect(real.requests("outside")).toHaveLength(0);
+		},
+	);
 
 	it("runs a project's roles only where the user already trusts that project, whatever the call asks", async () => {
 		const real = await startOrchestrator();

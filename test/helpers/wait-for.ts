@@ -19,3 +19,22 @@ export function waitFor<T>(check: () => T): Promise<T> {
 		{ timeout: readinessMs },
 	);
 }
+
+/**
+ * `waitFor` on an assertion, its deadline starting again whenever `progress` grows: a check met only at the end of
+ * a chain of slow steps fails once the chain stalls for readinessMs, not once it has taken that long in all.
+ */
+export async function waitWhileProgressing<T>(check: () => T, progress: () => number): Promise<T> {
+	for (;;) {
+		const seen = progress();
+		const outcome = await waitFor(() => {
+			try {
+				return { met: check() };
+			} catch (error) {
+				if (progress() > seen) return undefined;
+				throw error;
+			}
+		});
+		if (outcome) return outcome.met;
+	}
+}

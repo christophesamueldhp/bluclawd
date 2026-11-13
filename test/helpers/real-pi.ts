@@ -5,7 +5,16 @@
  * packages load. Without tmux there is nothing to run: guard with `describe.skipIf(!hasTmux)`.
  */
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	readdirSync,
+	readFileSync,
+	rmSync,
+	statSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -14,7 +23,7 @@ import { type InstanceSummary, OrchestratorClient, piPackageRoot } from "../../d
 import { Tmux } from "../../daemon/tmux.ts";
 import { type FauxStep, fauxDir } from "../fixtures/real-pi/faux.ts";
 import { installedPiHost } from "./pi-host.ts";
-import { waitFor } from "./wait-for.ts";
+import { waitFor, waitWhileProgressing } from "./wait-for.ts";
 
 export type { FauxStep };
 
@@ -112,8 +121,9 @@ export interface RealPi {
 	script(session: string, steps: FauxStep[]): void;
 	/** The requests the model of `session` got so far. */
 	requests(session: string): FauxRequest[];
-	/** Waits until the model of `session` got `count` requests, and returns them; a timeout's error
-	 *  holds every pane's screen. */
+	/** Waits until the model of `session` got `count` requests, and returns them. It fails once no session's model
+	 *  has got a request for readinessMs, not once runs started one after another have taken that long in all; that
+	 *  error holds every pane's screen. */
 	waitForRequests(session: string, count: number): Promise<FauxRequest[]>;
 	/** Start a pane's pi on faux-1 with `args`; returns its tmux session. */
 	start(args?: string[]): string;
@@ -181,6 +191,11 @@ export async function startRealPi(
 			.filter(Boolean)
 			.map((line) => JSON.parse(line) as FauxRequest);
 	};
+	/** The size of every session's request log: it grows with each request any model gets. */
+	const requestBytes = (): number =>
+		readdirSync(fauxDir(agentDir))
+			.filter((file) => file.endsWith(".requests.jsonl"))
+			.reduce((bytes, file) => bytes + statSync(join(fauxDir(agentDir), file)).size, 0);
 	/** Every pane's screen: a pi that never asked its model says why there. */
 	const screens = (): string => {
 		const listed = spawnSync("tmux", ["-S", tmux.socket, "list-sessions", "-F", "#{session_name}"], {
@@ -202,7 +217,7 @@ export async function startRealPi(
 		requests,
 		waitForRequests: async (session, count) => {
 			try {
-				await waitFor(() => expect(requests(session)).toHaveLength(count));
+				await waitWhileProgressing(() => expect(requests(session)).toHaveLength(count), requestBytes);
 			} catch (error) {
 				throw new Error(`${error instanceof Error ? error.message : String(error)}\n${screens()}`);
 			}
