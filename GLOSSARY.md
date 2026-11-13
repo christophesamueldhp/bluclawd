@@ -46,6 +46,18 @@ _Avoid_: stop, cancellation, deleting the session
 One launch or one resume of a run.
 _Avoid_: generation for the orchestrator's session being reloaded or replaced
 
+**Pane run**:
+A run whose generation runs as an interactive pi in a pane of agent view's private tmux server, which the user can open and type in. The kind belongs to the generation: it is decided again at each launch and Resume, so one run can be a pane run, then an RPC run, and is named after its latest generation.
+_Avoid_: run in a pane, run in tmux (for a legacy run)
+
+**RPC run**:
+A run whose generation runs on pi's RPC with no pane, the fallback when its orchestrator is not in a pane or panes are turned off. Its model sees exactly what a pane run's would.
+_Avoid_: run on pi's RPC, RPC run for every run since ADR-0010
+
+**Legacy run**:
+A run started before ADR-0010, as an interactive pi in tmux. It is followed until it ends and never resumed, so it never becomes another kind.
+_Avoid_: run in tmux from before, pane run
+
 **Attribution**:
 Where a run's usage is counted: in the run's own sessions, like any session's, never in the orchestrator's. The orchestrator shows the total of its runs apart from its own usage. Each token is counted once, however often a run reports, resumes or starts a new session.
 _Avoid_: reconciling, double counting

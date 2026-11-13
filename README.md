@@ -431,10 +431,11 @@ The orchestrator (the parent session) delegates work to subagent runs. Each run 
 ([ADR-0010](docs/adr/0010-rpc-runs-and-workspace-isolation.md)): a host process holds it, it takes its
 task in a fresh session, stores its Report once its work settles, and exits. Its session, Reports and
 any worktree stay for an explicit Resume. A run cannot launch runs of its own. From an orchestrator in
-agent view's tmux, a run is an interactive pi in a pane of its own that you can open, watch and type
-in ([ADR-0013](docs/adr/0013-runs-run-in-panes-again.md)); its model sees exactly what it would on
-pi's RPC. Elsewhere (print or json mode, outside tmux, or with `subagents.panes: false`) it runs on
-pi's RPC with no pane. Either way the daemon queues it.
+agent view's tmux, a run is a pane run: an interactive pi in a pane of its own that you can open,
+watch and type in ([ADR-0013](docs/adr/0013-runs-run-in-panes-again.md)); its model sees exactly what
+it would on pi's RPC. Elsewhere (print or json mode, outside tmux, or with `subagents.panes: false`) it
+is an RPC run, on pi's RPC with no pane. Each launch and Resume decides this again, so one run can be
+both in turn. Either way the daemon queues it.
 
 The model calls `subagent` with one of:
 - `{ "agent": "explorer", "task": "…" }`: one run, with optional `name`, `cwd` (its own directory,
@@ -514,10 +515,10 @@ run that failed stays 30 s (`x` dismisses it); one that finished or was stopped 
 subagents` for 30 s. Runs also show in `/tasks` with the finished runs of the session. ↓ on an empty
 prompt moves into the panel, where `x` stops a run. Enter on a run, there or in `/tasks`, switches the
 terminal to its pane, and ← comes back. A finished run resumes in a new pane for you to type its next
-instruction in; leaving it without typing ends it with nothing done. A run in a pane asks for its
+instruction in; leaving it without typing ends it with nothing done. A pane run asks for its
 approvals there, and its panel row says `needs input` meanwhile; once its orchestrator has crashed and no
 terminal shows its pane, an approval is blocked after 5 s, as on pi's RPC, unless the orchestrator's session is
-reopened in another pane before then: the run follows it there. A run on pi's RPC has no pane: Enter
+reopened in another pane before then: the run follows it there. An RPC run has no pane: Enter
 shows its latest conversation and asks for an instruction (Esc only looks): a working run takes it at
 its next safe point, a finished one resumes with it, and the orchestrator is told without starting its turn.
 
@@ -542,8 +543,8 @@ only: their models then send each other findings, questions and blockers with `c
 shows it. Only you open one: sessions never find each other. It lives in the daemon's memory, so a
 daemon restart ends it.
 
-Runs started by an earlier bluclawd, each an interactive pi in a tmux pane of its own, are runs in tmux
-from before. One still open when its orchestrator's session is reopened is taken over and keeps working
+Runs started by an earlier bluclawd, each an interactive pi in a tmux pane of its own, are legacy
+runs. One still open when its orchestrator's session is reopened is taken over and keeps working
 until it is stopped (`subagent_stop`, `x`) or that session ends; it is never ended silently, and Enter
 switches the terminal to it. Its transcript and Report stay readable (Enter in `/tasks` shows its
 conversation), but it is not resumed: a Resume or a message points at them instead, for a new run.

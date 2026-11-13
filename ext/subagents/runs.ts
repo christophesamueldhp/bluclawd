@@ -42,7 +42,7 @@ export interface SubagentRunRecord {
 	generation: number;
 	/** The tmux session of the run's pi (ADR-0006); absent on runs from before runs were pis of their own. */
 	pane?: string;
-	/** Set on a run whose pi runs on pi's RPC, with no pane (ADR-0010); absent on a run in tmux. */
+	/** Set on every run since ADR-0010, a pane run as well as an RPC run; absent on a legacy run. */
 	backend?: "rpc";
 	/** What the run's pi is doing, as it last said; absent until it says. */
 	activity?: AgentActivity;
