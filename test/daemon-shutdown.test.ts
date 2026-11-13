@@ -66,6 +66,28 @@ describe("OrchestratorClient.shutdownDaemon", () => {
 		expect(await client.isRunning()).toBe(false);
 	});
 
+	it("resolves once the daemon has gone away, though a new one already answers in its place", async () => {
+		const socketPath = join(dir, "server.sock");
+		// Every reply carries the pid of the daemon answering (daemon/ipc/server.ts).
+		const daemon = (pid: number) => {
+			const next = createServer((socket) => {
+				socket.on("data", (chunk) => {
+					const req = JSON.parse(chunk.toString().trim()) as { type: string };
+					const type = req.type === "shutdown" ? "shutdown_result" : "list_result";
+					socket.end(`${JSON.stringify({ type, ok: true, instances: [], pid })}\n`);
+					// An orchestrator whose claim failed starts the next daemon at once (ext/subagents/rpc-runs.ts).
+					if (req.type === "shutdown") setTimeout(() => next.close(() => void daemon(pid + 1)), 50);
+				});
+			});
+			server = next;
+			return new Promise<void>((resolve) => next.listen(socketPath, resolve));
+		};
+		await daemon(1001);
+		const client = new OrchestratorClient(socketPath);
+		expect(await client.shutdownDaemon()).toEqual({ ok: true });
+		expect(await client.getDaemonInfo()).toMatchObject({ running: true, pid: 1002 });
+	});
+
 	it("reports the daemon's refusal instead of waiting", async () => {
 		const socketPath = join(dir, "server.sock");
 		await fakeDaemon(socketPath, () => ({ ok: false, error: "2 running sessions" }));

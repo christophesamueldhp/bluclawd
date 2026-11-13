@@ -67,6 +67,7 @@ interface AnyResponse {
 	instance?: InstanceSummary;
 	version?: string;
 	buildId?: string;
+	pid?: number;
 	messages?: PaneMessage[];
 	watched?: boolean;
 	wantReport?: boolean;
@@ -215,10 +216,10 @@ export class OrchestratorClient {
 	/** Probe the daemon and, if reachable, read back its self-reported version/buildId.
 	 *  `buildId` is undefined for a daemon that predates the version-echo handshake — a distinct
 	 *  case from "not running" for a caller that wants to warn about a stale daemon. */
-	async getDaemonInfo(): Promise<{ running: boolean; version?: string; buildId?: string }> {
+	async getDaemonInfo(): Promise<{ running: boolean; version?: string; buildId?: string; pid?: number }> {
 		try {
 			const res = await this.request({ type: "list" }, 500);
-			return { running: true, version: res.version, buildId: res.buildId };
+			return { running: true, version: res.version, buildId: res.buildId, pid: res.pid };
 		} catch {
 			return { running: false };
 		}
@@ -375,6 +376,7 @@ export class OrchestratorClient {
 	 * reason (an older daemon still running sessions of its own; or one that predates the verb).
 	 */
 	async shutdownDaemon(): Promise<{ ok: true } | { ok: false; reason: string }> {
+		let pid: number | undefined;
 		try {
 			const res = await this.request({ type: "shutdown" }, 3000);
 			// A daemon from before this verb answers an unknown request with no `type` at all —
@@ -386,11 +388,14 @@ export class OrchestratorClient {
 						"this daemon predates the shutdown request — kill the `daemon/cli.ts serve` process once, then reopen",
 				};
 			}
+			pid = res.pid;
 		} catch (error) {
 			return { ok: false, reason: error instanceof Error ? error.message : String(error) };
 		}
 		for (let i = 0; i < 25; i++) {
-			if (!(await this.isRunning())) return { ok: true };
+			const info = await this.getDaemonInfo();
+			// Another pid answering is a daemon started since in its place, e.g. by an orchestrator whose claim failed.
+			if (!info.running || info.pid !== pid) return { ok: true };
 			await new Promise((resolve) => setTimeout(resolve, 200));
 		}
 		return { ok: false, reason: "the old daemon did not exit" };
