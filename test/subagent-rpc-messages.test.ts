@@ -1,6 +1,7 @@
 import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { readinessMs } from "./helpers/heartbeats.ts";
 import {
 	conversation,
 	DEFAULT_EXTENSIONS,
@@ -86,48 +87,54 @@ describe.skipIf(!hasTmux)("the user and an RPC run", () => {
 		expect(real.requests("main")).toHaveLength(3);
 	});
 
-	it("resumes a finished run with the user's instruction from /tasks, once the queue gives it a slot", async () => {
-		const real = await startOrchestrator([...DEFAULT_EXTENSIONS, "background-bash"]);
-		pi = real;
-		const settings = join(real.agentDir, "settings.json");
-		writeFileSync(settings, JSON.stringify({ ...readJson(settings), subagents: { panes: false, maxActive: 1 } }));
-		const gate = join(real.cwd, "hold.go");
-		real.script("main", [
-			launch("kept", "Remember PELICAN."),
-			{ text: "waiting for kept" },
-			launch("hold"),
-			...Array(4).fill({ text: "waiting" }),
-		]);
-		real.script("kept", [{ text: "Remembered." }, { text: "You also said HERON." }]);
-		real.script("hold", [{ text: "Held.", until: gate }]);
-		const orchestrator = real.start(["--", "delegate"]);
-		await real.waitForRequests("hold", 1);
-		const dir = runDir(real.agentDir, "kept");
-		await waitFor(() => expect(readJson(join(dir, "record.json")).status).toBe("closed"));
+	// Three pis one after another (kept, hold, then kept's Resume): a readiness bound for each to start, and one for the
+	// rest.
+	it(
+		"resumes a finished run with the user's instruction from /tasks, once the queue gives it a slot",
+		{ timeout: 4 * readinessMs },
+		async () => {
+			const real = await startOrchestrator([...DEFAULT_EXTENSIONS, "background-bash"]);
+			pi = real;
+			const settings = join(real.agentDir, "settings.json");
+			writeFileSync(settings, JSON.stringify({ ...readJson(settings), subagents: { panes: false, maxActive: 1 } }));
+			const gate = join(real.cwd, "hold.go");
+			real.script("main", [
+				launch("kept", "Remember PELICAN."),
+				{ text: "waiting for kept" },
+				launch("hold"),
+				...Array(4).fill({ text: "waiting" }),
+			]);
+			real.script("kept", [{ text: "Remembered." }, { text: "You also said HERON." }]);
+			real.script("hold", [{ text: "Held.", until: gate }]);
+			const orchestrator = real.start(["--", "delegate"]);
+			await real.waitForRequests("hold", 1);
+			const dir = runDir(real.agentDir, "kept");
+			await waitFor(() => expect(readJson(join(dir, "record.json")).status).toBe("closed"));
 
-		real.tmux.sendKeys(orchestrator, ["/tasks", "Enter"]);
-		const screen = () => real.tmux.capture(orchestrator, 80).join("\n");
-		await waitFor(() => expect(screen()).toMatch(/Done \(1\)\n.*explorer: Remember PELICAN\./));
-		real.tmux.sendKeys(orchestrator, ["Down", "Enter"]);
-		await waitFor(() => expect(screen()).toContain("Instruct kept"));
-		expect(screen()).toContain("assistant: Remembered.");
-		real.tmux.sendKeys(orchestrator, ["Also remember HERON.", "Enter"]);
-		await waitFor(() =>
-			expect(screen()).toContain("kept resumes with your instruction, in the background, once its turn comes."),
-		);
-		// Queued behind the run holding the only slot: no process, no model call.
-		await new Promise((resolve) => setTimeout(resolve, 1000));
-		expect(real.requests("kept")).toHaveLength(1);
+			real.tmux.sendKeys(orchestrator, ["/tasks", "Enter"]);
+			const screen = () => real.tmux.capture(orchestrator, 80).join("\n");
+			await waitFor(() => expect(screen()).toMatch(/Done \(1\)\n.*explorer: Remember PELICAN\./));
+			real.tmux.sendKeys(orchestrator, ["Down", "Enter"]);
+			await waitFor(() => expect(screen()).toContain("Instruct kept"));
+			expect(screen()).toContain("assistant: Remembered.");
+			real.tmux.sendKeys(orchestrator, ["Also remember HERON.", "Enter"]);
+			await waitFor(() =>
+				expect(screen()).toContain("kept resumes with your instruction, in the background, once its turn comes."),
+			);
+			// Queued behind the run holding the only slot: no process, no model call.
+			await new Promise((resolve) => setTimeout(resolve, 1000));
+			expect(real.requests("kept")).toHaveLength(1);
 
-		writeFileSync(gate, "");
-		const [, resumed] = await real.waitForRequests("kept", 2);
-		const { runId, parentSessionId } = readJson(join(dir, "record.json"));
-		expect(conversation(resumed).at(-1)).toEqual({
-			role: "user",
-			text: `[Instruction from the user to run "kept" (${runId}), generation 1, sent directly through Bluclawd, not through your orchestrator (session ${parentSessionId}). It carries the user's authority over your task, within the tools and permissions you already have.]\n\nAlso remember HERON.`,
-		});
-		await waitFor(() => expect(JSON.stringify(real.requests("main").at(-1))).toContain("You also said HERON."));
-	});
+			writeFileSync(gate, "");
+			const [, resumed] = await real.waitForRequests("kept", 2);
+			const { runId, parentSessionId } = readJson(join(dir, "record.json"));
+			expect(conversation(resumed).at(-1)).toEqual({
+				role: "user",
+				text: `[Instruction from the user to run "kept" (${runId}), generation 1, sent directly through Bluclawd, not through your orchestrator (session ${parentSessionId}). It carries the user's authority over your task, within the tools and permissions you already have.]\n\nAlso remember HERON.`,
+			});
+			await waitFor(() => expect(JSON.stringify(real.requests("main").at(-1))).toContain("You also said HERON."));
+		},
+	);
 });
 
 describe.skipIf(!hasTmux)("messages with a working RPC run", () => {

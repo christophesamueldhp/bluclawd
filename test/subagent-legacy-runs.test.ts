@@ -174,26 +174,32 @@ describe.skipIf(!hasTmux)("runs in tmux from before runs ran on pi's RPC", () =>
 		4 * readinessMs,
 	);
 
-	it("switches the terminal to an open one's pane, with Enter on it in /tasks", async () => {
-		const real = await startRealPi({ extensions: [...DEFAULT_EXTENSIONS, "background-bash"] });
-		pi = real;
-		real.script("main", [{ text: "ready" }, { text: "read the report" }]);
-		const orchestrator = real.start(["--", "hello"]);
-		await real.waitForRequests("main", 1);
-		const { sessionId } = await sessionOf(real, orchestrator);
-		real.script("legacy", [{ text: "Legacy looked." }]);
-		const legacy = plantLegacyRun(real, orchestrator, sessionId);
-		await real.waitForRequests("legacy", 1);
-		real.tmux.sendKeys(orchestrator, ["/reload", "Enter"]);
-		// Taken over: its Report wakes the orchestrator.
-		await real.waitForRequests("main", 2);
+	// Two pis one after another (the open run's pi, then the /reload): a readiness bound for each to start, and one for
+	// the rest.
+	it(
+		"switches the terminal to an open one's pane, with Enter on it in /tasks",
+		{ timeout: 3 * readinessMs },
+		async () => {
+			const real = await startRealPi({ extensions: [...DEFAULT_EXTENSIONS, "background-bash"] });
+			pi = real;
+			real.script("main", [{ text: "ready" }, { text: "read the report" }]);
+			const orchestrator = real.start(["--", "hello"]);
+			await real.waitForRequests("main", 1);
+			const { sessionId } = await sessionOf(real, orchestrator);
+			real.script("legacy", [{ text: "Legacy looked." }]);
+			const legacy = plantLegacyRun(real, orchestrator, sessionId);
+			await real.waitForRequests("legacy", 1);
+			real.tmux.sendKeys(orchestrator, ["/reload", "Enter"]);
+			// Taken over: its Report wakes the orchestrator.
+			await real.waitForRequests("main", 2);
 
-		real.attach(orchestrator);
-		await waitFor(() => expect(real.shown()).toBe(orchestrator));
-		real.tmux.sendKeys(orchestrator, ["/tasks", "Enter"]);
-		const screen = () => real.tmux.capture(orchestrator, 80).join("\n");
-		await waitFor(() => expect(screen()).toMatch(/❯ +⏺ explorer: Look around\..*idle/));
-		real.tmux.sendKeys(orchestrator, ["Enter"]);
-		await waitFor(() => expect(real.shown()).toBe(legacy.pane));
-	});
+			real.attach(orchestrator);
+			await waitFor(() => expect(real.shown()).toBe(orchestrator));
+			real.tmux.sendKeys(orchestrator, ["/tasks", "Enter"]);
+			const screen = () => real.tmux.capture(orchestrator, 80).join("\n");
+			await waitFor(() => expect(screen()).toMatch(/❯ +⏺ explorer: Look around\..*idle/));
+			real.tmux.sendKeys(orchestrator, ["Enter"]);
+			await waitFor(() => expect(real.shown()).toBe(legacy.pane));
+		},
+	);
 });

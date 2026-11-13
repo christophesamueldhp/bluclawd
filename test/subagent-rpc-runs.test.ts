@@ -1,6 +1,7 @@
 import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { readinessMs } from "./helpers/heartbeats.ts";
 import {
 	conversation,
 	FAUX,
@@ -195,7 +196,8 @@ describe.skipIf(!hasTmux)("a read-only run on pi's RPC", () => {
 		expect(existsSync(join(real.agentDir, "bluclawd", "subagents"))).toBe(false);
 	});
 
-	it("starts a second run of the same role in a session of its own", async () => {
+	// Two pis one after another (first, then second): a readiness bound for each to start, and one for the rest.
+	it("starts a second run of the same role in a session of its own", { timeout: 3 * readinessMs }, async () => {
 		const real = await startOrchestrator();
 		pi = real;
 		real.script("main", [

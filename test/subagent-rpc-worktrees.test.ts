@@ -253,62 +253,68 @@ describe.skipIf(!hasTmux)("an RPC run that edits", () => {
 		expect(readFileSync(join(workspace, "pkg", "locked.txt"), "utf8")).toBe("locked\n");
 	});
 
-	it("works beside other writers, each from the state its own Admission recorded, however long it waited", async () => {
-		const real = await startOrchestrator();
-		pi = real;
-		addSettings(real, { subagents: { panes: false, maxActive: 2 } });
-		const repo = real.cwd;
-		write(repo, { "a.txt": "one\n" });
-		git(repo, "init", "-q");
-		git(repo, "add", ".");
-		git(repo, "commit", "-q", "-m", "start");
-		write(repo, { "a.txt": "one local\n" });
-		const head = git(repo, "rev-parse", "HEAD");
-		// Outside the repository: a gate is not part of anyone's state.
-		const gate = join(repo, "..", "go");
-		const names = ["w1", "w2", "w3"];
-		real.script("main", [
-			{
-				calls: names.map((name) => ({
-					tool: "subagent",
-					args: { agent: writer, name, background: true, task: "Edit." },
-				})),
-			},
-			...Array(4).fill({ text: "waiting" }),
-		]);
-		for (const name of names) {
-			real.script(name, [
-				{ tool: "edit", args: { path: "a.txt", edits: [{ oldText: "local", newText: `local ${name}` }] } },
-				{ text: "Edited.", until: gate },
+	// Two pis one after another (two writers side by side, then the third once a slot frees): a readiness bound for each
+	// to start, and one for the rest.
+	it(
+		"works beside other writers, each from the state its own Admission recorded, however long it waited",
+		{ timeout: 3 * readinessMs },
+		async () => {
+			const real = await startOrchestrator();
+			pi = real;
+			addSettings(real, { subagents: { panes: false, maxActive: 2 } });
+			const repo = real.cwd;
+			write(repo, { "a.txt": "one\n" });
+			git(repo, "init", "-q");
+			git(repo, "add", ".");
+			git(repo, "commit", "-q", "-m", "start");
+			write(repo, { "a.txt": "one local\n" });
+			const head = git(repo, "rev-parse", "HEAD");
+			// Outside the repository: a gate is not part of anyone's state.
+			const gate = join(repo, "..", "go");
+			const names = ["w1", "w2", "w3"];
+			real.script("main", [
+				{
+					calls: names.map((name) => ({
+						tool: "subagent",
+						args: { agent: writer, name, background: true, task: "Edit." },
+					})),
+				},
+				...Array(4).fill({ text: "waiting" }),
 			]);
-		}
-		real.start(["--", "delegate"]);
-		await real.waitForRequests("main", 2);
-		// Two edit side by side, whichever the queue took first; the third waits for a slot, admitted already.
-		const edited = () => names.filter((name) => real.requests(name).length === 2);
-		await waitFor(() => expect(edited()).toHaveLength(2));
-		expect(names.filter((name) => real.requests(name).length === 0)).toHaveLength(1);
+			for (const name of names) {
+				real.script(name, [
+					{ tool: "edit", args: { path: "a.txt", edits: [{ oldText: "local", newText: `local ${name}` }] } },
+					{ text: "Edited.", until: gate },
+				]);
+			}
+			real.start(["--", "delegate"]);
+			await real.waitForRequests("main", 2);
+			// Two edit side by side, whichever the queue took first; the third waits for a slot, admitted already.
+			const edited = () => names.filter((name) => real.requests(name).length === 2);
+			await waitFor(() => expect(edited()).toHaveLength(2));
+			expect(names.filter((name) => real.requests(name).length === 0)).toHaveLength(1);
 
-		// The orchestrator's checkout moves on meanwhile: a new edit, a new commit.
-		write(repo, { "a.txt": "one later\n", "later.txt": "later\n" });
-		git(repo, "add", ".");
-		git(repo, "commit", "-q", "-m", "later");
-		writeFileSync(gate, "");
-		await waitFor(() => {
-			for (const name of names) expect(runRecord(real.agentDir, name)).toMatchObject({ status: "closed" });
-		});
+			// The orchestrator's checkout moves on meanwhile: a new edit, a new commit.
+			write(repo, { "a.txt": "one later\n", "later.txt": "later\n" });
+			git(repo, "add", ".");
+			git(repo, "commit", "-q", "-m", "later");
+			writeFileSync(gate, "");
+			await waitFor(() => {
+				for (const name of names) expect(runRecord(real.agentDir, name)).toMatchObject({ status: "closed" });
+			});
 
-		const roots = new Set<string>();
-		for (const name of names) {
-			const { cwd } = runRecord(real.agentDir, name)!;
-			roots.add(cwd);
-			expect(git(cwd, "rev-parse", "HEAD")).toBe(head);
-			expect(readFileSync(join(cwd, "a.txt"), "utf8")).toBe(`one local ${name}\n`);
-			expect(existsSync(join(cwd, "later.txt"))).toBe(false);
-		}
-		expect(roots.size).toBe(3);
-		expect(readFileSync(join(repo, "a.txt"), "utf8")).toBe("one later\n");
-	});
+			const roots = new Set<string>();
+			for (const name of names) {
+				const { cwd } = runRecord(real.agentDir, name)!;
+				roots.add(cwd);
+				expect(git(cwd, "rev-parse", "HEAD")).toBe(head);
+				expect(readFileSync(join(cwd, "a.txt"), "utf8")).toBe(`one local ${name}\n`);
+				expect(existsSync(join(cwd, "later.txt"))).toBe(false);
+			}
+			expect(roots.size).toBe(3);
+			expect(readFileSync(join(repo, "a.txt"), "utf8")).toBe("one later\n");
+		},
+	);
 
 	// Three pis one after another (look-plain, gp, then look-repo): a readiness bound for each to start, and one for the
 	// rest.
