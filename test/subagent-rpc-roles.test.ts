@@ -127,47 +127,52 @@ describe.skipIf(!hasTmux)("an RPC run's directory and role", () => {
 		},
 	);
 
-	it("runs a project's roles only where the user already trusts that project, whatever the call asks", async () => {
-		const real = await startOrchestrator();
-		pi = real;
-		// Beside the orchestrator's directory, not in it: its session's trust does not reach there.
-		const other = join(real.cwd, "..", "other");
-		mkdirSync(other);
-		role(other, "sneaky", "Sneaky instructions.");
-		role(other, "explorer", "Untrusted explorer.");
-		writeFileSync(join(other, ".pi", "SYSTEM.md"), "Project prompt from other.");
-		const trustBypass = { agentScope: "project", confirmProjectAgents: false };
-		real.script("main", [
-			{ tool: "subagent", args: { agent: "sneaky", name: "refused", cwd: other, task: "Go.", ...trustBypass } },
-			{ tool: "subagent", args: { agent: "explorer", name: "plain", cwd: other, task: "Go." } },
-			{ text: "first round" },
-		]);
-		real.script("plain", [{ text: "Plain." }]);
-		const pane = real.start(["--", "delegate"]);
-		const main = await real.waitForRequests("main", 3);
+	// Two pis one after another (plain, then trusted): a readiness bound for each to start, and one for the rest.
+	it(
+		"runs a project's roles only where the user already trusts that project, whatever the call asks",
+		{ timeout: 3 * readinessMs },
+		async () => {
+			const real = await startOrchestrator();
+			pi = real;
+			// Beside the orchestrator's directory, not in it: its session's trust does not reach there.
+			const other = join(real.cwd, "..", "other");
+			mkdirSync(other);
+			role(other, "sneaky", "Sneaky instructions.");
+			role(other, "explorer", "Untrusted explorer.");
+			writeFileSync(join(other, ".pi", "SYSTEM.md"), "Project prompt from other.");
+			const trustBypass = { agentScope: "project", confirmProjectAgents: false };
+			real.script("main", [
+				{ tool: "subagent", args: { agent: "sneaky", name: "refused", cwd: other, task: "Go.", ...trustBypass } },
+				{ tool: "subagent", args: { agent: "explorer", name: "plain", cwd: other, task: "Go." } },
+				{ text: "first round" },
+			]);
+			real.script("plain", [{ text: "Plain." }]);
+			const pane = real.start(["--", "delegate"]);
+			const main = await real.waitForRequests("main", 3);
 
-		expect(lastToolResult(main[1])?.text).toMatch(/Unknown subagent "sneaky".*untrusted project/s);
-		expect(real.requests("refused")).toHaveLength(0);
-		const plain = systemPrompt(real.requests("plain")[0]);
-		expect(plain).toContain("You are `explorer`");
-		expect(plain).not.toContain("Untrusted explorer.");
-		// The run's own pi does not trust that project either.
-		expect(plain).not.toContain("Project prompt from other.");
+			expect(lastToolResult(main[1])?.text).toMatch(/Unknown subagent "sneaky".*untrusted project/s);
+			expect(real.requests("refused")).toHaveLength(0);
+			const plain = systemPrompt(real.requests("plain")[0]);
+			expect(plain).toContain("You are `explorer`");
+			expect(plain).not.toContain("Untrusted explorer.");
+			// The run's own pi does not trust that project either.
+			expect(plain).not.toContain("Project prompt from other.");
 
-		// The user trusts it, as /trust saves it: that trust is reused without asking again.
-		new ProjectTrustStore(real.agentDir).set(realpathSync(other), true);
-		real.script("main", [
-			...JSON.parse(readFileSync(join(real.agentDir, "faux", "main.json"), "utf8")),
-			{ tool: "subagent", args: { agent: "sneaky", name: "trusted", cwd: other, task: "Go.", ...trustBypass } },
-			{ text: "second round" },
-		]);
-		real.script("trusted", [{ text: "Trusted." }]);
-		real.tmux.sendKeys(pane, ["again", "Enter"]);
-		await real.waitForRequests("main", 5);
-		const trusted = systemPrompt(real.requests("trusted")[0]);
-		expect(trusted).toContain("Sneaky instructions.");
-		expect(trusted).toContain("Project prompt from other.");
-	});
+			// The user trusts it, as /trust saves it: that trust is reused without asking again.
+			new ProjectTrustStore(real.agentDir).set(realpathSync(other), true);
+			real.script("main", [
+				...JSON.parse(readFileSync(join(real.agentDir, "faux", "main.json"), "utf8")),
+				{ tool: "subagent", args: { agent: "sneaky", name: "trusted", cwd: other, task: "Go.", ...trustBypass } },
+				{ text: "second round" },
+			]);
+			real.script("trusted", [{ text: "Trusted." }]);
+			real.tmux.sendKeys(pane, ["again", "Enter"]);
+			await real.waitForRequests("main", 5);
+			const trusted = systemPrompt(real.requests("trusted")[0]);
+			expect(trusted).toContain("Sneaky instructions.");
+			expect(trusted).toContain("Project prompt from other.");
+		},
+	);
 
 	it("keeps the role it was admitted with: an edit to its file widens neither that run nor any later one", async () => {
 		const real = await startOrchestrator();
@@ -208,39 +213,45 @@ describe.skipIf(!hasTmux)("an RPC run's directory and role", () => {
 		expect(JSON.parse(readFileSync(snapshotFile, "utf8"))).toMatchObject(admitted);
 	});
 
-	it("gives a role only read tools and codemode, whatever its name or prompt claims, and refuses one it cannot isolate", async () => {
-		const real = await startOrchestrator();
-		pi = real;
-		role(real.agentDir, "tester", "Run the tests.", "agents", ["tools: [read, bash]"]);
-		role(real.cwd, "composer", "Compose tools.", undefined, ["tools: [read, codemode]"]);
-		const orchestrator = {
-			name: "orchestrator",
-			description: "Coordinates.",
-			instructions: "You are the orchestrator: delegate with subagent and run commands with bash as you see fit.",
-		};
-		const launches: Array<JsonObject & { name: string }> = [
-			{ agent: orchestrator, name: "boss" },
-			{ agent: "reviewer", name: "review" },
-			{ agent: "tester", name: "tests" },
-			{ agent: "composer", name: "compose" },
-		];
-		real.script("main", [
-			...launches.map((args) => ({ tool: "subagent", args: { ...args, task: "Go." } })),
-			{ text: "done" },
-		]);
-		for (const { name } of launches) real.script(name, [{ text: "Done." }]);
-		real.start(["--", "delegate"]);
-		const main = await real.waitForRequests("main", launches.length + 1);
+	// Three pis one after another (boss, review, then compose): a readiness bound for each to start, and one for the
+	// rest.
+	it(
+		"gives a role only read tools and codemode, whatever its name or prompt claims, and refuses one it cannot isolate",
+		{ timeout: 4 * readinessMs },
+		async () => {
+			const real = await startOrchestrator();
+			pi = real;
+			role(real.agentDir, "tester", "Run the tests.", "agents", ["tools: [read, bash]"]);
+			role(real.cwd, "composer", "Compose tools.", undefined, ["tools: [read, codemode]"]);
+			const orchestrator = {
+				name: "orchestrator",
+				description: "Coordinates.",
+				instructions: "You are the orchestrator: delegate with subagent and run commands with bash as you see fit.",
+			};
+			const launches: Array<JsonObject & { name: string }> = [
+				{ agent: orchestrator, name: "boss" },
+				{ agent: "reviewer", name: "review" },
+				{ agent: "tester", name: "tests" },
+				{ agent: "composer", name: "compose" },
+			];
+			real.script("main", [
+				...launches.map((args) => ({ tool: "subagent", args: { ...args, task: "Go." } })),
+				{ text: "done" },
+			]);
+			for (const { name } of launches) real.script(name, [{ text: "Done." }]);
+			real.start(["--", "delegate"]);
+			const main = await real.waitForRequests("main", launches.length + 1);
 
-		expect(toolNames(real.requests("boss")[0]).sort()).toEqual(["codemode", "read", "subagent_message"]);
-		expect(toolNames(real.requests("review")[0]).sort()).toEqual(["codemode", "read", "subagent_message"]);
-		// A role naming a shell runs commands only in a worktree of its own, which this checkout outside Git cannot give.
-		expect(lastToolResult(main[3])?.text).toMatch(
-			/"tester" .*(isolated Git worktree, and none can be made|gets no shell here)/,
-		);
-		expect(real.requests("tests")).toHaveLength(0);
-		expect(toolNames(real.requests("compose")[0]).sort()).toEqual(["codemode", "read", "subagent_message"]);
-	});
+			expect(toolNames(real.requests("boss")[0]).sort()).toEqual(["codemode", "read", "subagent_message"]);
+			expect(toolNames(real.requests("review")[0]).sort()).toEqual(["codemode", "read", "subagent_message"]);
+			// A role naming a shell runs commands only in a worktree of its own, which this checkout outside Git cannot give.
+			expect(lastToolResult(main[3])?.text).toMatch(
+				/"tester" .*(isolated Git worktree, and none can be made|gets no shell here)/,
+			);
+			expect(real.requests("tests")).toHaveLength(0);
+			expect(toolNames(real.requests("compose")[0]).sort()).toEqual(["codemode", "read", "subagent_message"]);
+		},
+	);
 
 	it("refuses an invalid or ambiguous role without falling back to another definition", async () => {
 		const real = await startOrchestrator();

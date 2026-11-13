@@ -2,6 +2,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { readinessMs } from "./helpers/heartbeats.ts";
 import {
 	conversation,
 	FAUX,
@@ -309,114 +310,125 @@ describe.skipIf(!hasTmux)("an RPC run that edits", () => {
 		expect(readFileSync(join(repo, "a.txt"), "utf8")).toBe("one later\n");
 	});
 
-	it("refuses a writer it cannot isolate, while readers share a checkout, in Git or not, and see no writer's edits", async () => {
-		const real = await startOrchestrator();
-		pi = real;
-		const plain = join(real.cwd, "plain");
-		const empty = join(real.cwd, "empty");
-		const repo = join(real.cwd, "repo");
-		write(real.cwd, { "plain/p.txt": "plain\n", "repo/a.txt": "one\n" });
-		mkdirSync(empty);
-		git(empty, "init", "-q");
-		git(repo, "init", "-q");
-		git(repo, "add", ".");
-		git(repo, "commit", "-q", "-m", "start");
-		const gate = join(real.cwd, "..", "go");
-		const edited = join(real.cwd, "..", "edited");
-		real.script("main", [
-			{ tool: "subagent", args: { agent: writer, name: "nogit", cwd: plain, task: "Edit." } },
-			{ tool: "subagent", args: { agent: writer, name: "unborn", cwd: empty, task: "Edit." } },
-			{ tool: "subagent", args: { agent: "explorer", name: "look-plain", cwd: plain, task: "Read p.txt." } },
-			{
-				tool: "subagent",
-				args: { agent: "general-purpose", name: "gp", cwd: repo, background: true, task: "Edit." },
-			},
-			{
-				tool: "subagent",
-				args: { agent: "explorer", name: "look-repo", cwd: repo, task: "Read a.txt." },
-				until: edited,
-			},
-			{ text: "done", until: gate },
-			{ text: "noted" },
-		]);
-		real.script("look-plain", [{ tool: "read", args: { path: "p.txt" } }, { text: "Read it." }]);
-		real.script("gp", [
-			{ tool: "edit", args: { path: "a.txt", edits: [{ oldText: "one", newText: "edited" }] } },
-			{ text: "Edited.", until: gate },
-		]);
-		real.script("look-repo", [{ tool: "read", args: { path: "a.txt" } }, { text: "Read it." }]);
-		real.start(["--", "delegate"]);
-		// The reader in the repository starts once the writer has made its edit.
-		await waitFor(() => expect(real.requests("gp")).toHaveLength(2));
-		writeFileSync(edited, "");
-		const main = await real.waitForRequests("main", 6);
-		writeFileSync(gate, "");
-		await real.waitForRequests("main", 7);
+	// Three pis one after another (look-plain, gp, then look-repo): a readiness bound for each to start, and one for the
+	// rest.
+	it(
+		"refuses a writer it cannot isolate, while readers share a checkout, in Git or not, and see no writer's edits",
+		{ timeout: 4 * readinessMs },
+		async () => {
+			const real = await startOrchestrator();
+			pi = real;
+			const plain = join(real.cwd, "plain");
+			const empty = join(real.cwd, "empty");
+			const repo = join(real.cwd, "repo");
+			write(real.cwd, { "plain/p.txt": "plain\n", "repo/a.txt": "one\n" });
+			mkdirSync(empty);
+			git(empty, "init", "-q");
+			git(repo, "init", "-q");
+			git(repo, "add", ".");
+			git(repo, "commit", "-q", "-m", "start");
+			const gate = join(real.cwd, "..", "go");
+			const edited = join(real.cwd, "..", "edited");
+			real.script("main", [
+				{ tool: "subagent", args: { agent: writer, name: "nogit", cwd: plain, task: "Edit." } },
+				{ tool: "subagent", args: { agent: writer, name: "unborn", cwd: empty, task: "Edit." } },
+				{ tool: "subagent", args: { agent: "explorer", name: "look-plain", cwd: plain, task: "Read p.txt." } },
+				{
+					tool: "subagent",
+					args: { agent: "general-purpose", name: "gp", cwd: repo, background: true, task: "Edit." },
+				},
+				{
+					tool: "subagent",
+					args: { agent: "explorer", name: "look-repo", cwd: repo, task: "Read a.txt." },
+					until: edited,
+				},
+				{ text: "done", until: gate },
+				{ text: "noted" },
+			]);
+			real.script("look-plain", [{ tool: "read", args: { path: "p.txt" } }, { text: "Read it." }]);
+			real.script("gp", [
+				{ tool: "edit", args: { path: "a.txt", edits: [{ oldText: "one", newText: "edited" }] } },
+				{ text: "Edited.", until: gate },
+			]);
+			real.script("look-repo", [{ tool: "read", args: { path: "a.txt" } }, { text: "Read it." }]);
+			real.start(["--", "delegate"]);
+			// The reader in the repository starts once the writer has made its edit.
+			await waitFor(() => expect(real.requests("gp")).toHaveLength(2));
+			writeFileSync(edited, "");
+			const main = await real.waitForRequests("main", 6);
+			writeFileSync(gate, "");
+			await real.waitForRequests("main", 7);
 
-		for (const [step, dir] of [
-			[1, plain],
-			[2, empty],
-		] as const) {
-			const refusal = lastToolResult(main[step])?.text;
-			expect(refusal).toMatch(
-				/may edit files or run commands, so it works in an isolated Git worktree, and none can be made/,
-			);
-			expect(refusal).toContain(
-				step === 1 ? `${realpathSync(dir)} is not in a Git repository` : "has no commit yet",
-			);
-			expect(refusal).toContain("never works in a shared checkout");
-		}
-		expect(real.requests("nogit")).toHaveLength(0);
-		expect(real.requests("unborn")).toHaveLength(0);
-		// Readers work in the directory they were given, Git or not.
-		expect(lastToolResult(real.requests("look-plain")[1])?.text).toBe("plain\n");
-		expect(runRecord(real.agentDir, "look-plain")?.cwd).toBe(realpathSync(plain));
-		expect(runRecord(real.agentDir, "look-repo")?.cwd).toBe(realpathSync(repo));
-		expect(lastToolResult(real.requests("look-repo")[1])?.text).toBe("one\n");
-		// The bundled implementer edits on pi's RPC, in a worktree of its own, and runs commands where they can be contained.
-		expect(toolNames(real.requests("gp")[0]).sort()).toEqual([
-			...(process.platform === "darwin" ? ["bash"] : []),
-			"codemode",
-			"edit",
-			"read",
-			"subagent_message",
-			"write",
-		]);
-		expect(runRecord(real.agentDir, "gp")?.cwd).not.toBe(realpathSync(repo));
-		expect(readFileSync(join(repo, "a.txt"), "utf8")).toBe("one\n");
-		expect(readdirSync(join(real.agentDir, "bluclawd", "worktrees"))).toHaveLength(1);
-		expect(readdirSync(plain)).toEqual(["p.txt"]);
-	});
+			for (const [step, dir] of [
+				[1, plain],
+				[2, empty],
+			] as const) {
+				const refusal = lastToolResult(main[step])?.text;
+				expect(refusal).toMatch(
+					/may edit files or run commands, so it works in an isolated Git worktree, and none can be made/,
+				);
+				expect(refusal).toContain(
+					step === 1 ? `${realpathSync(dir)} is not in a Git repository` : "has no commit yet",
+				);
+				expect(refusal).toContain("never works in a shared checkout");
+			}
+			expect(real.requests("nogit")).toHaveLength(0);
+			expect(real.requests("unborn")).toHaveLength(0);
+			// Readers work in the directory they were given, Git or not.
+			expect(lastToolResult(real.requests("look-plain")[1])?.text).toBe("plain\n");
+			expect(runRecord(real.agentDir, "look-plain")?.cwd).toBe(realpathSync(plain));
+			expect(runRecord(real.agentDir, "look-repo")?.cwd).toBe(realpathSync(repo));
+			expect(lastToolResult(real.requests("look-repo")[1])?.text).toBe("one\n");
+			// The bundled implementer edits on pi's RPC, in a worktree of its own, and runs commands where they can be contained.
+			expect(toolNames(real.requests("gp")[0]).sort()).toEqual([
+				...(process.platform === "darwin" ? ["bash"] : []),
+				"codemode",
+				"edit",
+				"read",
+				"subagent_message",
+				"write",
+			]);
+			expect(runRecord(real.agentDir, "gp")?.cwd).not.toBe(realpathSync(repo));
+			expect(readFileSync(join(repo, "a.txt"), "utf8")).toBe("one\n");
+			expect(readdirSync(join(real.agentDir, "bluclawd", "worktrees"))).toHaveLength(1);
+			expect(readdirSync(plain)).toEqual(["p.txt"]);
+		},
+	);
 
-	it("resumes in its own worktree, the changes of every generation in its Report", async () => {
-		const real = await startOrchestrator();
-		pi = real;
-		const repo = real.cwd;
-		write(repo, { "a.txt": "one\n" });
-		git(repo, "init", "-q");
-		git(repo, "add", ".");
-		git(repo, "commit", "-q", "-m", "start");
-		real.script("main", [
-			{ tool: "subagent", args: { agent: writer, name: "w", task: "Write one." } },
-			{ tool: "subagent_resume", args: { agent: "w", task: "Write two." } },
-			{ text: "waiting for w" },
-			{ text: "noted" },
-		]);
-		real.script("w", [
-			{ tool: "write", args: { path: "one.txt", content: "1\n" } },
-			{ text: "Wrote one." },
-			{ tool: "write", args: { path: "two.txt", content: "2\n" } },
-			{ text: "Wrote two." },
-		]);
-		real.start(["--", "delegate"]);
-		const main = await real.waitForRequests("main", 4);
+	// Two pis one after another (w, then its Resume): a readiness bound for each to start, and one for the rest.
+	it(
+		"resumes in its own worktree, the changes of every generation in its Report",
+		{ timeout: 3 * readinessMs },
+		async () => {
+			const real = await startOrchestrator();
+			pi = real;
+			const repo = real.cwd;
+			write(repo, { "a.txt": "one\n" });
+			git(repo, "init", "-q");
+			git(repo, "add", ".");
+			git(repo, "commit", "-q", "-m", "start");
+			real.script("main", [
+				{ tool: "subagent", args: { agent: writer, name: "w", task: "Write one." } },
+				{ tool: "subagent_resume", args: { agent: "w", task: "Write two." } },
+				{ text: "waiting for w" },
+				{ text: "noted" },
+			]);
+			real.script("w", [
+				{ tool: "write", args: { path: "one.txt", content: "1\n" } },
+				{ text: "Wrote one." },
+				{ tool: "write", args: { path: "two.txt", content: "2\n" } },
+				{ text: "Wrote two." },
+			]);
+			real.start(["--", "delegate"]);
+			const main = await real.waitForRequests("main", 4);
 
-		const first = lastToolResult(main[1])?.text;
-		expect(first).toMatch(/^Changes since its baseline: A one\.txt$/m);
-		const resumed = conversation(main[3]).at(-1)?.text;
-		expect(resumed).toContain("Wrote two.");
-		expect(resumed).toMatch(/^Changes since its baseline: A one\.txt, A two\.txt$/m);
-		expect(workspaceOf(resumed)).toBe(workspaceOf(first));
-		expect(readdirSync(repo).sort()).toEqual([".git", "a.txt"]);
-	});
+			const first = lastToolResult(main[1])?.text;
+			expect(first).toMatch(/^Changes since its baseline: A one\.txt$/m);
+			const resumed = conversation(main[3]).at(-1)?.text;
+			expect(resumed).toContain("Wrote two.");
+			expect(resumed).toMatch(/^Changes since its baseline: A one\.txt, A two\.txt$/m);
+			expect(workspaceOf(resumed)).toBe(workspaceOf(first));
+			expect(readdirSync(repo).sort()).toEqual([".git", "a.txt"]);
+		},
+	);
 });

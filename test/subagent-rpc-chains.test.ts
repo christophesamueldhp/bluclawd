@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 
 import { join } from "node:path";
 import type { JsonObject } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { readinessMs } from "./helpers/heartbeats.ts";
 import {
 	conversation,
 	FAUX,
@@ -366,76 +367,85 @@ describe.skipIf(!hasTmux)("a chain of RPC runs", () => {
 		expect(real.requests("b")).toEqual([]);
 	});
 
-	it("runs a background chain, refuses a Resume into its worktree while a step works there, and stops whole by its ID", async () => {
-		const real = await startOrchestrator();
-		pi = real;
-		repository(real.cwd, { "pkg/a.txt": "one\n" });
-		const steps = (chain: string): FauxStep[] => [
-			{
-				tool: "subagent",
-				args: {
-					chain: [
-						{ agent: writer, name: "w", task: "Write new.txt." },
-						{ agent: "reviewer", name: "rev", task: "Review new.txt." },
-						{ resume: "w", task: "Fix what the review found." },
-					],
-					background: true,
+	// Two pis one after another (w, then rev): a readiness bound for each to start, and one for the rest.
+	it(
+		"runs a background chain, refuses a Resume into its worktree while a step works there, and stops whole by its ID",
+		{ timeout: 3 * readinessMs },
+		async () => {
+			const real = await startOrchestrator();
+			pi = real;
+			repository(real.cwd, { "pkg/a.txt": "one\n" });
+			const steps = (chain: string): FauxStep[] => [
+				{
+					tool: "subagent",
+					args: {
+						chain: [
+							{ agent: writer, name: "w", task: "Write new.txt." },
+							{ agent: "reviewer", name: "rev", task: "Review new.txt." },
+							{ resume: "w", task: "Fix what the review found." },
+						],
+						background: true,
+					},
 				},
-			},
-			{ text: "waiting" },
-			{ tool: "subagent_resume", args: { agent: "w", task: "Sneak in an edit." } },
-			{ text: "refused" },
-			{ tool: "subagent_stop", args: { agent: chain } },
-			{ text: "stopped the chain" },
-			{ text: "read the chain" },
-		];
-		real.script("main", steps("unknown"));
-		real.script("w", [{ tool: "write", args: { path: "new.txt", content: "v1\n" } }, { text: "Wrote v1." }]);
-		real.script("rev", [{ text: "Never.", until: join(real.cwd, "..", "never") }]);
-		const pane = real.start(["--", "delegate"]);
-		const [, launched] = await real.waitForRequests("main", 2);
-		const [result] = toolResults(launched);
-		expect(result).toMatch(/^Background chain launched: chain_\w+, 3 steps, from chain\[0\] \("w"\) "w" \(sub_/);
-		// What to do after a call is said in its result.
-		expect(result).toContain("do not redo or touch its work, including the files in its scope");
-		expect(result).toContain("Never predict or invent its results; if the user asks, say it is still running.");
-		expect(result).toContain("Progress does not wake you; findings, questions and blockers reach you as messages.");
-		expect(result).toContain("Its processes end by themselves once it reports: there is nothing to close.");
-		expect(result).toContain(
-			[
-				"While it runs, do not redo or touch its work, including the files in its scope, and do not poll `subagent_status` by reflex. With no independent work left, end your turn and say you are waiting for the chain: its report will wake you. Never predict or invent its results; if the user asks, say it is still running.",
-				"Progress does not wake you; findings, questions and blockers reach you as messages. Its processes end by themselves once it reports: there is nothing to close.",
-			].join("\n"),
-		);
-		const chain = /chain_\w+/.exec(result)?.[0] ?? "";
-		real.script("main", steps(chain));
+				{ text: "waiting" },
+				{ tool: "subagent_resume", args: { agent: "w", task: "Sneak in an edit." } },
+				{ text: "refused" },
+				{ tool: "subagent_stop", args: { agent: chain } },
+				{ text: "stopped the chain" },
+				{ text: "read the chain" },
+			];
+			real.script("main", steps("unknown"));
+			real.script("w", [{ tool: "write", args: { path: "new.txt", content: "v1\n" } }, { text: "Wrote v1." }]);
+			real.script("rev", [{ text: "Never.", until: join(real.cwd, "..", "never") }]);
+			const pane = real.start(["--", "delegate"]);
+			const [, launched] = await real.waitForRequests("main", 2);
+			const [result] = toolResults(launched);
+			expect(result).toMatch(/^Background chain launched: chain_\w+, 3 steps, from chain\[0\] \("w"\) "w" \(sub_/);
+			// What to do after a call is said in its result.
+			expect(result).toContain("do not redo or touch its work, including the files in its scope");
+			expect(result).toContain("Never predict or invent its results; if the user asks, say it is still running.");
+			expect(result).toContain(
+				"Progress does not wake you; findings, questions and blockers reach you as messages.",
+			);
+			expect(result).toContain("Its processes end by themselves once it reports: there is nothing to close.");
+			expect(result).toContain(
+				[
+					"While it runs, do not redo or touch its work, including the files in its scope, and do not poll `subagent_status` by reflex. With no independent work left, end your turn and say you are waiting for the chain: its report will wake you. Never predict or invent its results; if the user asks, say it is still running.",
+					"Progress does not wake you; findings, questions and blockers reach you as messages. Its processes end by themselves once it reports: there is nothing to close.",
+				].join("\n"),
+			);
+			const chain = /chain_\w+/.exec(result)?.[0] ?? "";
+			real.script("main", steps(chain));
 
-		await started(real, "w");
-		await real.waitForRequests("rev", 1);
-		real.tmux.sendKeys(pane, ["try", "Enter"]);
-		const tried = await real.waitForRequests("main", 4);
-		expect(toolResults(tried[3]).at(-1)).toMatch(
-			/Cannot resume "w" \(sub_[\w-]+\): its worktree .* is in use by "rev" \(sub_[\w-]+\): no two runs work in one worktree at once/,
-		);
-		expect(real.requests("w")).toHaveLength(2);
+			await started(real, "w");
+			await real.waitForRequests("rev", 1);
+			real.tmux.sendKeys(pane, ["try", "Enter"]);
+			const tried = await real.waitForRequests("main", 4);
+			expect(toolResults(tried[3]).at(-1)).toMatch(
+				/Cannot resume "w" \(sub_[\w-]+\): its worktree .* is in use by "rev" \(sub_[\w-]+\): no two runs work in one worktree at once/,
+			);
+			expect(real.requests("w")).toHaveLength(2);
 
-		real.tmux.sendKeys(pane, ["stop", "Enter"]);
-		const main = await real.waitForRequests("main", 7);
-		expect(toolResults(main[5]).at(-1)).toMatch(/Stopped "rev" \(sub_[\w-]+\): its work was cancelled/);
-		const aggregate =
-			conversation(main[6])
-				.map(({ text }) => text)
-				.find((text) => text.includes(`Reports from the subagents of chain ${chain}`)) ?? "";
-		expect(aggregate).toMatch(new RegExp(`Chain ${chain}: 3 steps, halted at chain\\[1\\] \\("rev"\\), cancelled`));
-		expect(aggregate).toMatch(
-			new RegExp(`- chain\\[1\\] "rev" \\(sub_[\\w-]+\\): cancelled: Its chain ${chain} was stopped`),
-		);
-		expect(aggregate).toMatch(/- chain\[2\] \("w"\): not run/);
-		expect(real.requests("w")).toHaveLength(2);
-		// Proves only that nothing else woke the orchestrator within this while.
-		await new Promise((resolve) => setTimeout(resolve, 500));
-		expect(real.requests("main")).toHaveLength(7);
-	});
+			real.tmux.sendKeys(pane, ["stop", "Enter"]);
+			const main = await real.waitForRequests("main", 7);
+			expect(toolResults(main[5]).at(-1)).toMatch(/Stopped "rev" \(sub_[\w-]+\): its work was cancelled/);
+			const aggregate =
+				conversation(main[6])
+					.map(({ text }) => text)
+					.find((text) => text.includes(`Reports from the subagents of chain ${chain}`)) ?? "";
+			expect(aggregate).toMatch(
+				new RegExp(`Chain ${chain}: 3 steps, halted at chain\\[1\\] \\("rev"\\), cancelled`),
+			);
+			expect(aggregate).toMatch(
+				new RegExp(`- chain\\[1\\] "rev" \\(sub_[\\w-]+\\): cancelled: Its chain ${chain} was stopped`),
+			);
+			expect(aggregate).toMatch(/- chain\[2\] \("w"\): not run/);
+			expect(real.requests("w")).toHaveLength(2);
+			// Proves only that nothing else woke the orchestrator within this while.
+			await new Promise((resolve) => setTimeout(resolve, 500));
+			expect(real.requests("main")).toHaveLength(7);
+		},
+	);
 
 	it("hands the worktree to a fresh writer after the worker, which starts without the worker's context", async () => {
 		const real = await startOrchestrator();

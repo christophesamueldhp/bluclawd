@@ -2,6 +2,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { readinessMs } from "./helpers/heartbeats.ts";
 import {
 	conversation,
 	DEFAULT_EXTENSIONS,
@@ -98,9 +99,11 @@ describe.skipIf(!hasTmux)("an RPC run's Report", () => {
 		expect(JSON.stringify(main)).not.toContain("ran dry");
 	});
 
-	// Commands run only where a backend can confirm their processes ended.
+	// Commands run only where a backend can confirm their processes ended. Two pis one after another (gp, then its
+	// Resume): a readiness bound for each to start, and one for the rest.
 	it.skipIf(process.platform !== "darwin")(
 		"lists the checks its transcript shows it ran, with how each ended, whatever its text claims",
+		{ timeout: 3 * readinessMs },
 		async () => {
 			const real = await startOrchestrator();
 			pi = real;
@@ -216,48 +219,54 @@ describe.skipIf(!hasTmux)("an RPC run's Report", () => {
 		expect(real.requests(queued)).toEqual([]);
 	});
 
-	it("counts its session once, apart from the orchestrator's own usage, however many generations and Reports", async () => {
-		const real = await startOrchestrator([...DEFAULT_EXTENSIONS, "help"]);
-		pi = real;
-		real.script("main", [
-			{ tool: "subagent", args: { agent: "explorer", name: "look", task: "Look around." } },
-			{ tool: "subagent_resume", args: { agent: "look", task: "Look again." } },
-			{ text: "waiting for look" },
-			{ tool: "subagent_resume", args: { agent: "look", task: "Once more." } },
-			{ text: "waiting for look again" },
-			{ text: "done" },
-		]);
-		real.script("look", [{ text: "First look." }, { text: "Second look." }, { text: "Third look." }]);
-		const orchestrator = real.start(["--", "delegate"]);
-		await real.waitForRequests("main", 1);
-		await started(real, "look");
-		await started(real, "look", 1);
-		await started(real, "look", 2);
-		await real.waitForRequests("main", 6);
+	// Three pis one after another (look, then two Resumes of it): a readiness bound for each to start, and one for the
+	// rest.
+	it(
+		"counts its session once, apart from the orchestrator's own usage, however many generations and Reports",
+		{ timeout: 4 * readinessMs },
+		async () => {
+			const real = await startOrchestrator([...DEFAULT_EXTENSIONS, "help"]);
+			pi = real;
+			real.script("main", [
+				{ tool: "subagent", args: { agent: "explorer", name: "look", task: "Look around." } },
+				{ tool: "subagent_resume", args: { agent: "look", task: "Look again." } },
+				{ text: "waiting for look" },
+				{ tool: "subagent_resume", args: { agent: "look", task: "Once more." } },
+				{ text: "waiting for look again" },
+				{ text: "done" },
+			]);
+			real.script("look", [{ text: "First look." }, { text: "Second look." }, { text: "Third look." }]);
+			const orchestrator = real.start(["--", "delegate"]);
+			await real.waitForRequests("main", 1);
+			await started(real, "look");
+			await started(real, "look", 1);
+			await started(real, "look", 2);
+			await real.waitForRequests("main", 6);
 
-		// Three generations in one session: what that session's file holds is the run's usage, each token once.
-		const dir = runDir(real.agentDir, "look") ?? "";
-		const sessions = readdirSync(dir).filter((file) => file.endsWith(".jsonl"));
-		expect(sessions).toHaveLength(1);
-		const tokens = entries(join(dir, sessions[0]))
-			.filter((entry) => entry.type === "message" && entry.message?.role === "assistant")
-			.reduce((sum, entry) => sum + (entry.message?.usage?.totalTokens ?? 0), 0);
-		expect(tokens).toBeGreaterThan(0);
-		// None of it in the orchestrator's own session, whose tool results carry no usage.
-		const own = readdirSync(join(real.agentDir, "sessions"), { recursive: true, encoding: "utf8" })
-			.filter((file) => file.endsWith(".jsonl"))
-			.flatMap((file) => entries(join(real.agentDir, "sessions", file)))
-			.filter((entry) => entry.type === "message" && entry.message?.role === "toolResult");
-		expect(own.length).toBeGreaterThanOrEqual(3);
-		for (const entry of own) expect(entry.message).not.toHaveProperty("usage");
-		// Its faux model has no price: the cost is unknown, not $0.
-		real.tmux.sendKeys(orchestrator, ["/status", "Enter"]);
-		await waitFor(() =>
-			expect(real.tmux.capture(orchestrator, 200).join("\n")).toMatch(
-				new RegExp(`Subagents\\s+1 runs, ${tokens} tokens, cost unknown`),
-			),
-		);
-	});
+			// Three generations in one session: what that session's file holds is the run's usage, each token once.
+			const dir = runDir(real.agentDir, "look") ?? "";
+			const sessions = readdirSync(dir).filter((file) => file.endsWith(".jsonl"));
+			expect(sessions).toHaveLength(1);
+			const tokens = entries(join(dir, sessions[0]))
+				.filter((entry) => entry.type === "message" && entry.message?.role === "assistant")
+				.reduce((sum, entry) => sum + (entry.message?.usage?.totalTokens ?? 0), 0);
+			expect(tokens).toBeGreaterThan(0);
+			// None of it in the orchestrator's own session, whose tool results carry no usage.
+			const own = readdirSync(join(real.agentDir, "sessions"), { recursive: true, encoding: "utf8" })
+				.filter((file) => file.endsWith(".jsonl"))
+				.flatMap((file) => entries(join(real.agentDir, "sessions", file)))
+				.filter((entry) => entry.type === "message" && entry.message?.role === "toolResult");
+			expect(own.length).toBeGreaterThanOrEqual(3);
+			for (const entry of own) expect(entry.message).not.toHaveProperty("usage");
+			// Its faux model has no price: the cost is unknown, not $0.
+			real.tmux.sendKeys(orchestrator, ["/status", "Enter"]);
+			await waitFor(() =>
+				expect(real.tmux.capture(orchestrator, 200).join("\n")).toMatch(
+					new RegExp(`Subagents\\s+1 runs, ${tokens} tokens, cost unknown`),
+				),
+			);
+		},
+	);
 });
 
 /** Each entry of the session file `path`, as far as these tests read it. */

@@ -2,6 +2,7 @@ import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { readinessMs } from "./helpers/heartbeats.ts";
 import {
 	conversation,
 	FAUX,
@@ -162,57 +163,63 @@ describe.skipIf(!hasTmux)("stopping an RPC run", () => {
 		expect(recordOf(real, queued).status).toBe("cancelled");
 	});
 
-	it("keeps a stopped run's session and Report, lets no late message, Report or reload restart it, and resumes it only when asked", async () => {
-		const real = await startOrchestrator();
-		pi = real;
-		real.script("main", [
-			launch("work"),
-			{ text: "waiting" },
-			{ tool: "subagent_stop", args: { agent: "work" } },
-			{ text: "stopped it" },
-			{ tool: "subagent_message", args: { to: "work", content: "Carry on." } },
-			{ text: "it takes no message" },
-			{ tool: "subagent_resume", args: { agent: "work", task: "Now finish." } },
-			{ text: "resumed it" },
-			{ text: "read its report" },
-		]);
-		real.script("work", [{ text: "Never.", until: join(real.cwd, "never") }, { text: "Finished." }]);
-		const pane = real.start(["--", "delegate"]);
-		await real.waitForRequests("work", 1);
-		await real.waitForRequests("main", 2);
+	// Three pis one after another (work, the /reload, then work's Resume): a readiness bound for each to start, and one
+	// for the rest.
+	it(
+		"keeps a stopped run's session and Report, lets no late message, Report or reload restart it, and resumes it only when asked",
+		{ timeout: 4 * readinessMs },
+		async () => {
+			const real = await startOrchestrator();
+			pi = real;
+			real.script("main", [
+				launch("work"),
+				{ text: "waiting" },
+				{ tool: "subagent_stop", args: { agent: "work" } },
+				{ text: "stopped it" },
+				{ tool: "subagent_message", args: { to: "work", content: "Carry on." } },
+				{ text: "it takes no message" },
+				{ tool: "subagent_resume", args: { agent: "work", task: "Now finish." } },
+				{ text: "resumed it" },
+				{ text: "read its report" },
+			]);
+			real.script("work", [{ text: "Never.", until: join(real.cwd, "never") }, { text: "Finished." }]);
+			const pane = real.start(["--", "delegate"]);
+			await real.waitForRequests("work", 1);
+			await real.waitForRequests("main", 2);
 
-		real.tmux.sendKeys(pane, ["stop work", "Enter"]);
-		await real.waitForRequests("main", 4);
-		const dir = runDir(real.agentDir, "work");
-		const stopped = recordOf(real, "work");
-		expect(stopped).toMatchObject({ status: "cancelled", generation: 0 });
-		expect(readFileSync(stopped.transcriptPath, "utf8")).toContain("Look, work.");
-		expect(readJson(join(dir, "reports", "1.json")).outcome).toMatchObject({ status: "stopped" });
+			real.tmux.sendKeys(pane, ["stop work", "Enter"]);
+			await real.waitForRequests("main", 4);
+			const dir = runDir(real.agentDir, "work");
+			const stopped = recordOf(real, "work");
+			expect(stopped).toMatchObject({ status: "cancelled", generation: 0 });
+			expect(readFileSync(stopped.transcriptPath, "utf8")).toContain("Look, work.");
+			expect(readJson(join(dir, "reports", "1.json")).outcome).toMatchObject({ status: "stopped" });
 
-		real.tmux.sendKeys(pane, ["message work", "Enter"]);
-		const main = await real.waitForRequests("main", 6);
-		expect(lastToolResult(main[5])).toMatch(
-			/^Message \d+ unavailable: "work" \(sub_[\w-]+\) was stopped\. Only subagent_resume continues it/,
-		);
-		real.tmux.sendKeys(pane, ["/reload", "Enter"]);
-		await waitFor(() => expect(real.tmux.capture(pane, 50).join("\n")).toMatch(/Reloaded/i));
-		// Proves only that neither its Report nor the reload woke anyone, nor started it, within this while.
-		await new Promise((resolve) => setTimeout(resolve, 1000));
-		expect(real.requests("main")).toHaveLength(6);
-		expect(real.requests("work")).toHaveLength(1);
-		expect(recordOf(real, "work")).toMatchObject({ status: "cancelled", generation: 0 });
+			real.tmux.sendKeys(pane, ["message work", "Enter"]);
+			const main = await real.waitForRequests("main", 6);
+			expect(lastToolResult(main[5])).toMatch(
+				/^Message \d+ unavailable: "work" \(sub_[\w-]+\) was stopped\. Only subagent_resume continues it/,
+			);
+			real.tmux.sendKeys(pane, ["/reload", "Enter"]);
+			await waitFor(() => expect(real.tmux.capture(pane, 50).join("\n")).toMatch(/Reloaded/i));
+			// Proves only that neither its Report nor the reload woke anyone, nor started it, within this while.
+			await new Promise((resolve) => setTimeout(resolve, 1000));
+			expect(real.requests("main")).toHaveLength(6);
+			expect(real.requests("work")).toHaveLength(1);
+			expect(recordOf(real, "work")).toMatchObject({ status: "cancelled", generation: 0 });
 
-		real.tmux.sendKeys(pane, ["resume work", "Enter"]);
-		await real.waitForRequests("main", 9);
-		const [, resumed] = real.requests("work");
-		// Its earlier context, the turn it was stopped in among it.
-		expect(conversation(resumed).map(({ role, text }) => `${role}: ${text.split("\n").at(-1)}`)).toEqual([
-			"user: Look, work.",
-			"assistant: ",
-			"user: Now finish.",
-		]);
-		expect(recordOf(real, "work")).toMatchObject({ status: "closed", generation: 1 });
-	});
+			real.tmux.sendKeys(pane, ["resume work", "Enter"]);
+			await real.waitForRequests("main", 9);
+			const [, resumed] = real.requests("work");
+			// Its earlier context, the turn it was stopped in among it.
+			expect(conversation(resumed).map(({ role, text }) => `${role}: ${text.split("\n").at(-1)}`)).toEqual([
+				"user: Look, work.",
+				"assistant: ",
+				"user: Now finish.",
+			]);
+			expect(recordOf(real, "work")).toMatchObject({ status: "closed", generation: 1 });
+		},
+	);
 
 	it("is cancelled only once nothing of it runs: what its pi left in its process group is ended first", async () => {
 		const real = await startOrchestrator([LINGERER]);

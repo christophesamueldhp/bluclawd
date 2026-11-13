@@ -72,74 +72,81 @@ describe.skipIf(!hasTmux)("resuming an RPC run", () => {
 		pi = undefined;
 	});
 
-	it("continues the run's saved session in a new pi, as its next generation, keeping each generation's Report", async () => {
-		const real = await startOrchestrator();
-		pi = real;
-		real.script("main", [
-			{ tool: "subagent", args: { agent: "explorer", name: "look", task: "Remember the codeword PELICAN." } },
-			{ tool: "subagent_resume", args: { agent: "look", task: "Which codeword did I give you?" } },
-			{ text: "waiting for look" },
-			{ text: "noted" },
-		]);
-		real.script("look", [{ text: "Remembered." }, { text: "You gave me PELICAN." }]);
-		real.start(["--", "delegate"]);
-		const main = await real.waitForRequests("main", 4);
-		const dir = runDir(real.agentDir, "look");
-		const first = readJson(join(dir, "reports", "1.json"));
+	// Two pis one after another (look, then its Resume): a readiness bound for each to start, and one for the rest.
+	it(
+		"continues the run's saved session in a new pi, as its next generation, keeping each generation's Report",
+		{ timeout: 3 * readinessMs },
+		async () => {
+			const real = await startOrchestrator();
+			pi = real;
+			real.script("main", [
+				{ tool: "subagent", args: { agent: "explorer", name: "look", task: "Remember the codeword PELICAN." } },
+				{ tool: "subagent_resume", args: { agent: "look", task: "Which codeword did I give you?" } },
+				{ text: "waiting for look" },
+				{ text: "noted" },
+			]);
+			real.script("look", [{ text: "Remembered." }, { text: "You gave me PELICAN." }]);
+			real.start(["--", "delegate"]);
+			const main = await real.waitForRequests("main", 4);
+			const dir = runDir(real.agentDir, "look");
+			const first = readJson(join(dir, "reports", "1.json"));
 
-		const receipt = lastToolResult(main[2])?.text;
-		expect(receipt).toMatch(/Resuming "look" \(sub_[^)]+\) in the background/);
-		// What to do after a call is said in its result.
-		expect(receipt).toContain(
-			"While it runs, do not redo or touch its work, including the files in its scope, and do not poll `subagent_status` by reflex.",
-		);
-		expect(receipt).toContain(
-			"With no independent work left, end your turn and say you are waiting: its report will wake you.",
-		);
-		expect(receipt).toContain("Never predict or invent its result; if the user asks, say it is still running.");
-		expect(receipt).toContain(
-			"Its progress does not wake you; its findings, questions and blockers reach you as messages.",
-		);
-		expect(receipt).toContain(
-			[
-				"Its report will be delivered when it finishes.",
-				"While it runs, do not redo or touch its work, including the files in its scope, and do not poll `subagent_status` by reflex. With no independent work left, end your turn and say you are waiting: its report will wake you. Never predict or invent its result; if the user asks, say it is still running.",
+			const receipt = lastToolResult(main[2])?.text;
+			expect(receipt).toMatch(/Resuming "look" \(sub_[^)]+\) in the background/);
+			// What to do after a call is said in its result.
+			expect(receipt).toContain(
+				"While it runs, do not redo or touch its work, including the files in its scope, and do not poll `subagent_status` by reflex.",
+			);
+			expect(receipt).toContain(
+				"With no independent work left, end your turn and say you are waiting: its report will wake you.",
+			);
+			expect(receipt).toContain("Never predict or invent its result; if the user asks, say it is still running.");
+			expect(receipt).toContain(
 				"Its progress does not wake you; its findings, questions and blockers reach you as messages.",
-			].join("\n"),
-		);
-		// Its earlier conversation, then the instruction, as from its orchestrator.
-		const look = real.requests("look");
-		expect(look).toHaveLength(2);
-		expect(conversation(look[1]).map(({ role, text }) => `${role}: ${text.split("\n").at(-1)}`)).toEqual([
-			"user: Remember the codeword PELICAN.",
-			"assistant: Remembered.",
-			"user: Which codeword did I give you?",
-		]);
-		expect(conversation(look[1])[2].text).toMatch(/^\[Message from your orchestrator, from another session/);
-		// Its Report wakes the orchestrator.
-		expect(conversation(main[3]).at(-1)?.text).toContain("You gave me PELICAN.");
+			);
+			expect(receipt).toContain(
+				[
+					"Its report will be delivered when it finishes.",
+					"While it runs, do not redo or touch its work, including the files in its scope, and do not poll `subagent_status` by reflex. With no independent work left, end your turn and say you are waiting: its report will wake you. Never predict or invent its result; if the user asks, say it is still running.",
+					"Its progress does not wake you; its findings, questions and blockers reach you as messages.",
+				].join("\n"),
+			);
+			// Its earlier conversation, then the instruction, as from its orchestrator.
+			const look = real.requests("look");
+			expect(look).toHaveLength(2);
+			expect(conversation(look[1]).map(({ role, text }) => `${role}: ${text.split("\n").at(-1)}`)).toEqual([
+				"user: Remember the codeword PELICAN.",
+				"assistant: Remembered.",
+				"user: Which codeword did I give you?",
+			]);
+			expect(conversation(look[1])[2].text).toMatch(/^\[Message from your orchestrator, from another session/);
+			// Its Report wakes the orchestrator.
+			expect(conversation(main[3]).at(-1)?.text).toContain("You gave me PELICAN.");
 
-		// One session across both generations; each generation's Report kept apart.
-		const host = readJson(join(dir, "rpc-host.json"));
-		expect(readJson(join(dir, "reports", "2.json"))).toMatchObject({
-			generation: 1,
-			outcome: { status: "completed" },
-			sessionId: first.sessionId,
-		});
-		expect(first).toMatchObject({ generation: 0, text: "Remembered." });
-		expect(readFileSync(join(dir, "reports", "1.md"), "utf8")).toContain("Remembered.");
-		expect(readFileSync(join(dir, "reports", "2.md"), "utf8")).toContain("You gave me PELICAN.");
-		expect(readdirSync(dir).filter((file) => file.endsWith(".jsonl"))).toEqual([host.sessionFile.split("/").at(-1)]);
-		await waitFor(() =>
-			expect(readJson(join(dir, "record.json"))).toMatchObject({
+			// One session across both generations; each generation's Report kept apart.
+			const host = readJson(join(dir, "rpc-host.json"));
+			expect(readJson(join(dir, "reports", "2.json"))).toMatchObject({
 				generation: 1,
-				status: "closed",
-				transcriptPath: host.sessionFile,
-			}),
-		);
-		await waitFor(() => expect([alive(host.childPid), alive(host.hostPid)]).toEqual([false, false]));
-		expect(JSON.stringify([...real.requests("main"), ...look])).not.toContain("ran dry");
-	});
+				outcome: { status: "completed" },
+				sessionId: first.sessionId,
+			});
+			expect(first).toMatchObject({ generation: 0, text: "Remembered." });
+			expect(readFileSync(join(dir, "reports", "1.md"), "utf8")).toContain("Remembered.");
+			expect(readFileSync(join(dir, "reports", "2.md"), "utf8")).toContain("You gave me PELICAN.");
+			expect(readdirSync(dir).filter((file) => file.endsWith(".jsonl"))).toEqual([
+				host.sessionFile.split("/").at(-1),
+			]);
+			await waitFor(() =>
+				expect(readJson(join(dir, "record.json"))).toMatchObject({
+					generation: 1,
+					status: "closed",
+					transcriptPath: host.sessionFile,
+				}),
+			);
+			await waitFor(() => expect([alive(host.childPid), alive(host.hostPid)]).toEqual([false, false]));
+			expect(JSON.stringify([...real.requests("main"), ...look])).not.toContain("ran dry");
+		},
+	);
 
 	// Two runs in a row, each a new pi: a readiness bound for each to start, and one for the rest.
 	it(
@@ -240,43 +247,48 @@ describe.skipIf(!hasTmux)("resuming an RPC run", () => {
 		},
 	);
 
-	it("holds to the role it was admitted with, narrowed by its orchestrator's rules as they are now", async () => {
-		const real = await startOrchestrator();
-		pi = real;
-		const release = join(real.cwd, "..", "release");
-		writeFileSync(join(real.cwd, "secret.txt"), "SECRET-S\n");
-		addSettings(real, { defaultTools: ["+grep"] });
-		role(real.cwd, "auditor", "Audit v1.", ["tools: [read, grep]", "thinkingLevel: off"]);
-		real.script("main", [
-			{ tool: "subagent", args: { agent: "auditor", name: "audit", task: "Read secret.txt." } },
-			{ tool: "subagent_resume", args: { agent: "audit", task: "Read it again." }, until: release },
-			{ text: "waiting" },
-			{ text: "done" },
-		]);
-		const read = { tool: "read", args: { path: "secret.txt" } };
-		real.script("audit", [read, { text: "Read it." }, read, { text: "Could not." }]);
-		real.start(["--", "delegate"]);
-		await real.waitForRequests("main", 2);
-		// Between its generations: its role's file now asks for more, and its orchestrator now denies the file.
-		role(real.cwd, "auditor", "Audit v2.", ["tools: [read, grep, ls]", "thinkingLevel: off"]);
-		addSettings(real, { permissions: { deny: ["Read(secret.txt)"] } });
-		writeFileSync(release, "");
-		await real.waitForRequests("main", 4);
+	// Two pis one after another (audit, then its Resume): a readiness bound for each to start, and one for the rest.
+	it(
+		"holds to the role it was admitted with, narrowed by its orchestrator's rules as they are now",
+		{ timeout: 3 * readinessMs },
+		async () => {
+			const real = await startOrchestrator();
+			pi = real;
+			const release = join(real.cwd, "..", "release");
+			writeFileSync(join(real.cwd, "secret.txt"), "SECRET-S\n");
+			addSettings(real, { defaultTools: ["+grep"] });
+			role(real.cwd, "auditor", "Audit v1.", ["tools: [read, grep]", "thinkingLevel: off"]);
+			real.script("main", [
+				{ tool: "subagent", args: { agent: "auditor", name: "audit", task: "Read secret.txt." } },
+				{ tool: "subagent_resume", args: { agent: "audit", task: "Read it again." }, until: release },
+				{ text: "waiting" },
+				{ text: "done" },
+			]);
+			const read = { tool: "read", args: { path: "secret.txt" } };
+			real.script("audit", [read, { text: "Read it." }, read, { text: "Could not." }]);
+			real.start(["--", "delegate"]);
+			await real.waitForRequests("main", 2);
+			// Between its generations: its role's file now asks for more, and its orchestrator now denies the file.
+			role(real.cwd, "auditor", "Audit v2.", ["tools: [read, grep, ls]", "thinkingLevel: off"]);
+			addSettings(real, { permissions: { deny: ["Read(secret.txt)"] } });
+			writeFileSync(release, "");
+			await real.waitForRequests("main", 4);
 
-		const audit = real.requests("audit");
-		expect(audit).toHaveLength(4);
-		expect(lastToolResult(audit[1])?.text).toBe("SECRET-S\n");
-		expect(systemPrompt(audit[2])).toContain("Audit v1.");
-		expect(systemPrompt(audit[2])).not.toContain("Audit v2.");
-		expect(toolNames(audit[2])).toEqual(["grep", "read", "subagent_message"]);
-		expect(lastToolResult(audit[3])?.text).toMatch(/Blocked by permission rule/);
-		const dir = runDir(real.agentDir, "audit");
-		expect(readJson(join(dir, "definition.json"))).toMatchObject({
-			instructions: "Audit v1.",
-			tools: ["read", "grep"],
-		});
-		expect(JSON.stringify(readJson(join(dir, "generations", "1.json")).deny)).toContain("Read(secret.txt)");
-	});
+			const audit = real.requests("audit");
+			expect(audit).toHaveLength(4);
+			expect(lastToolResult(audit[1])?.text).toBe("SECRET-S\n");
+			expect(systemPrompt(audit[2])).toContain("Audit v1.");
+			expect(systemPrompt(audit[2])).not.toContain("Audit v2.");
+			expect(toolNames(audit[2])).toEqual(["grep", "read", "subagent_message"]);
+			expect(lastToolResult(audit[3])?.text).toMatch(/Blocked by permission rule/);
+			const dir = runDir(real.agentDir, "audit");
+			expect(readJson(join(dir, "definition.json"))).toMatchObject({
+				instructions: "Audit v1.",
+				tools: ["read", "grep"],
+			});
+			expect(JSON.stringify(readJson(join(dir, "generations", "1.json")).deny)).toContain("Read(secret.txt)");
+		},
+	);
 
 	it("refuses when its workspace is gone, rather than continuing anywhere else", async () => {
 		const real = await startOrchestrator();
@@ -307,7 +319,9 @@ describe.skipIf(!hasTmux)("resuming an RPC run", () => {
 		expect(readJson(join(dir, "record.json"))).toMatchObject({ generation: 0, status: "closed" });
 	});
 
-	it("starts one pi on its session when two Resumes come at once", async () => {
+	// Two pis one after another (look, then one pi for both Resumes): a readiness bound for each to start, and one for
+	// the rest.
+	it("starts one pi on its session when two Resumes come at once", { timeout: 3 * readinessMs }, async () => {
 		const real = await startOrchestrator();
 		pi = real;
 		const resume = (task: string) => ({ tool: "subagent_resume", args: { agent: "look", task } });
