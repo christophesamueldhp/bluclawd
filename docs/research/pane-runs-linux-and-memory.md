@@ -4,7 +4,7 @@ The faux-model checks of pane runs (ADR-0013) that #345 left open: tmux's switch
 
 ## Results
 
-- **Linux, as shipped: 5 of the 10 tests in `subagent-pane-runs` fail or hang, from one cause.** tmux 3.4 (Ubuntu 24.04) refuses line 7 of the private server's config, `set -g extended-keys-format csi-u`, an option tmux 3.4 does not have (tmux 3.6b, on macOS, has it). tmux shows that error to the first client that attaches, in view mode over the pane. Until the user leaves view mode with `q`, every key goes to view mode, not pi. A `send-keys` of `/` opens view mode's search prompt and never returns, which hangs a test for good. Every other line of the config still applies. Not yet filed: see [Open](#open).
+- **Linux, as shipped: 5 of the 10 tests in `subagent-pane-runs` fail or hang, from one cause.** tmux 3.4 (Ubuntu 24.04) refuses line 7 of the private server's config, `set -g extended-keys-format csi-u`, an option tmux 3.4 does not have (tmux 3.6b, on macOS, has it). tmux shows that error to the first client that attaches, in view mode over the pane. Until the user leaves view mode with `q`, every key goes to view mode, not pi. A `send-keys` of `/` opens view mode's search prompt and never returns, which hangs a test for good. Every other line of the config still applies. Filed as #397: see [Open](#open).
 - **Linux, with that error out of the way, behaves as on macOS.** With the error dismissed as a user would, or with the line deleted in the container's copy, opening an `explorer` and a `reviewer` run from the panel switches the client to the run's pane, ← switches it back, and both Reports arrive. All 26 pane-run tests pass with the line deleted.
 - **Pane size is the same on both:** 80x24 while no client shows the pane, then the size of the client that opens it (120x40 here), which it keeps after ←.
 - **Memory (macOS, faux, `explorer`, 8 samples each): a pane run's host and pi took a median of 313.9 MiB of RSS, an RPC run's 272.2 MiB, about 42 MiB more.** All of it is in the run's pi: 156.8 MiB in a pane against 116.8 MiB on RPC. The host is about 156 MiB in both. That is round 2, taken at a load of 5 to 18. Round 1, at a load of up to 92, was too noisy to quote. Linux in the container agrees: +32 MiB in pi, host equal.
@@ -222,7 +222,7 @@ The host is the same size for both kinds. The pane run's pi had more RSS than th
 
 ## Open
 
-- **To file, not filed yet.** Link the issue here once it exists. Draft:
+- **Filed as #397.** Draft as filed:
   - **Title:** Agent view on tmux 3.4: the private server's config error covers the first pane and takes its keys
   - **Body:** tmux 3.4, Ubuntu 24.04's, refuses `set -g extended-keys-format csi-u` in the private server's config (`daemon/tmux.ts`). The rest of the config applies. tmux shows the error (`tmux.conf:7: invalid option: extended-keys-format`) to the first client that attaches, in view mode over the pane. Until the user presses `q`, keys go to view mode, not pi; a `send-keys` of `/` opens view mode's search and never returns. 5 of the 10 tests in `test/subagent-pane-runs.test.ts` fail or hang there; all pass with the line removed. Evidence and repro: `docs/research/pane-runs-linux-and-memory.md`, "Why: tmux 3.4 and `extended-keys-format`".
   - **Acceptance:** on tmux 3.4, the first terminal to attach shows pi, not view mode; `test/subagent-pane-runs.test.ts` passes in an Ubuntu 24.04 container; macOS keeps `csi-u`.
