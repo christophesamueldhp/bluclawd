@@ -55,7 +55,7 @@ describe("startIpcServer — version echo", () => {
 		});
 	}
 
-	it("echoes version and buildId on a normal response", async () => {
+	it("echoes version, buildId and pid on a normal response", async () => {
 		server = await startIpcServer(fakeHandler());
 		const response = await sendRaw(join(tempDir, "server.sock"), JSON.stringify({ type: "list" }));
 
@@ -63,6 +63,7 @@ describe("startIpcServer — version echo", () => {
 		expect(response.version).toBe(VERSION);
 		expect(response.buildId).toBe(BUILD_ID);
 		expect(typeof response.buildId).toBe("string");
+		expect(response.pid).toBe(process.pid);
 	});
 
 	it("echoes version and buildId even on a parse-error response", async () => {
