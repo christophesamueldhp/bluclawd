@@ -349,7 +349,10 @@ describe.skipIf(!hasTmux)("a run in a pane of its own", () => {
 			await waitFor(() => expect(record("look").status).toBe("running"));
 			writeFileSync(nextGo, "");
 			await waitFor(() => expect(record("next").status).toBe("starting"));
-			expect((await real.client.shutdownDaemon()).ok).toBe(true);
+			const shutdownAt = Date.now();
+			const down = await real.client.shutdownDaemon();
+			// The reason and duration tell a failed request (at most 3 s) from a daemon that did not exit (#410).
+			expect({ ...down, ms: Date.now() - shutdownAt }).toEqual({ ok: true, ms: expect.any(Number) });
 			// Its orchestrator starts the next daemon, claiming next's turn.
 			await waitFor(async () => expect(await real.client.isRunning()).toBe(true));
 			writeFileSync(hostGo, "");

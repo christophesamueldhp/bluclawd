@@ -16,12 +16,17 @@ import {
 	worktreePath,
 } from "../ext/subagents/run-worktree.ts";
 
+const FIXTURE_CONFIG = [
+	"-c",
+	"user.name=Fixture",
+	"-c",
+	"user.email=fixture@example.com",
+	"-c",
+	"commit.gpgsign=false",
+];
+
 function git(cwd: string, ...args: string[]): string {
-	const result = spawnSync(
-		"git",
-		["-c", "user.name=Fixture", "-c", "user.email=fixture@example.com", "-c", "commit.gpgsign=false", ...args],
-		{ cwd, encoding: "utf8" },
-	);
+	const result = spawnSync("git", [...FIXTURE_CONFIG, ...args], { cwd, encoding: "utf8" });
 	if (result.status !== 0) throw new Error(`git ${args.join(" ")}: ${result.stderr}`);
 	return result.stdout;
 }
@@ -53,7 +58,10 @@ describe("an isolated run's baseline", () => {
 		git(repo, "checkout", "-q", "main");
 		writeFileSync(join(repo, "a.txt"), "main\n");
 		git(repo, "commit", "-q", "-am", "main");
-		spawnSync("git", ["merge", "-q", "other"], { cwd: repo });
+		// A conflicting merge exits 1; any other status left no conflict to refuse.
+		const merge = spawnSync("git", [...FIXTURE_CONFIG, "merge", "-q", "other"], { cwd: repo, encoding: "utf8" });
+		expect(merge.status, merge.stderr).toBe(1);
+		expect(git(repo, "status", "--porcelain")).toBe("UU a.txt\n");
 
 		const captured = captureRunBaseline(repo, "sub_conflict");
 		expect(captured).toMatchObject({ ok: false, error: expect.stringContaining("Git could not record the state") });
