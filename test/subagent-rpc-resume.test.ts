@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { readinessMs } from "./helpers/heartbeats.ts";
 import {
 	conversation,
 	FAUX,
@@ -140,94 +141,104 @@ describe.skipIf(!hasTmux)("resuming an RPC run", () => {
 		expect(JSON.stringify([...real.requests("main"), ...look])).not.toContain("ran dry");
 	});
 
-	it("is never started by a message, and a new run of the same role starts fresh", async () => {
-		const real = await startOrchestrator();
-		pi = real;
-		real.script("main", [
-			{ tool: "subagent", args: { agent: "explorer", name: "look", task: "Remember the codeword PELICAN." } },
-			{ tool: "subagent_message", args: { to: "look", content: "Also remember HERON." } },
-			{ tool: "subagent", args: { agent: "explorer", name: "again", task: "Which codeword do you know?" } },
-			{ text: "done" },
-		]);
-		real.script("look", [{ text: "Remembered." }]);
-		real.script("again", [{ text: "None." }]);
-		real.start(["--", "delegate"]);
-		const main = await real.waitForRequests("main", 4);
+	// Two runs in a row, each a new pi: a readiness bound for each to start, and one for the rest.
+	it(
+		"is never started by a message, and a new run of the same role starts fresh",
+		{ timeout: 3 * readinessMs },
+		async () => {
+			const real = await startOrchestrator();
+			pi = real;
+			real.script("main", [
+				{ tool: "subagent", args: { agent: "explorer", name: "look", task: "Remember the codeword PELICAN." } },
+				{ tool: "subagent_message", args: { to: "look", content: "Also remember HERON." } },
+				{ tool: "subagent", args: { agent: "explorer", name: "again", task: "Which codeword do you know?" } },
+				{ text: "done" },
+			]);
+			real.script("look", [{ text: "Remembered." }]);
+			real.script("again", [{ text: "None." }]);
+			real.start(["--", "delegate"]);
+			const main = await real.waitForRequests("main", 4);
 
-		expect(lastToolResult(main[2])).toMatchObject({
-			toolName: "subagent_message",
-			text: expect.stringMatching(
-				/unavailable: "look" \(sub_[^)]+\) has finished\. Only subagent_resume continues it/,
-			),
-		});
-		expect(
-			conversation(real.requests("again")[0]).map(({ role, text }) => `${role}: ${text.split("\n").at(-1)}`),
-		).toEqual(["user: Which codeword do you know?"]);
-		// Proves only that nothing woke the finished run within this while.
-		await new Promise((resolve) => setTimeout(resolve, 1000));
-		expect(real.requests("look")).toHaveLength(1);
-		const dir = runDir(real.agentDir, "look");
-		expect(readdirSync(join(dir, "reports"))).toEqual(["1.json", "1.md"]);
-		expect(readJson(join(dir, "record.json"))).toMatchObject({ generation: 0, status: "closed" });
-		expect(JSON.stringify(real.requests("again"))).not.toContain("PELICAN");
-	});
+			expect(lastToolResult(main[2])).toMatchObject({
+				toolName: "subagent_message",
+				text: expect.stringMatching(
+					/unavailable: "look" \(sub_[^)]+\) has finished\. Only subagent_resume continues it/,
+				),
+			});
+			expect(
+				conversation(real.requests("again")[0]).map(({ role, text }) => `${role}: ${text.split("\n").at(-1)}`),
+			).toEqual(["user: Which codeword do you know?"]);
+			// Proves only that nothing woke the finished run within this while.
+			await new Promise((resolve) => setTimeout(resolve, 1000));
+			expect(real.requests("look")).toHaveLength(1);
+			const dir = runDir(real.agentDir, "look");
+			expect(readdirSync(join(dir, "reports"))).toEqual(["1.json", "1.md"]);
+			expect(readJson(join(dir, "record.json"))).toMatchObject({ generation: 0, status: "closed" });
+			expect(JSON.stringify(real.requests("again"))).not.toContain("PELICAN");
+		},
+	);
 
-	it("keeps its model and thinking unless the Resume changes them, and refuses a change its model cannot run", async () => {
-		const real = await startOrchestrator();
-		pi = real;
-		const resume = (task: string, changes: Record<string, string> = {}) => ({
-			tool: "subagent_resume",
-			args: { agent: "tuned", task, ...changes },
-		});
-		real.script("main", [
-			{
-				tool: "subagent",
-				args: { agent: "explorer", name: "tuned", task: "One.", model: "faux/faux-3", thinkingLevel: "low" },
-			},
-			resume("Two."),
-			{ text: "waiting" },
-			// Its level stays low, which faux-1 cannot think at: refused, not lowered.
-			resume("Three.", { model: "faux/faux-1" }),
-			resume("Four.", { model: "faux/faux-2", thinkingLevel: "high" }),
-			{ text: "waiting" },
-			resume("Five."),
-			{ text: "waiting" },
-			{ text: "done" },
-		]);
-		real.script(
-			"tuned",
-			["One", "Two", "Four", "Five"].map((text) => ({ text: `${text} done.` })),
-		);
-		real.start(["--model", "faux/faux-2", "--thinking", "medium", "--", "delegate"]);
-		const main = await real.waitForRequests("main", 9);
+	// Four generations in a row, each a new pi: a readiness bound for each to start, and one for the rest.
+	it(
+		"keeps its model and thinking unless the Resume changes them, and refuses a change its model cannot run",
+		{ timeout: 5 * readinessMs },
+		async () => {
+			const real = await startOrchestrator();
+			pi = real;
+			const resume = (task: string, changes: Record<string, string> = {}) => ({
+				tool: "subagent_resume",
+				args: { agent: "tuned", task, ...changes },
+			});
+			real.script("main", [
+				{
+					tool: "subagent",
+					args: { agent: "explorer", name: "tuned", task: "One.", model: "faux/faux-3", thinkingLevel: "low" },
+				},
+				resume("Two."),
+				{ text: "waiting" },
+				// Its level stays low, which faux-1 cannot think at: refused, not lowered.
+				resume("Three.", { model: "faux/faux-1" }),
+				resume("Four.", { model: "faux/faux-2", thinkingLevel: "high" }),
+				{ text: "waiting" },
+				resume("Five."),
+				{ text: "waiting" },
+				{ text: "done" },
+			]);
+			real.script(
+				"tuned",
+				["One", "Two", "Four", "Five"].map((text) => ({ text: `${text} done.` })),
+			);
+			real.start(["--model", "faux/faux-2", "--thinking", "medium", "--", "delegate"]);
+			const main = await real.waitForRequests("main", 9);
 
-		const asked = real.requests("tuned").map((request) => `${request.model}:${request.reasoning ?? "off"}`);
-		expect(asked).toEqual(["faux-3:low", "faux-3:low", "faux-2:high", "faux-2:high"]);
-		const results = conversation(main[8])
-			.filter(({ toolName }) => toolName === "subagent_resume")
-			.map(({ text }) => text);
-		expect(results).toHaveLength(4);
-		expect(results[1]).toContain(
-			'Thinking level "low" is not supported by subagent model "faux/faux-1" (supported: off).',
-		);
-		expect(results[2]).toContain("as its generation 2 on faux/faux-2 at thinking high");
-		const dir = runDir(real.agentDir, "tuned");
-		await waitFor(() =>
-			expect(readJson(join(dir, "record.json"))).toMatchObject({
-				generation: 3,
-				status: "closed",
-				modelId: "faux-2",
-				thinkingLevel: "high",
-			}),
-		);
-		// The launch's admitted pair stays as it was admitted.
-		expect(readJson(join(dir, "definition.json")).admitted).toEqual({
-			provider: "faux",
-			modelId: "faux-3",
-			thinkingLevel: "low",
-		});
-		expect(JSON.stringify(real.requests("main"))).not.toContain("ran dry");
-	});
+			const asked = real.requests("tuned").map((request) => `${request.model}:${request.reasoning ?? "off"}`);
+			expect(asked).toEqual(["faux-3:low", "faux-3:low", "faux-2:high", "faux-2:high"]);
+			const results = conversation(main[8])
+				.filter(({ toolName }) => toolName === "subagent_resume")
+				.map(({ text }) => text);
+			expect(results).toHaveLength(4);
+			expect(results[1]).toContain(
+				'Thinking level "low" is not supported by subagent model "faux/faux-1" (supported: off).',
+			);
+			expect(results[2]).toContain("as its generation 2 on faux/faux-2 at thinking high");
+			const dir = runDir(real.agentDir, "tuned");
+			await waitFor(() =>
+				expect(readJson(join(dir, "record.json"))).toMatchObject({
+					generation: 3,
+					status: "closed",
+					modelId: "faux-2",
+					thinkingLevel: "high",
+				}),
+			);
+			// The launch's admitted pair stays as it was admitted.
+			expect(readJson(join(dir, "definition.json")).admitted).toEqual({
+				provider: "faux",
+				modelId: "faux-3",
+				thinkingLevel: "low",
+			});
+			expect(JSON.stringify(real.requests("main"))).not.toContain("ran dry");
+		},
+	);
 
 	it("holds to the role it was admitted with, narrowed by its orchestrator's rules as they are now", async () => {
 		const real = await startOrchestrator();
