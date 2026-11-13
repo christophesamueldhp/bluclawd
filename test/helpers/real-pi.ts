@@ -79,7 +79,7 @@ function processes(base: string): Array<{ pid: number; group: number; named: boo
 	const listed = spawnSync("ps", ["axeww", "-o", "pid=,pgid=,stat=,command="], {
 		encoding: "utf8",
 		env: { PATH: process.env.PATH },
-		maxBuffer: Number.POSITIVE_INFINITY,
+		maxBuffer: 256 * 1024 * 1024,
 	});
 	if (listed.status !== 0) throw new Error(`ps failed: ${listed.error ?? listed.stderr}`);
 	return listed.stdout.split("\n").flatMap((line) => {
@@ -102,9 +102,18 @@ export async function endLeftovers(base: string, groups: number[] = []): Promise
 	const deadline = Date.now() + readinessMs;
 	for (;;) {
 		const listed = processes(base);
+		const byPid = new Map(listed.map((entry) => [entry.pid, entry]));
 		// This process's group is the test run's, which no teardown may end.
-		const own = listed.find(({ pid }) => pid === process.pid)?.group;
-		for (const { group, named } of listed) if (named && group > 1 && group !== own) ours.add(group);
+		const own = byPid.get(process.pid)?.group;
+		if (own === undefined) throw new Error(`ps did not list this process (${process.pid}): its group is unknown`);
+		// A group with no member left is gone, and its number may come to lead a group of another test's.
+		for (const group of ours) if (!listed.some((entry) => entry.group === group)) ours.delete(group);
+		for (const { group, named } of listed) {
+			if (!named || group <= 1 || group === own) continue;
+			// A group led by a process that names nothing, such as a shell, is not the test's: only the named member is.
+			const leader = byPid.get(group);
+			if (!leader || leader.named) ours.add(group);
+		}
 		const left = listed.filter(({ pid, group, named }) => pid !== process.pid && (named || ours.has(group)));
 		if (left.length === 0) return;
 		const pids = left.map(({ pid }) => pid);
@@ -227,14 +236,21 @@ export async function startRealPi(
 		killAll(pis);
 		spawnSync("tmux", ["-S", tmux.socket, "kill-server"]);
 		spawnSync("tmux", ["-S", terminal, "kill-server"]);
-		await endLeftovers(base, pis);
-		rmSync(base, { recursive: true, force: true, maxRetries: 10 });
+		try {
+			await endLeftovers(base, pis);
+		} finally {
+			rmSync(base, { recursive: true, force: true, maxRetries: 10 });
+		}
 	};
 	try {
 		// ensureDaemon waits 3s, too short under parallel load; calling it again would spawn a second daemon.
 		if (!(await client.ensureDaemon())) await waitFor(async () => expect(await client.isRunning()).toBe(true));
 	} catch (error) {
-		await stop();
+		try {
+			await stop();
+		} catch (stopError) {
+			throw new AggregateError([error, stopError], "the real pi failed to start, and so did its teardown");
+		}
 		throw error;
 	}
 

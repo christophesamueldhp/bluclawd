@@ -1,4 +1,4 @@
-import { type ChildProcess, spawn, spawnSync } from "node:child_process";
+import { type ChildProcess, type SpawnOptions, spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
@@ -12,13 +12,10 @@ import { waitFor } from "./helpers/wait-for.ts";
 const LIFETIME_MS = 3 * readinessMs;
 const IGNORES_TERM = `process.on('SIGTERM', () => {}); setTimeout(() => {}, ${LIFETIME_MS});`;
 
+/** Whether `pid` still runs: a zombie has ended, though nothing reaped it (a container's `sleep` as pid 1 never does). */
 const alive = (pid: number) => {
-	try {
-		process.kill(pid, 0);
-		return true;
-	} catch {
-		return false;
-	}
+	const stat = spawnSync("ps", ["-o", "stat=", "-p", String(pid)], { encoding: "utf8" }).stdout.trim();
+	return stat !== "" && !stat.startsWith("Z");
 };
 
 const dirs: string[] = [];
@@ -35,19 +32,21 @@ const realDir = () => {
 	return dir;
 };
 
-/** A node process running `script` with `args`, in `env` only. */
-function node(script: string, args: string[] = [], env: Record<string, string> = {}): ChildProcess {
-	const child = spawn(process.execPath, ["-e", script, ...args], {
-		stdio: "ignore",
-		env: { PATH: process.env.PATH ?? "", ...env },
-	});
+/** A node process with `args`; returns its pid. */
+function start(args: string[], options: SpawnOptions = {}): number {
+	const child = spawn(process.execPath, args, { stdio: "ignore", ...options });
 	started.push(child);
-	return child;
+	if (child.pid === undefined) throw new Error(`node ${args.join(" ")} did not start`);
+	return child.pid;
 }
+
+/** A node process running `script` with `args`, in `env` only; returns its pid. */
+const node = (script: string, args: string[] = [], env: Record<string, string> = {}) =>
+	start(["-e", script, ...args], { env: { PATH: process.env.PATH ?? "", ...env } });
 
 /** What still runs with `dir` in its command line or environment, as `ps` lists it. */
 function naming(dir: string): number[] {
-	const options = { encoding: "utf8", env: { PATH: process.env.PATH }, maxBuffer: Number.POSITIVE_INFINITY } as const;
+	const options = { encoding: "utf8", env: { PATH: process.env.PATH }, maxBuffer: 256 * 1024 * 1024 } as const;
 	return spawnSync("ps", ["axeww", "-o", "pid=,command="], options)
 		.stdout.split("\n")
 		.filter((line) => line.includes(basename(dir)))
@@ -55,14 +54,39 @@ function naming(dir: string): number[] {
 		.filter((pid) => pid !== process.pid);
 }
 
+/** The pid `file` holds, once it holds one. */
+const pidIn = (file: string) =>
+	waitFor(() => {
+		expect(existsSync(file) && readFileSync(file, "utf8")).toMatch(/^\d+$/);
+		return Number(readFileSync(file, "utf8"));
+	});
+
+/**
+ * A run's host and pi under `dir`, as the daemon starts them: a detached host, which leads its group and names `dir`,
+ * and its child, which names nothing once it has taken a title, as pi does (`pi-rpc`).
+ */
+async function runHost(dir: string): Promise<{ host: number; pi: number }> {
+	const pidFile = join(dir, "pi.pid");
+	const pi = `process.title = 'pi-rpc'; ${IGNORES_TERM} require('node:fs').writeFileSync(process.argv[1], String(process.pid));`;
+	const host = `require('node:child_process').spawn(process.execPath, ['-e', ${JSON.stringify(pi)}, process.argv[1]], { stdio: 'ignore', env: { PATH: process.env.PATH } }); ${IGNORES_TERM}`;
+	return { host: start(["-e", host, pidFile], { detached: true }), pi: await pidIn(pidFile) };
+}
+
+/** The test dir a startRealPi stubbed in this process's environment. */
+function stubbedBase(): string {
+	const serverDir = process.env.PI_SERVER_DIR;
+	if (!serverDir) throw new Error("no PI_SERVER_DIR is stubbed");
+	return dirname(serverDir);
+}
+
 describe("a real-pi test's sweep of its leftovers", () => {
 	it("ends a process that names its dir only in its environment and ignores SIGTERM, as a private daemon does", async () => {
 		const base = realDir();
-		const { pid } = node(IGNORES_TERM, [], { PI_SERVER_DIR: join(base, "s") });
+		const pid = node(IGNORES_TERM, [], { PI_SERVER_DIR: join(base, "s") });
 		await waitFor(() => expect(naming(base)).toContain(pid));
 
 		await endLeftovers(base);
-		await waitFor(() => expect(alive(pid as number)).toBe(false));
+		await waitFor(() => expect(alive(pid)).toBe(false));
 	});
 
 	it("ends what a process started after the sweep first listed them, as a run's host starts its pi", async () => {
@@ -80,49 +104,64 @@ describe("a real-pi test's sweep of its leftovers", () => {
 				appendFileSync(pids, child.pid + "\\n");
 				if (--left === 0) clearInterval(timer);
 			}, 5);`;
-		const { pid } = node(spawner, [pids]);
+		const pid = node(spawner, [pids]);
 		await waitFor(() => existsSync(pids));
 
 		await endLeftovers(base);
 		const children = readFileSync(pids, "utf8").split("\n").filter(Boolean).map(Number);
-		await waitFor(() => expect([pid as number, ...children].filter(alive)).toEqual([]));
+		await waitFor(() => expect([pid, ...children].filter(alive)).toEqual([]));
 	});
 
 	it("ends a process whose title hides its command line and environment, by its group, as a run's pi", async () => {
 		const base = realDir();
-		const pidFile = join(base, "titled.pid");
-		// A detached host leads its group, as a run's host does; its child takes a title, as pi does (`pi-rpc`).
-		const titled = `process.title = 'pi-rpc'; ${IGNORES_TERM} require('node:fs').writeFileSync(process.argv[1], String(process.pid));`;
-		const host = `require('node:child_process').spawn(process.execPath, ['-e', ${JSON.stringify(titled)}, process.argv[1]], { stdio: 'ignore', env: { PATH: process.env.PATH } }); ${IGNORES_TERM}`;
-		const leader = spawn(process.execPath, ["-e", host, pidFile], { detached: true, stdio: "ignore" });
-		started.push(leader);
-		await waitFor(() => existsSync(pidFile) && readFileSync(pidFile, "utf8") !== "");
-		const child = Number(readFileSync(pidFile, "utf8"));
-		expect(naming(base)).not.toContain(child);
+		const { host, pi } = await runHost(base);
+		expect(naming(base)).not.toContain(pi);
 
 		await endLeftovers(base);
-		await waitFor(() => expect([leader.pid as number, child].filter(alive)).toEqual([]));
+		await waitFor(() => expect([host, pi].filter(alive)).toEqual([]));
+	});
+
+	it("leaves the leader of a group it did not start, when only a member of that group names its dir", async () => {
+		const base = realDir();
+		// Builds the dir's path itself, so only its child names it: as a shell running one of the test's processes.
+		const leader = `require('node:child_process').spawn(process.execPath, ['-e', ${JSON.stringify(IGNORES_TERM)}, require('node:path').join(process.argv[1], 'bc-real-' + process.argv[2])], { stdio: 'ignore' }); ${IGNORES_TERM}`;
+		const shell = start(["-e", leader, dirname(base), basename(base).replace("bc-real-", "")], {
+			detached: true,
+			env: { PATH: process.env.PATH ?? "" },
+		});
+		const [job] = await waitFor(() => {
+			const named = naming(base);
+			expect(named).toHaveLength(1);
+			return named;
+		});
+
+		await endLeftovers(base);
+		await waitFor(() => expect(alive(job)).toBe(false));
+		expect(alive(shell)).toBe(true);
 	});
 
 	it("finds them in a listing of several MB, as every process's environment makes it on a loaded machine", async () => {
 		const base = realDir();
-		for (let i = 0; i < 6; i++) node(IGNORES_TERM, [], { PAD: "x".repeat(800_000) });
-		const { pid } = node(IGNORES_TERM, [join(base, "x")]);
+		// 700 KB each, in strings of 100 KB: Linux refuses a single one over 128 KB.
+		const padding = Object.fromEntries(Array.from({ length: 7 }, (_, i) => [`PAD${i}`, "x".repeat(100_000)]));
+		for (let i = 0; i < 6; i++) node(IGNORES_TERM, [], padding);
+		const pid = node(IGNORES_TERM, [join(base, "x")]);
 		await waitFor(() => expect(naming(base)).toContain(pid));
 
 		await endLeftovers(base);
-		await waitFor(() => expect(alive(pid as number)).toBe(false));
+		await waitFor(() => expect(alive(pid)).toBe(false));
 	});
 
-	it("leaves a process of another test's dir running", async () => {
+	it("leaves another test's run hosts and their groups running", async () => {
 		const [base, other] = [realDir(), realDir()];
-		const ours = node(IGNORES_TERM, [join(base, "x")]);
-		const theirs = node(IGNORES_TERM, [join(other, "x")]);
-		await waitFor(() => expect([naming(base), naming(other)]).toEqual([[ours.pid], [theirs.pid]]));
+		const ours = await runHost(base);
+		const theirs = await runHost(other);
 
 		await endLeftovers(base);
-		await waitFor(() => expect(alive(ours.pid as number)).toBe(false));
-		expect(alive(theirs.pid as number)).toBe(true);
+		await waitFor(() => expect([ours.host, ours.pi].filter(alive)).toEqual([]));
+		expect([theirs.host, theirs.pi].filter(alive)).toEqual([theirs.host, theirs.pi]);
+		await endLeftovers(other);
+		await waitFor(() => expect([theirs.host, theirs.pi].filter(alive)).toEqual([]));
 	});
 });
 
@@ -135,13 +174,13 @@ describe.skipIf(!hasTmux)("a real pi that fails to start", () => {
 		) {
 			await ensureDaemon.call(this);
 			await waitFor(async () => expect(await this.isRunning()).toBe(true));
-			daemons = naming(dirname(process.env.PI_SERVER_DIR as string));
+			daemons = naming(stubbedBase());
 			throw new Error("the setup failed once its daemon ran");
 		});
 
 		await expect(startRealPi()).rejects.toThrow("the setup failed once its daemon ran");
 		expect(daemons).not.toEqual([]);
 		await waitFor(() => expect(daemons.filter(alive)).toEqual([]));
-		expect(existsSync(dirname(process.env.PI_SERVER_DIR as string))).toBe(false);
+		expect(existsSync(stubbedBase())).toBe(false);
 	});
 });
