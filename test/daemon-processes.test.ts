@@ -1,5 +1,8 @@
 import { spawn, spawnSync } from "node:child_process";
-import { afterEach, describe, expect, it } from "vitest";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { processAlive, processGroupAlive } from "../daemon/processes.ts";
 import { readinessMs } from "./helpers/heartbeats.ts";
 
@@ -77,5 +80,75 @@ describe("probing a process by its pid", () => {
 		const pid = await zombieLeader(`sleep ${Math.ceil((3 * readinessMs) / 1000)} & exit 0`);
 		expect(processAlive(pid)).toBe(false);
 		expect(processGroupAlive(pid)).toBe(true);
+	});
+
+	it("takes a group for ended at once on a fresh look, though it ran a moment ago", async () => {
+		const pid = await zombieLeader(`sleep ${Math.ceil((3 * readinessMs) / 1000)} & exit 0`);
+		expect(processGroupAlive(pid)).toBe(true);
+		process.kill(-pid, "SIGKILL");
+		await expect.poll(() => liveMembers(pid)).toEqual([]);
+		expect(processGroupAlive(pid, { fresh: true })).toBe(false);
+	});
+});
+
+/** The states of the members of group `pid` that are no zombie, as `ps` lists them. */
+function liveMembers(pid: number): string[] {
+	const listed = spawnSync("ps", ["-A", "-o", "pgid=,stat="], { encoding: "utf8" }).stdout;
+	return listed.split("\n").flatMap((line) => {
+		const [group, state] = line.trim().split(/\s+/);
+		return Number(group) === pid && state && !state.startsWith("Z") ? [state] : [];
+	});
+}
+
+/** Dirs of the fake `ps`es, removed afterwards. */
+const dirs: string[] = [];
+
+afterEach(() => {
+	for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+});
+
+/** Puts a `ps` that runs `script` first on PATH. Returns how many times it has run so far. */
+function fakePs(script: string): () => number {
+	const dir = mkdtempSync(join(tmpdir(), "bc-ps-"));
+	dirs.push(dir);
+	const runs = join(dir, "runs");
+	writeFileSync(join(dir, "ps"), `#!/bin/sh\necho >> '${runs}'\n${script}\n`, { mode: 0o755 });
+	vi.stubEnv("PATH", `${dir}:${process.env.PATH}`);
+	return () => (existsSync(runs) ? readFileSync(runs, "utf8").split("\n").length - 1 : 0);
+}
+
+/** A process that runs past the test, leading a group of its own. */
+function running(): number {
+	const child = spawn("sleep", [String(Math.ceil((3 * readinessMs) / 1000))], { detached: true, stdio: "ignore" });
+	if (child.pid === undefined) throw new Error("sleep did not start");
+	started.push(child.pid);
+	return child.pid;
+}
+
+// Where /proc gives a process's state (Linux), no `ps` runs at all: these hold there trivially.
+describe("what probing a process costs, and what it trusts", () => {
+	it("asks ps at most once a second about a process or group that keeps running", () => {
+		const runs = fakePs('exec /bin/ps "$@"');
+		const pid = running();
+		for (let i = 0; i < 10; i++) {
+			expect(processAlive(pid)).toBe(true);
+			expect(processGroupAlive(pid)).toBe(true);
+		}
+		// Once for the process, once for its group.
+		expect(runs()).toBeLessThanOrEqual(2);
+	});
+
+	it("takes a process for running when ps hangs, and waits for it only a moment", () => {
+		fakePs("exec sleep 60");
+		const pid = running();
+		const start = Date.now();
+		expect(processAlive(pid)).toBe(true);
+		// A failure bound: far under the fake's 60 s.
+		expect(Date.now() - start).toBeLessThan(15_000);
+	});
+
+	it("takes a process signal 0 reaches for running when ps does not list it", () => {
+		fakePs("exit 1");
+		expect(processAlive(running())).toBe(true);
 	});
 });

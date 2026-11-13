@@ -213,7 +213,7 @@ export function generationHost(runDir: string, generation: number): number | und
  * group of that id has members, so once the host is gone, any member left is the run's.
  */
 export function runGroupAlive(pid: number, runDir: string): boolean {
-	if (!processAlive(pid)) return processGroupAlive(pid);
+	if (!processAlive(pid)) return processGroupAlive(pid, { leaderRuns: false });
 	return spawnSync("ps", ["-o", "command=", "-p", String(pid)], { encoding: "utf8" }).stdout.includes(runDir);
 }
 

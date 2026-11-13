@@ -417,7 +417,8 @@ async function unsettled(
 function processesLeft(runDir: string): string | undefined {
 	const host = readRpcHostState(runDir);
 	if (!host) return undefined;
-	if (processGroupAlive(host.hostPid) || (host.exit === undefined && processAlive(host.hostPid))) {
+	const leaderRuns = processAlive(host.hostPid);
+	if (processGroupAlive(host.hostPid, { leaderRuns }) || (host.exit === undefined && leaderRuns)) {
 		return `processes of the run in ${runDir} still run (process group ${host.hostPid}).`;
 	}
 	return undefined;
