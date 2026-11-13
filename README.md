@@ -277,7 +277,7 @@ jq -s 'group_by(.ext, .event) | map({ext: .[0].ext, event: .[0].event, calls: le
 
 ## Session switching
 
-Agent view needs [tmux](https://github.com/tmux/tmux): every session is a full interactive pi of its
+Agent view needs [tmux](https://github.com/tmux/tmux) 3.3 or newer: every session is a full interactive pi of its
 own, running in a private tmux server next to the daemon's socket (`~/.pi/server/tmux.sock`).
 `pi` in a terminal starts its session there and attaches, so the terminal is only a viewer: all
 sessions run at once, and enter/→ in agent view switches the terminal to another session
