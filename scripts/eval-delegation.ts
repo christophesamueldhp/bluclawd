@@ -427,7 +427,7 @@ function touched(messages: SessionLog["messages"], cwd: string): string[] {
  * before, and their descendants. A pi that sets its title overwrites both, so it is known by its parent instead.
  */
 function processesOf(base: string, known: Set<number>): { pid: number; command: string }[] {
-	const listed = spawnSync("ps", ["eww", "-ax", "-o", "pid=,ppid=,command="], {
+	const listed = spawnSync("ps", ["axeww", "-o", "pid=,ppid=,command="], {
 		encoding: "utf8",
 		maxBuffer: 1 << 28,
 	});
