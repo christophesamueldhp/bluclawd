@@ -17,9 +17,9 @@ Old runs in tmux, from before ADR-0010, are still only followed until they end.
 
 ## Consequences
 
-- The orchestrator's environment, which may hold credentials, never goes on tmux's command line or to disk. The daemon keeps it with the run's slot, and the host in the pane takes it once over the daemon's socket (`take_env`). The pane's command line carries only pi's state directories. This fits ADR-0012: the socket is unauthenticated, but no sandboxed shell reaches it, and any other process of the same user can already read that environment.
+- The orchestrator's environment, which may hold credentials, never goes on tmux's command line or to disk. The daemon keeps it with the run's slot, and the host in the pane takes it once over the daemon's socket (`take_env`). The pane's command line carries only pi's state directories. This fits ADR-0012: the socket is unauthenticated, but no sandboxed shell reaches it, and any other process of the same user can already read that environment. Amended 2026-11-13 (#355): the daemon keeps it in memory only, so a daemon restarted between launching the host and the host taking it has none to give; the run then does not start, and says so.
 - A run's pi in a pane knows the daemon's directory and its tmux, so ← can take the user back. Its shell commands are still told of neither (`run-shell.ts`).
-- Esc in a run's pane holds its work for the user. The run ends as stopped once the user leaves the pane without going on; a stop from its orchestrator ends it at once.
+- Esc in a run's pane holds its work for the user. The run ends as stopped once the user leaves the pane without going on; a stop from its orchestrator ends it at once. Amended 2026-11-13 (#356): a pane ended from outside, as by `tmux kill-session`, ends the run as stopped, with its Report delivered; a pi that does not end on the hang-up is killed after a grace.
 - Startup costs a little more. From Admission to the run's first model request, measured on faux pi over six runs in two rounds on 2026-11-12: RPC took a median of 523–589 ms and a pane 606–737 ms.
 
 ## Approvals no one can answer

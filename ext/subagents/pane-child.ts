@@ -14,7 +14,7 @@ import { PARENT_ENV, RUN_PANE_ENV, Tmux } from "../../daemon/tmux.ts";
 import { BLOCKING_PROMPT_KINDS } from "../agent-view/self-registration.ts";
 import { SUBAGENT_MESSAGE_TOOL } from "./messages.ts";
 import { textOf } from "./results.ts";
-import { type PaneChildState, paneChildStatePath, paneParent, readRpcHostSpec } from "./rpc-host.ts";
+import { PANE_ENDED, type PaneChildState, paneChildStatePath, paneParent, readRpcHostSpec } from "./rpc-host.ts";
 import { paneApprovalsUnanswerable } from "./run-approvals.ts";
 import {
 	markGiven,
@@ -279,9 +279,19 @@ export default function paneChild(pi: ExtensionAPI): void {
 		save();
 	});
 
-	// Ended before its work settled, by a stop from its host or the user quitting it: what it did so far is its Report.
+	// Heard before pi's shutdown on it reaches session_shutdown: pi hears it once its pane is ended from outside.
+	let paneEnded = false;
+	process.on("SIGHUP", () => {
+		paneEnded = true;
+	});
+	// Ended before its work settled, by a stop from its host, the user quitting it or its pane ended: what it did so far
+	// is its Report.
 	pi.on("session_shutdown", () => {
-		if (!done) finish(working ? { status: "stopped", error: "its work was stopped" } : undefined, false);
+		if (!done)
+			finish(
+				working ? { status: "stopped", error: paneEnded ? PANE_ENDED : "its work was stopped" } : undefined,
+				false,
+			);
 	});
 }
 

@@ -546,17 +546,21 @@ export interface CredentialsCheck {
 	model: string;
 	/** pi saved the user's auth.json through the link during the call, as it does when it refreshes a token. */
 	writtenThrough: boolean;
+	/** Why the call failed; absent when it answered. */
+	failure?: string;
 }
 
 /**
  * Before a live comparison whose agent dirs link `auth` (the user's auth.json): one small call per provider of
  * `models`, each through a fresh agent dir of that kind, to see that pi writes through the link rather than replacing
- * it. Throws on a failed call or a replaced link, which leaves that agent dir in place.
+ * it. A failed call is reported in its provider's check, and with `strict` ends the checks there. Throws on a replaced
+ * link, which leaves that agent dir in place.
  */
 export async function checkCredentials(options: {
 	auth: string;
 	models: readonly string[];
 	thinking: string;
+	strict?: boolean;
 	/** For a scripted model: offline, with the extension that registers it. */
 	providerExtensions?: string[];
 }): Promise<CredentialsCheck[]> {
@@ -586,7 +590,12 @@ export async function checkCredentials(options: {
 			"--thinking",
 			options.thinking,
 		];
-		const call = await new Promise<{ code: number | null; stderr: string }>((done) => {
+		const call = await new Promise<{
+			code: number | null;
+			signal: NodeJS.Signals | null;
+			stderr: string;
+			timedOut: boolean;
+		}>((done) => {
 			const pi = spawn(process.execPath, [...args, "Reply with the single word ok."], {
 				cwd: base,
 				env: piEnv(dirs, live),
@@ -596,16 +605,29 @@ export async function checkCredentials(options: {
 			pi.stderr?.on("data", (data) => {
 				stderr = (stderr + data).slice(-2000);
 			});
-			const timer = setTimeout(() => pi.kill("SIGKILL"), 120_000);
-			pi.on("exit", (code) => {
+			let timedOut = false;
+			const timer = setTimeout(() => {
+				timedOut = true;
+				pi.kill("SIGKILL");
+			}, 120_000);
+			pi.on("exit", (code, signal) => {
 				clearTimeout(timer);
-				done({ code, stderr });
+				done({ code, signal, stderr, timedOut });
 			});
 		});
 		keepUnlessLinked(base, dirs.agentDir, options.auth);
 		rmSync(base, { recursive: true, force: true, maxRetries: 10 });
-		if (call.code !== 0) throw new Error(`The call to ${model} failed: ${call.stderr.trim()}`);
-		checked.push({ provider, model, writtenThrough: statSync(options.auth).mtimeMs !== before });
+		const writtenThrough = statSync(options.auth).mtimeMs !== before;
+		if (call.code === 0) {
+			checked.push({ provider, model, writtenThrough });
+			continue;
+		}
+		const said = call.stderr.trim();
+		const exit = call.code === null ? `killed by ${call.signal}` : `exit ${call.code}`;
+		const reasons = call.timedOut ? ["timed out after 120 s", said] : [said || exit];
+		const failure = `The call to ${model} failed: ${reasons.filter(Boolean).join("\n")}`;
+		checked.push({ provider, model, writtenThrough, failure });
+		if (options.strict) break;
 	}
 	return checked;
 }
@@ -927,10 +949,12 @@ function flag(argv: string[], name: string): string | undefined {
 const USAGE = `Usage: node scripts/eval-delegation.ts --live --models <provider/id>[,<provider/id>...] --thinking <level>
   --max-tokens <n> --max-dollars <n> [--trials 3] [--before <checkout> --after <checkout>]
   [--arms stock,bluclawd,example|before,after] [--scenarios trivial,investigate,parallel,review,watch,slow]
-  [--auth <auth.json> | --agent-dir <dir>] [--out <results.json>]
-It spends real model calls, within the budget given, which covers every model.`;
+  [--auth <auth.json> [--strict-auth] | --agent-dir <dir>] [--out <results.json>]
+It spends real model calls, within the budget given, which covers every model.
+With --auth, a provider whose credentials check fails has its models skipped; --strict-auth stops the run instead.`;
 
-async function main(argv: string[]): Promise<void> {
+/** `scripted`: the extensions that register a scripted model, which make every call offline, as a test needs. */
+export async function main(argv: string[], scripted?: { providerExtensions: string[] }): Promise<void> {
 	const models = (flag(argv, "models") ?? flag(argv, "model"))?.split(",");
 	const thinking = flag(argv, "thinking");
 	const maxTokens = Number(flag(argv, "max-tokens"));
@@ -962,17 +986,29 @@ async function main(argv: string[]): Promise<void> {
 	const budget = new EvaluationBudget(models.length * trials * arms.length * scenarios.length, maxTokens, maxDollars);
 	const perTrial = { tokens: maxTokens / 4, dollars: maxDollars / 4 };
 	const results: TrialResult[] = [];
+	const skipped: { model: string; reason: string }[] = [];
 	try {
 		// A checkout the arm cannot load is said before any call is spent.
 		for (const arm of arms) ARM_SETUP[arm].extensions(checkouts[arm]);
 		if (auth && !existsSync(auth)) throw new Error(`No auth.json at ${auth}`);
 		if (auth) {
-			for (const check of await checkCredentials({ auth: resolve(auth), models, thinking })) {
+			const strict = argv.includes("--strict-auth");
+			const checks = await checkCredentials({ auth: resolve(auth), models, thinking, strict, ...scripted });
+			for (const { provider, failure } of checks) {
+				if (failure === undefined) continue;
+				for (const model of models.filter((m) => m.split("/")[0] === provider))
+					skipped.push({ model, reason: failure });
+			}
+			const failures = checks.flatMap((check) => check.failure ?? []);
+			if (failures.length > 0 && (strict || failures.length === checks.length)) throw new Error(failures.join("\n"));
+			for (const { model, reason } of skipped) console.error(`Skipped ${model}: ${reason}`);
+			for (const check of checks) {
+				if (check.failure !== undefined) continue;
 				const saved = check.writtenThrough ? ", and pi saved auth.json through the link" : "";
 				console.error(`Credentials: ${check.provider} answered on ${check.model}${saved}.`);
 			}
 		}
-		for (const model of models) {
+		for (const model of models.filter((m) => !skipped.some((s) => s.model === m))) {
 			for (let trial = 0; trial < trials; trial++) {
 				for (const scenario of scenarios) {
 					for (const arm of arms) {
@@ -984,7 +1020,8 @@ async function main(argv: string[]): Promise<void> {
 							scenario,
 							model,
 							thinking,
-							live: true,
+							live: !scripted,
+							providerExtensions: scripted?.providerExtensions,
 							agentDir,
 							auth: auth && resolve(auth),
 							limit: perTrial,
@@ -1007,7 +1044,7 @@ async function main(argv: string[]): Promise<void> {
 		console.error(`Stopped: ${error instanceof Error ? error.message : String(error)}`);
 	}
 	const out = flag(argv, "out");
-	if (out) writeFileSync(out, JSON.stringify({ models, thinking, trials, checkouts, results }, null, 2));
+	if (out) writeFileSync(out, JSON.stringify({ models, thinking, trials, checkouts, skipped, results }, null, 2));
 	console.log(formatSummary(summarize(results)));
 }
 
