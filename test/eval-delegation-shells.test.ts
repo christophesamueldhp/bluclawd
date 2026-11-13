@@ -17,10 +17,11 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
 	checkCredentials,
 	formatSummary,
+	main,
 	runTrial,
 	SCENARIOS,
 	type Scenario,
@@ -261,6 +262,29 @@ describe("credentials of a live comparison, on a scripted model", { timeout: 4 *
 		}
 	});
 
+	it("with strict, checks no provider after the first whose call failed", async () => {
+		const { auth, dir } = standIn();
+		try {
+			const checked = await checkCredentials({
+				auth,
+				models: ["gone/model-1", "faux/faux-1"],
+				thinking: "off",
+				strict: true,
+				providerExtensions: [FAUX],
+			});
+			expect(checked).toEqual([
+				{
+					provider: "gone",
+					model: "gone/model-1",
+					writtenThrough: false,
+					failure: expect.stringMatching(/^The call to gone\/model-1 failed: .*not found/s),
+				},
+			]);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
 	it("keeps a trial's agent dir, and says so, when its auth.json is no longer the link", async () => {
 		const { auth, dir } = standIn();
 		let agentDir = "";
@@ -289,6 +313,68 @@ describe("credentials of a live comparison, on a scripted model", { timeout: 4 *
 			rmSync(dir, { recursive: true, force: true });
 			if (agentDir) rmSync(join(agentDir, ".."), { recursive: true, force: true });
 		}
+	});
+
+	/**
+	 * The comparison run with `--auth` on `models`, the scripted model's own and models of providers pi does not know,
+	 * whose check fails as a provider whose credentials are refused would. Returns what it said and its `--out` report.
+	 */
+	async function compare(models: string[], extra: string[] = []) {
+		const { auth, dir } = standIn();
+		const said: string[] = [];
+		vi.spyOn(console, "error").mockImplementation((line) => void said.push(String(line)));
+		vi.spyOn(console, "log").mockImplementation(() => {});
+		try {
+			const out = join(dir, "results.json");
+			await main(
+				[
+					...["--live", "--models", models.join(","), "--thinking", "off"],
+					...["--max-tokens", "1000000", "--max-dollars", "1"],
+					...["--arms", "stock", "--scenarios", "trivial", "--trials", "1", "--auth", auth, "--out", out],
+					...extra,
+				],
+				{ providerExtensions: [FAUX] },
+			);
+			return { said, report: JSON.parse(readFileSync(out, "utf8")) };
+		} finally {
+			vi.restoreAllMocks();
+			rmSync(dir, { recursive: true, force: true });
+		}
+	}
+
+	it("drops the models of a provider whose check fails, says why, and runs the others", async () => {
+		const { said, report } = await compare(["gone/model-1", "gone/model-2", "faux/faux-1"]);
+		expect(report.results.map((result: TrialResult) => result.model)).toEqual(["faux/faux-1"]);
+		const reason = expect.stringContaining('Model "gone/model-1" not found');
+		expect(report.skipped).toEqual([
+			{ model: "gone/model-1", reason },
+			{ model: "gone/model-2", reason },
+		]);
+		expect(said).toEqual(
+			expect.arrayContaining([
+				expect.stringMatching(/^Skipped gone\/model-1: .*not found/),
+				expect.stringMatching(/^Skipped gone\/model-2: .*not found/),
+			]),
+		);
+	});
+
+	it("with --strict-auth, stops at the first failed check, before any trial or later check", async () => {
+		const { said, report } = await compare(["gone/model-1", "faux/faux-1"], ["--strict-auth"]);
+		expect(report.results).toEqual([]);
+		expect(report.skipped).toEqual([{ model: "gone/model-1", reason: expect.stringContaining("not found") }]);
+		expect(said).toEqual([expect.stringMatching(/^Stopped: The call to gone\/model-1 failed: .*not found/s)]);
+	});
+
+	it("stops before any trial when every provider's check fails, naming each failure", async () => {
+		const { said, report } = await compare(["gone/model-1", "lost/model-2"]);
+		expect(report.results).toEqual([]);
+		expect(report.skipped).toEqual([
+			{ model: "gone/model-1", reason: expect.stringContaining('Model "gone/model-1" not found') },
+			{ model: "lost/model-2", reason: expect.stringContaining('Model "lost/model-2" not found') },
+		]);
+		const stopped = said.find((line) => line.startsWith("Stopped:"));
+		expect(stopped).toMatch(/The call to gone\/model-1 failed: .*not found/s);
+		expect(stopped).toMatch(/The call to lost\/model-2 failed: .*not found/s);
 	});
 });
 

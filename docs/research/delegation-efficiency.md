@@ -63,7 +63,7 @@ The live run spends real model calls. The budget is a control for this experimen
 node scripts/eval-delegation.ts --live --models <provider/id>[,<provider/id>...] --thinking <level> \
   --max-tokens <n> --max-dollars <n> [--trials 3] [--before <checkout> --after <checkout>] \
   [--arms stock,bluclawd,example] [--scenarios trivial,investigate,parallel,review,watch,slow] \
-  [--auth <auth.json> | --agent-dir <dir>] [--out results.json]
+  [--auth <auth.json> [--strict-auth] | --agent-dir <dir>] [--out results.json]
 ```
 
 - **Comparing two checkouts**: `--before` and `--after` make the arms `before,after` unless `--arms` says otherwise. For #337, `before` is a worktree of the work branch's merge-base with `origin/main`, with its dependencies installed, and `after` is the work branch:
@@ -81,6 +81,7 @@ node scripts/eval-delegation.ts --live --models <provider/id>[,<provider/id>...]
   - **From the environment**: the provider's API key variable.
   - **`--auth <auth.json>`**: each trial's fresh agent dir gets an `auth.json` that is a symlink to the one given, the user's. An OAuth refresh is then saved to that one file, not to a copy that the next trial would not see.
     - **Checked first**: before any trial, one small call is made per provider, through a fresh agent dir with the same link, using the first model listed for that provider. pi writes `auth.json` with `writeFileSync`, which follows a symlink, but this is checked rather than assumed. After each call the link must still be a symlink to the same file. Whether pi saved through it shows in the file's modification time only, and the run says so. The check never reads the file.
+    - **If a provider's call fails**: that provider's models are skipped, the run says which and why, and the other providers' models run. The `--out` report lists them under `skipped`, each with its reason. If every provider's call fails, the run stops before any trial and names each failure. With `--strict-auth`, the first failed call stops the run before any trial, and no later provider is checked.
     - **If the link was replaced**: when a call or a trial leaves `auth.json` as anything but that link, the run stops and keeps that agent dir, since what pi saved there may be the only copy of a refreshed token. Ask the user before going on. Do not fall back to their own agent dir.
   - **`--agent-dir <dir>`**: the dir is used as it is. Use a dedicated agent dir: every trial's sessions, Run records and worktrees are left in it. With the memory extension loaded, Memories saved in one trial would also reach the next trial's prompt.
 - **Without `--agent-dir`**: each trial gets a fresh temporary agent dir and its own daemon directory. Both are removed afterwards, and so is every process of the trial.
@@ -92,7 +93,7 @@ node scripts/eval-delegation.ts --live --models <provider/id>[,<provider/id>...]
   - When the budget cannot cover another trial, the run stops and reports what it has. Since a trial reserves a quarter, the run stops once less than a quarter of the budget is left, without ever passing it.
 - **Dialogs**: nobody answers them, so each one is cancelled, as with no user present. A Run's approval request therefore ends blocked.
 - **Failed launches**: if pi exits before it settles, as with an unknown model or a missing key, the trial records its stderr and the run stops.
-- **Not yet exercised**: none of the live path has run. That covers the `main` loop, the budget stop, the example arm end to end, and whether a provider key in the environment reaches the Runs' pis. Only the example extension's loading was checked, on faux: it registers its `subagent` tool under `-ne`. For `before` and `after`, three things were checked on faux and nothing else. Each arm sends its own checkout's tool text: a marker put into one checkout's `monitor` description reached that arm's requests only. The scripted `parallel` and `review` trials pass in the `after` arm too, with all four extensions loaded; this was a one-off run, not a committed test. And the credentials check makes its call through a linked stand-in `auth.json`.
+- **Not yet exercised**: none of the live path has run. That covers the `main` loop, the budget stop, the example arm end to end, and whether a provider key in the environment reaches the Runs' pis. Only the example extension's loading was checked, on faux: it registers its `subagent` tool under `-ne`. For `before` and `after`, three things were checked on faux and nothing else. Each arm sends its own checkout's tool text: a marker put into one checkout's `monitor` description reached that arm's requests only. The scripted `parallel` and `review` trials pass in the `after` arm too, with all four extensions loaded; this was a one-off run, not a committed test. And the credentials check makes its call through a linked stand-in `auth.json`. A failed check was exercised offline only, through `main` on faux, with a provider pi does not know standing in for refused credentials.
 
 ## Observed deterministic results
 
