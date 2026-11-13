@@ -122,7 +122,8 @@ export async function endLeftovers(base: string, groups: number[] = []): Promise
 			throw new Error(`still running ${readinessMs}ms into the teardown of ${base}:\n${survivors.stdout}`);
 		}
 		killAll(pids);
-		await new Promise((resolve) => setTimeout(resolve, 20));
+		// Each listing reads every process's environment, MBs in all: listed back to back, they load the tests still running.
+		await new Promise((resolve) => setTimeout(resolve, 100));
 	}
 }
 
