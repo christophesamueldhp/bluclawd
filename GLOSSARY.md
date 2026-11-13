@@ -48,7 +48,7 @@ _Avoid_: generation for the orchestrator's session being reloaded or replaced
 
 **Pane run**:
 A run whose generation runs as an interactive pi in a pane of agent view's private tmux server, which the user can open and type in. The kind belongs to the generation: it is decided again at each launch and Resume, so one run can be a pane run, then an RPC run, and is named after its latest generation.
-_Avoid_: run in a pane, legacy run (it has a pane too)
+_Avoid_: run in a pane, run in tmux (for a legacy run)
 
 **RPC run**:
 A run whose generation runs on pi's RPC with no pane, the fallback when its orchestrator is not in a pane or panes are turned off. Its model sees exactly what a pane run's would.
