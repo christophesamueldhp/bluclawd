@@ -47,9 +47,9 @@ function processes(real: RealPi, marker: string): string[] {
  * `wait`, failing with each run's status, error and model requests as they are then: a run that started out of turn
  * shows whether another's slot was lost or never held (#321).
  */
-async function showingRuns(real: RealPi, wait: () => Promise<unknown>): Promise<void> {
+async function showingRuns<T>(real: RealPi, wait: () => Promise<T>): Promise<T> {
 	try {
-		await wait();
+		return await wait();
 	} catch (error) {
 		const root = join(real.agentDir, "bluclawd", "subagents");
 		const runs = readdirSync(root).flatMap((session) =>
@@ -152,7 +152,13 @@ describe.skipIf(!hasTmux)("the daemon's queue of RPC runs", () => {
 		real.start(["--name", "beta", "--", "delegate"]);
 		await real.waitForRequests("beta", 2);
 		real.start(["--name", "alpha", "--", "delegate"]);
-		await showingRuns(real, () => waitFor(() => expect(started()).toEqual(["a1", "a2"])));
+		// Alpha's members claim their slots side by side, so their claims may reach the daemon in any order.
+		const holding = await showingRuns(real, () =>
+			waitFor(() => {
+				expect(started()).toHaveLength(2);
+				return started();
+			}),
+		);
 		writeFileSync(gate("resume"), "");
 		const beta = await real.waitForRequests("beta", 3);
 		expect(
@@ -162,13 +168,19 @@ describe.skipIf(!hasTmux)("the daemon's queue of RPC runs", () => {
 		).toMatch(/Resuming "kept" \(sub_[^)]+\) in the background/);
 		// Proves only that the Resume did not start within this while.
 		await new Promise((resolve) => setTimeout(resolve, 1000));
-		expect(started()).toEqual(["a1", "a2"]);
+		expect(started()).toEqual(holding);
 
-		// a3 was queued first, but alpha was served last.
-		writeFileSync(gate("a1"), "");
-		await showingRuns(real, () => waitFor(() => expect(started()).toEqual(["a1", "a2", "kept"])));
-		writeFileSync(gate("a2"), "");
-		await showingRuns(real, () => waitFor(() => expect(started()).toEqual(["a1", "a2", "a3", "kept"])));
+		// Alpha's next member was queued first, but alpha was served last.
+		writeFileSync(gate(holding[0]), "");
+		await showingRuns(real, () => waitFor(() => expect(started()).toEqual([...holding, "kept"])));
+		writeFileSync(gate(holding[1]), "");
+		// One more of alpha's members, whichever claimed first.
+		await showingRuns(real, () =>
+			waitFor(() => {
+				expect(started()).toHaveLength(4);
+				expect(started()).toEqual(expect.arrayContaining([...holding, "kept"]));
+			}),
+		);
 		for (const name of [...alpha, "kept"]) writeFileSync(gate(name), "");
 		await waitFor(() => {
 			for (const name of [...alpha, "kept"]) {
@@ -200,14 +212,17 @@ describe.skipIf(!hasTmux)("the daemon's queue of RPC runs", () => {
 		writeFileSync(join(real.cwd, "secret.txt"), "SECRET-S\n");
 		const gate = join(real.cwd, "hold.go");
 		const resume = join(real.cwd, "resume.go");
+		const queue = join(real.cwd, "queue.go");
+		// hold launched alone, so the slot is known to be its; the rest side by side once it has it.
 		real.script("main", [
 			{ tool: "subagent", args: { agent: "explorer", name: "first", task: "Look first." } },
+			launch("hold"),
 			{
 				calls: [
-					launch("hold"),
 					{ tool: "subagent", args: { agent: "auditor", name: "later", task: "Audit.", background: true } },
 					launch("denied"),
 				],
+				until: queue,
 			},
 			{ tool: "subagent_resume", args: { agent: "first", task: "Look again." }, until: resume },
 			...Array(6).fill({ text: "waiting" }),
@@ -218,6 +233,7 @@ describe.skipIf(!hasTmux)("the daemon's queue of RPC runs", () => {
 		real.script("denied", [{ text: "Ran." }]);
 		real.start(["--", "delegate"]);
 		await real.waitForRequests("hold", 1);
+		writeFileSync(queue, "");
 		const first = runDir(real.agentDir, "first");
 		await waitFor(() => expect(readJson(join(first, "record.json"))).toMatchObject({ status: "closed" }));
 		writeFileSync(resume, "");

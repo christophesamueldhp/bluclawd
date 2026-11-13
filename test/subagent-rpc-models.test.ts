@@ -212,12 +212,15 @@ describe.skipIf(!hasTmux)("an RPC run's model and thinking", () => {
 			JSON.stringify({ ...JSON.parse(readFileSync(settings, "utf8")), subagents: { panes: false, maxActive: 1 } }),
 		);
 		const release = join(real.cwd, "release");
+		const queue = join(real.cwd, "queue");
 		const background = (name: string) => ({
 			tool: "subagent",
 			args: { agent: "explorer", name, task: "List.", background: true },
 		});
+		// One at a time, so the one queued is known: launched side by side, either may claim the slot first.
 		real.script("main", [
-			{ calls: [background("holder"), background("queued")] },
+			background("holder"),
+			{ ...background("queued"), until: queue },
 			{ text: "launched" },
 			{ text: "switched" },
 			...Array(3).fill({ text: "noted" }),
@@ -225,14 +228,15 @@ describe.skipIf(!hasTmux)("an RPC run's model and thinking", () => {
 		real.script("holder", [{ text: "holder listed", until: release }]);
 		real.script("queued", [{ text: "queued listed" }]);
 		const pane = real.start(["--model", "faux/faux-2", "--thinking", "medium", "--", "delegate"]);
-		await real.waitForRequests("main", 2);
 		await real.waitForRequests("holder", 1);
+		writeFileSync(queue, "");
+		await real.waitForRequests("main", 3);
 
 		// The only slot is the holder's, so the other run waits with no model call while the orchestrator switches.
 		real.tmux.sendKeys(pane, ["/model faux/faux-1", "Enter"]);
 		await waitFor(() => expect(real.tmux.capture(pane, 50).join("\n")).toContain("Model: faux-1"));
 		real.tmux.sendKeys(pane, ["anything new?", "Enter"]);
-		expect(asked((await real.waitForRequests("main", 3)).slice(2))).toEqual(["faux/faux-1:off"]);
+		expect(asked((await real.waitForRequests("main", 4)).slice(3))).toEqual(["faux/faux-1:off"]);
 		expect(real.requests("queued")).toEqual([]);
 		writeFileSync(release, "");
 

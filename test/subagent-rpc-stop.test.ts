@@ -6,6 +6,7 @@ import {
 	conversation,
 	FAUX,
 	type FauxRequest,
+	type FauxStep,
 	hasTmux,
 	type RealPi,
 	startRealPi,
@@ -119,36 +120,46 @@ describe.skipIf(!hasTmux)("stopping an RPC run", () => {
 		const real = await startOrchestrator();
 		pi = real;
 		addSettings(real, { subagents: { panes: false, maxActive: 1 } });
-		const gate = join(real.cwd, "first.go");
-		real.script("main", [
-			{ calls: [launch("first"), launch("queued")] },
+		const names = ["first", "second"];
+		const gate = (name: string) => join(real.cwd, `${name}.go`);
+		const steps = (queued: string): FauxStep[] => [
+			{ calls: names.map((name) => launch(name)) },
 			{ text: "waiting" },
-			{ tool: "subagent_stop", args: { agent: "queued" } },
+			{ tool: "subagent_stop", args: { agent: queued } },
 			{ text: "stopped it" },
-			{ text: "read first's report" },
-		]);
-		real.script("first", [{ text: "First done.", until: gate }]);
-		real.script("queued", [{ text: "Never." }]);
+			{ text: "read the other's report" },
+		];
+		real.script("main", steps("unknown"));
+		for (const name of names) real.script(name, [{ text: `${name} done.`, until: gate(name) }]);
 		const pane = real.start(["--", "delegate"]);
-		await real.waitForRequests("first", 1);
+		// Launched side by side, their claims may reach the daemon in any order: the one queued is the one not started.
+		const [working] = await waitFor(() => {
+			const started = names.filter((name) => real.requests(name).length > 0);
+			expect(started).toHaveLength(1);
+			return started;
+		});
+		const [queued] = names.filter((name) => name !== working);
+		real.script("main", steps(queued));
 		await real.waitForRequests("main", 2);
-		expect(recordOf(real, "queued").status).toBe("starting");
+		expect(recordOf(real, queued).status).toBe("starting");
 
-		real.tmux.sendKeys(pane, ["stop queued", "Enter"]);
+		real.tmux.sendKeys(pane, [`stop ${queued}`, "Enter"]);
 		const main = await real.waitForRequests("main", 4);
-		expect(lastToolResult(main[3])).toMatch(/^Stopped "queued" \(sub_[\w-]+\): its work was cancelled/);
+		expect(lastToolResult(main[3])).toMatch(
+			new RegExp(`^Stopped "${queued}" \\(sub_[\\w-]+\\): its work was cancelled`),
+		);
 		// What to do after the call is said in its result.
 		expect(lastToolResult(main[3])).toContain("only subagent_resume continues it.");
-		expect(recordOf(real, "queued")).toMatchObject({ status: "cancelled", stopSource: "model" });
+		expect(recordOf(real, queued)).toMatchObject({ status: "cancelled", stopSource: "model" });
 
-		writeFileSync(gate, "");
+		for (const name of names) writeFileSync(gate(name), "");
 		await real.waitForRequests("main", 5);
-		await waitFor(() => expect(groupAlive(hostOf(real, "first").hostPid)).toBe(false));
+		await waitFor(() => expect(groupAlive(hostOf(real, working).hostPid)).toBe(false));
 		// Proves only that it does not start within this while, the slot free.
 		await new Promise((resolve) => setTimeout(resolve, 1000));
-		expect(existsSync(join(runDir(real.agentDir, "queued"), "rpc-host.json"))).toBe(false);
-		expect(real.requests("queued")).toHaveLength(0);
-		expect(recordOf(real, "queued").status).toBe("cancelled");
+		expect(existsSync(join(runDir(real.agentDir, queued), "rpc-host.json"))).toBe(false);
+		expect(real.requests(queued)).toHaveLength(0);
+		expect(recordOf(real, queued).status).toBe("cancelled");
 	});
 
 	it("keeps a stopped run's session and Report, lets no late message, Report or reload restart it, and resumes it only when asked", async () => {

@@ -153,28 +153,39 @@ describe.skipIf(!hasTmux)("an RPC run's Report", () => {
 			settings,
 			JSON.stringify({ ...JSON.parse(readFileSync(settings, "utf8")), subagents: { panes: false, maxActive: 1 } }),
 		);
-		const tasks = ["a", "b", "c"].map((name) => ({ agent: "explorer", name, task: `Look, ${name}.` }));
+		const names = ["a", "b", "c"];
+		const tasks = names.map((name) => ({ agent: "explorer", name, task: `Look, ${name}.` }));
+		const gate = (name: string) => join(real.cwd, `${name}.go`);
 		real.script("main", [{ tool: "subagent", args: { tasks } }]);
-		real.script("a", [{ text: "a found it." }]);
-		real.script("b", [{ text: "Never.", until: join(real.cwd, "never") }]);
-		real.script("c", [{ text: "Never started." }]);
+		for (const name of names) real.script(name, [{ text: `${name} found it.`, until: gate(name) }]);
 		const pane = real.start(["--", "delegate"]);
 		await real.waitForRequests("main", 1);
-		await started(real, "a");
-		await started(real, "b");
+		// Its members claim the one slot side by side, in any order: the first to start is let finish, the next works.
+		const startedRuns = () => names.filter((name) => real.requests(name).length > 0);
+		const [done] = await waitFor(() => {
+			expect(startedRuns()).toHaveLength(1);
+			return startedRuns();
+		});
+		writeFileSync(gate(done), "");
+		const [working] = await waitFor(() => {
+			expect(startedRuns()).toHaveLength(2);
+			return startedRuns().filter((name) => name !== done);
+		});
+		const [queued] = names.filter((name) => name !== done && name !== working);
+		const entry = (name: string) => `- tasks\\[${names.indexOf(name)}\\] "${name}" \\(sub_[\\w-]+\\)`;
 
 		// Before it settles, the manifest says what each member did: one settled, one working, one queued.
 		const manifest = await waitFor(() => {
-			const dir = join(dirname(runDir(real.agentDir, "a") ?? ""), "batches");
+			const dir = join(dirname(runDir(real.agentDir, done) ?? ""), "batches");
 			const [file] = readdirSync(dir);
 			const text = readFileSync(join(dir, file), "utf8");
-			expect(text).toMatch(/- tasks\[0\] "a" \(sub_[\w-]+\): completed/);
-			expect(text).toMatch(/- tasks\[1\] "b" \(sub_[\w-]+\): not settled yet: (queued|running)/);
-			expect(text).toMatch(/- tasks\[2\] "c" \(sub_[\w-]+\): not settled yet: queued/);
+			expect(text).toMatch(new RegExp(`${entry(done)}: completed`));
+			expect(text).toMatch(new RegExp(`${entry(working)}: not settled yet: (queued|running)`));
+			expect(text).toMatch(new RegExp(`${entry(queued)}: not settled yet: queued`));
 			return join(dir, file);
 		});
-		const aReport = join(runDir(real.agentDir, "a") ?? "", "reports", "1.md");
-		expect(readFileSync(manifest, "utf8")).toContain(`Report: ${aReport}`);
+		const doneReport = join(runDir(real.agentDir, done) ?? "", "reports", "1.md");
+		expect(readFileSync(manifest, "utf8")).toContain(`Report: ${doneReport}`);
 
 		// Cancelled, the call still gives what settled, its Report with it, and where the rest will be.
 		real.tmux.sendKeys(pane, ["Escape"]);
@@ -190,15 +201,19 @@ describe.skipIf(!hasTmux)("an RPC run's Report", () => {
 		expect(cancelled).toMatch(/^Cancelling batch batch_\w+: every member was asked to stop\./);
 		expect(cancelled).toContain(`Every member's status, full Report and transcript: ${manifest}`);
 		expect(cancelled).toMatch(
-			/### "a" \(sub_[\w-]+\): completed\nChecks: none ran: it had no tool that runs commands\.\na found it\./,
+			new RegExp(
+				`### "${done}" \\(sub_[\\w-]+\\): completed\\nChecks: none ran: it had no tool that runs commands\\.\\n${done} found it\\.`,
+			),
 		);
-		expect(cancelled).toMatch(/- "b" \(sub_[\w-]+\): (not settled yet: stopping|cancelled)/);
-		expect(cancelled).toMatch(/- "c" \(sub_[\w-]+\): (not settled yet: (queued|stopping)|cancelled)/);
+		expect(cancelled).toMatch(new RegExp(`- "${working}" \\(sub_[\\w-]+\\): (not settled yet: stopping|cancelled)`));
+		expect(cancelled).toMatch(
+			new RegExp(`- "${queued}" \\(sub_[\\w-]+\\): (not settled yet: (queued|stopping)|cancelled)`),
+		);
 		// Every member's final status, for the orchestrator to read.
 		const read = toolResults(main[2]).at(-1) ?? "";
-		expect(read).toMatch(/- tasks\[1\] "b" \(sub_[\w-]+\): cancelled/);
-		expect(read).toMatch(/- tasks\[2\] "c" \(sub_[\w-]+\): cancelled/);
-		expect(real.requests("c")).toEqual([]);
+		expect(read).toMatch(new RegExp(`${entry(working)}: cancelled`));
+		expect(read).toMatch(new RegExp(`${entry(queued)}: cancelled`));
+		expect(real.requests(queued)).toEqual([]);
 	});
 
 	it("counts its session once, apart from the orchestrator's own usage, however many generations and Reports", async () => {

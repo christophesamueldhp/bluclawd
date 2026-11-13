@@ -308,30 +308,38 @@ describe.skipIf(!hasTmux)("a tasks batch of RPC runs", () => {
 		const real = await startOrchestrator();
 		pi = real;
 		addSettings(real, { subagents: { panes: false, maxActive: 1 } });
+		const names = ["m0", "m1", "m2"];
 		real.script("main", [
 			{
 				tool: "subagent",
-				args: { tasks: ["act", "q1", "q2"].map((name) => ({ agent: "explorer", name, task: `Look, ${name}.` })) },
+				args: { tasks: names.map((name) => ({ agent: "explorer", name, task: `Look, ${name}.` })) },
 			},
 		]);
-		real.script("act", [{ text: "Never.", until: join(real.cwd, "never") }]);
-		for (const name of ["q1", "q2"]) real.script(name, [{ text: "Never started." }]);
+		for (const name of names) real.script(name, [{ text: "Never.", until: join(real.cwd, "never") }]);
 		const pane = real.start(["--", "delegate"]);
 		await real.waitForRequests("main", 1);
-		await real.waitForRequests("act", 1);
-		expect([recordOf(real, "q1").status, recordOf(real, "q2").status]).toEqual(["starting", "starting"]);
+		// Its members claim their slots side by side, so their claims may reach the daemon in any order.
+		const [working] = await waitFor(() => {
+			const started = names.filter((name) => real.requests(name).length > 0);
+			expect(started).toHaveLength(1);
+			return started;
+		});
+		const queued = names.filter((name) => name !== working);
+		expect(queued.map((name) => recordOf(real, name).status)).toEqual(["starting", "starting"]);
 
 		real.tmux.sendKeys(pane, ["Escape"]);
 		await waitFor(() => {
-			for (const name of ["act", "q1", "q2"]) {
+			for (const name of names) {
 				expect(recordOf(real, name)).toMatchObject({ status: "cancelled", stopSource: "caller" });
 			}
 		});
 		const manifest = await waitFor(() => batchManifests(real));
-		expect(manifest).toMatch(/- tasks\[0\] "act" \(sub_[\w-]+\): cancelled/);
+		expect(manifest).toMatch(
+			new RegExp(`- tasks\\[${names.indexOf(working)}\\] "${working}" \\(sub_[\\w-]+\\): cancelled`),
+		);
 		// Proves only that neither starts within this while, the slot free.
 		await new Promise((resolve) => setTimeout(resolve, 1000));
-		for (const name of ["q1", "q2"]) {
+		for (const name of queued) {
 			expect(real.requests(name)).toEqual([]);
 			expect(existsSync(join(runDir(real, name), "rpc-host.json"))).toBe(false);
 		}
@@ -342,7 +350,8 @@ describe.skipIf(!hasTmux)("a tasks batch of RPC runs", () => {
 		pi = real;
 		addSettings(real, { subagents: { panes: false, maxActive: 1 } });
 		const names = ["m0", "m1", "m2", "m3"];
-		const steps = (batch: string): FauxStep[] => [
+		const gate = (name: string) => join(real.cwd, `${name}.go`);
+		const steps = (batch: string, stopped: string): FauxStep[] => [
 			{
 				tool: "subagent",
 				args: {
@@ -351,15 +360,14 @@ describe.skipIf(!hasTmux)("a tasks batch of RPC runs", () => {
 				},
 			},
 			{ text: "waiting" },
-			{ tool: "subagent_stop", args: { agent: "m2" } },
-			{ text: "stopped m2" },
+			{ tool: "subagent_stop", args: { agent: stopped } },
+			{ text: "stopped it" },
 			{ tool: "subagent_stop", args: { agent: batch } },
 			{ text: "stopped the batch" },
 			{ text: "read the batch" },
 		];
-		real.script("main", steps("unknown"));
-		real.script("m0", [{ text: "m0 found it." }]);
-		for (const name of ["m1", "m2", "m3"]) real.script(name, [{ text: "Never.", until: join(real.cwd, "never") }]);
+		real.script("main", steps("unknown", "unknown"));
+		for (const name of names) real.script(name, [{ text: `${name} found it.`, until: gate(name) }]);
 		const pane = real.start(["--", "delegate"]);
 		const [, launched] = await real.waitForRequests("main", 2);
 		const [result] = toolResults(launched);
@@ -376,33 +384,48 @@ describe.skipIf(!hasTmux)("a tasks batch of RPC runs", () => {
 			].join("\n"),
 		);
 		const batch = /batch_\w+/.exec(result)?.[0] ?? "";
-		real.script("main", steps(batch));
 
-		// One slot: m1 starts once m0 is done, each start waited for on its own.
-		await waitFor(() => expect(recordOf(real, "m0").status).toBe("closed"));
-		await real.waitForRequests("m1", 1);
-		// m0's Report waits for its batch's: it wakes nobody on its own.
+		// One slot, which its members claim side by side, in any order: the first to start is let finish, and the next
+		// starts once it is done, each start waited for on its own.
+		const started = () => names.filter((name) => real.requests(name).length > 0);
+		const [done] = await waitFor(() => {
+			expect(started()).toHaveLength(1);
+			return started();
+		});
+		writeFileSync(gate(done), "");
+		await waitFor(() => expect(recordOf(real, done).status).toBe("closed"));
+		const [working] = await waitFor(() => {
+			expect(started()).toHaveLength(2);
+			return started().filter((name) => name !== done);
+		});
+		const [stopped, waiting] = names.filter((name) => name !== done && name !== working);
+		real.script("main", steps(batch, stopped));
+		// The first one's Report waits for its batch's: it wakes nobody on its own.
 		await new Promise((resolve) => setTimeout(resolve, 500));
 		expect(real.requests("main")).toHaveLength(2);
 
-		real.tmux.sendKeys(pane, ["stop m2", "Enter"]);
+		real.tmux.sendKeys(pane, [`stop ${stopped}`, "Enter"]);
 		await real.waitForRequests("main", 4);
-		expect(recordOf(real, "m2")).toMatchObject({ status: "cancelled", stopReason: "Stopped by its orchestrator" });
-		expect([recordOf(real, "m1").status, recordOf(real, "m3").status]).toEqual(["running", "starting"]);
+		expect(recordOf(real, stopped)).toMatchObject({ status: "cancelled", stopReason: "Stopped by its orchestrator" });
+		expect([recordOf(real, working).status, recordOf(real, waiting).status]).toEqual(["running", "starting"]);
 
 		real.tmux.sendKeys(pane, ["stop the batch", "Enter"]);
 		const main = await real.waitForRequests("main", 7);
-		expect(toolResults(main[5]).at(-1)).toMatch(/Stopped "m1" \(sub_[\w-]+\): its work was cancelled/);
+		expect(toolResults(main[5]).at(-1)).toMatch(
+			new RegExp(`Stopped "${working}" \\(sub_[\\w-]+\\): its work was cancelled`),
+		);
 		const aggregate = conversation(main[6]).at(-1)?.text ?? "";
 		expect(aggregate).toMatch(new RegExp(`Batch ${batch}: 4 tasks, 1 completed, 0 failed, 3 cancelled\\.`));
-		expect(aggregate).toMatch(/- "m2" \(sub_[\w-]+\): cancelled: Stopped by its orchestrator/);
-		for (const name of ["m1", "m3"]) {
+		expect(aggregate).toMatch(new RegExp(`- "${stopped}" \\(sub_[\\w-]+\\): cancelled: Stopped by its orchestrator`));
+		for (const name of [working, waiting]) {
 			expect(aggregate).toMatch(
 				new RegExp(`- "${name}" \\(sub_[\\w-]+\\): cancelled: Its batch ${batch} was stopped`),
 			);
 		}
-		expect(aggregate).toMatch(/### "m0" \(sub_[\w-]+\): completed\nChecks: [^\n]+\nm0 found it\./);
-		for (const name of ["m2", "m3"]) {
+		expect(aggregate).toMatch(
+			new RegExp(`### "${done}" \\(sub_[\\w-]+\\): completed\\nChecks: [^\\n]+\\n${done} found it\\.`),
+		);
+		for (const name of [stopped, waiting]) {
 			expect(real.requests(name)).toEqual([]);
 			expect(existsSync(join(runDir(real, name), "rpc-host.json"))).toBe(false);
 		}
