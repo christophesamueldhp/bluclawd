@@ -632,7 +632,8 @@ A file rule also blocks a bash command that names a matching path —
 it: an output redirect target is never read, so a `Read` rule lets `echo x >> .env`
 and `echo x > .env` through, a `Write` rule only `>>`, and an `Edit` rule neither
 (`echo x > .git/config` is an `Edit` rule's). `Read(**/.env*)` + `Write(**/.env*)`
-keeps `.env` unread and whole while `>>` still appends to it. `powershell` is
+keeps `.env` unread and whole while `>>` still appends to it (except under the
+Linux [sandbox](#sandbox), which refuses it). `powershell` is
 judged as bash, and a `grep` over a folder drops the lines it found in a denied
 file. Deny rules
 match text, not behavior: a command that builds the path or name at run time
