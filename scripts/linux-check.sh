@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Runs the tests on Linux: `vitest run` in an Ubuntu 24.04 container, with the distribution's tmux and the
-# host's Node, as an unprivileged user given none of the host's environment. Arguments go to vitest, e.g.
+# host's Node, as an unprivileged user given none of the host's environment. Arguments go to vitest, with
+# paths from the repo root, e.g.
 #   scripts/linux-check.sh test/subagent-pane-runs.test.ts -t "works in a pane"
 # The tree tested is the git index: unstaged changes are left out, so `git add` what the run should see.
 # Exits with vitest's status. A tmux send-keys that hangs (#397) blocks vitest past any test timeout,
@@ -9,6 +10,7 @@
 # and tmux versions and the recipe below are unchanged; old ones stay behind as bluclawd-linux-check:<key>.
 # NODE_VERSION=v26.8.1 picks another Node than the host's.
 set -euo pipefail
+cd "$(git rev-parse --show-toplevel)"
 node_version=${NODE_VERSION:-$(node -v)}
 tmux_version=3.4
 dockerfile='
@@ -65,7 +67,7 @@ fi
 # and masked paths deny; lifting those three is enough, without --privileged's capabilities and devices.
 docker run -d --rm --init --user root --name "$name" \
 	--security-opt seccomp=unconfined --security-opt apparmor=unconfined --security-opt systempaths=unconfined \
-	"$image" sleep infinity >/dev/null
+	"$image" sleep 86400 >/dev/null
 git archive "$tree" | docker exec -i --user dev "$name" tar -x -C /work/bluclawd
 docker exec --user root "$name" bash -c "$watchdog" &
 # In the background, so a signal to this script runs its traps at once rather than after vitest ends.

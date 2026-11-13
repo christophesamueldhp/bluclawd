@@ -22,4 +22,4 @@ To reproduce a test that fails only under load, run `scripts/stress-test.sh <tes
 
 ### Linux
 
-To run the tests on Linux, run `scripts/linux-check.sh [<test file> [-t <name>]]`: vitest in an Ubuntu 24.04 container, on the tree as staged in the git index. Run it by hand before a release and when a change touches tmux, the sandbox or pane runs.
+To run the tests on Linux, run `scripts/linux-check.sh [<test file> [-t <name>]]`: vitest in an Ubuntu 24.04 container, on the tree as staged in the git index. It runs the tests only, not lint or typecheck. Run it by hand before a release and when a change touches tmux, the sandbox or pane runs.
