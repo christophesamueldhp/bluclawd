@@ -15,6 +15,8 @@ pi install /path/to/this/repo                                     # this layer
 pi                                                                 # run it
 ```
 
+Git 2.40 or newer is needed (`subagent_integrate` merges with `git merge-tree --merge-base`); tested with 2.43 and 2.54.
+
 For a Git installation, use `pi install git:github.com/christophesamueldhp/bluclawd`;
 pi installs the package's production dependencies automatically. To update this package, use
 `pi update git:github.com/christophesamueldhp/bluclawd`. Choose host upgrades separately;

@@ -1,8 +1,18 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	readdirSync,
+	readFileSync,
+	rmSync,
+	symlinkSync,
+	writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import { readinessMs } from "./helpers/heartbeats.ts";
 import { conversation, FAUX, type FauxRequest, hasTmux, type RealPi, startRealPi } from "./helpers/real-pi.ts";
 import { waitFor } from "./helpers/wait-for.ts";
@@ -470,6 +480,44 @@ describe.skipIf(!hasTmux)("integrating an RPC run's changes", () => {
 		expect(applied).toMatch(/^Integration: applied A n\.txt to /m);
 		expect(applied).toMatch(/^Validation: `touch checked` did not run: your bash tool is not active/m);
 		expect(existsSync(join(repo, "checked"))).toBe(false);
+	});
+
+	it("reports that Git could not merge when its merge step gives no tree, and applies nothing", async () => {
+		const real = await startOrchestrator();
+		pi = real;
+		const repo = real.cwd;
+		repository(repo, { "a.txt": SEVEN });
+		// A git whose merge step exits 1 and prints no tree, as git before 2.45 does when given trees. Outside the
+		// test's directory: a PATH that names it would make the teardown's `ps` take itself for a leftover.
+		const bin = mkdtempSync(join(tmpdir(), "bc-git-"));
+		onTestFinished(() => rmSync(bin, { recursive: true, force: true }));
+		const realGit = spawnSync("sh", ["-c", "command -v git"], { encoding: "utf8" }).stdout.trim();
+		writeFileSync(
+			join(bin, "git"),
+			`#!/bin/sh\nfor arg; do [ "$arg" = merge-tree ] && { echo 'error: no merge here' >&2; exit 1; }; done\nexec '${realGit}' "$@"\n`,
+			{ mode: 0o755 },
+		);
+		vi.stubEnv("PATH", `${bin}:${process.env.PATH}`);
+		const before = gitState(repo);
+		real.script("main", [
+			{ tool: "subagent", args: { agent: writer, name: "w", task: "Edit." } },
+			{ tool: "subagent_integrate", args: { agent: "w" } },
+			{ text: "done" },
+		]);
+		real.script("w", [
+			{ tool: "edit", args: { path: "a.txt", edits: [{ oldText: "4\n", newText: "4 run\n" }] } },
+			{ tool: "write", args: { path: "n.txt", content: "new\n" } },
+			{ text: "Edited." },
+		]);
+		real.start(["--", "delegate"]);
+
+		const main = await real.waitForRequests("main", 3);
+		expect(toolResults(main[2])[1]).toBe(
+			"Not integrated: Git could not merge (error: no merge here). Nothing more was applied.",
+		);
+		expect(read(repo, "a.txt")).toBe(SEVEN);
+		expect(existsSync(join(repo, "n.txt"))).toBe(false);
+		expect(gitState(repo)).toBe(before);
 	});
 
 	it.skipIf(process.platform !== "darwin")(

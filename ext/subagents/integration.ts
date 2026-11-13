@@ -529,19 +529,31 @@ async function mergeTrees(
 	ours: string,
 	theirs: string,
 ): Promise<{ tree: string; conflicts: Map<string, string[]> }> {
-	const args = ["merge-tree", "--write-tree", "-z", "--name-only", `--merge-base=${base}`, ours, theirs];
 	const env = gitEnv({ GIT_DIR: gitDir });
+	// Git before 2.45 merges only commits: each tree goes in one, in the object store only.
+	const commit = (tree: string) => gitSync(source, ["commit-tree", "--no-gpg-sign", "-m", "Integration", tree], env);
+	const args = [
+		"merge-tree",
+		"--write-tree",
+		"-z",
+		"--name-only",
+		`--merge-base=${commit(base)}`,
+		commit(ours),
+		commit(theirs),
+	];
 	const run = spawnSync("git", ["-c", "core.hooksPath=/dev/null", ...args], {
 		cwd: source,
 		env,
 		encoding: "utf8",
 		maxBuffer: 64 * 1024 * 1024,
 	});
-	if (run.status !== 0 && run.status !== 1) {
-		throw new Error(`Git could not merge (${(run.stderr || run.error?.message || "").trim().split("\n")[0]})`);
-	}
+	const failed = () =>
+		new Error(`Git could not merge (${(run.stderr || run.error?.message || "").trim().split("\n")[0]})`);
+	if (run.status !== 0 && run.status !== 1) throw failed();
 	const [head, messages = ""] = run.stdout.split("\0\0");
 	const [tree, ...conflicted] = head.split("\0").filter(Boolean);
+	// Exit 1 means conflicts only once a tree is written: git exits 1 when it refuses to merge too.
+	if (!/^[0-9a-f]{40,64}$/.test(tree ?? "")) throw failed();
 	const conflicts = new Map<string, string[]>(conflicted.map((path) => [path, []]));
 	// Each message: how many paths it is about, those paths, its type, and its text.
 	const fields = messages.split("\0");
