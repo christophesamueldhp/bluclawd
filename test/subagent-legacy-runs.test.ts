@@ -28,6 +28,7 @@ import {
 	startRealPi,
 	toolNames,
 } from "./helpers/real-pi.ts";
+import { DOT } from "./helpers/tool-render.ts";
 import { waitFor } from "./helpers/wait-for.ts";
 
 /** The last tool result the model was given. */
@@ -197,7 +198,7 @@ describe.skipIf(!hasTmux)("runs in tmux from before runs ran on pi's RPC", () =>
 			await waitFor(() => expect(real.shown()).toBe(orchestrator));
 			real.tmux.sendKeys(orchestrator, ["/tasks", "Enter"]);
 			const screen = () => real.tmux.capture(orchestrator, 80).join("\n");
-			await waitFor(() => expect(screen()).toMatch(/❯ +⏺ explorer: Look around\..*idle/));
+			await waitFor(() => expect(screen()).toMatch(new RegExp(`❯ +${DOT} explorer: Look around\\..*idle`)));
 			real.tmux.sendKeys(orchestrator, ["Enter"]);
 			await waitFor(() => expect(real.shown()).toBe(legacy.pane));
 		},
