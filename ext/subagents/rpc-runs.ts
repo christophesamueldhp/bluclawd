@@ -42,6 +42,7 @@ import {
 	readPaneChildState,
 	readRpcHostState,
 	runGroupAlive,
+	STOP_GRACE_MS,
 	stopRpcHost,
 } from "./rpc-host.ts";
 import {
@@ -378,8 +379,6 @@ export const REPORT_INSTRUCTIONS = [
 const MAX_REASON_BYTES = 1024;
 /** How often the orchestrator looks at its run's host. */
 const HOST_CHECK_MS = 100;
-/** How long a run's host and its pi may take to end, once stopped or done, before what is left of them is killed. */
-const STOP_GRACE_MS = 10_000;
 /** How long what was killed of a run may take to be gone, before its end is reported as unconfirmed. */
 const KILL_WAIT_MS = 5000;
 
@@ -548,6 +547,16 @@ export async function executeRpcRun(
 		const untaken = sealRunInbox(launch.runDir, record.generation).length;
 		return untaken ? `; ${untakenText(untaken, launch.runDir, record.generation)}.` : "";
 	};
+	/** What a generation that did not start for `reason` ends with; a background run's orchestrator is told why. */
+	const didNotStart = (reason: string): SubagentRunOutcome => {
+		if (record.deliveryMode === "background" && !deps.reports.awaited(record.runId)) deps.notStarted(reason);
+		// A Resume that did not start leaves its session as it was, to be resumed again.
+		return {
+			status: launch.sessionFile ? "closed" : "failed",
+			summaryText: "",
+			errorMessage: `It did not start: ${reason}${untakenNote()}`,
+		};
+	};
 	/** What finds the processes its commands start, for a run with a shell: none may outlive its generation. */
 	let contained: RunContainment | undefined;
 	// Built before anything is awaited, so within its Admission: the run starts as admitted, however long it queues.
@@ -574,14 +583,7 @@ export async function executeRpcRun(
 	if (launch.tools.includes("bash")) {
 		const ready = await prepareRunContainment();
 		if (!ready.ok) {
-			const reason = `its shell cannot be contained (${ready.reason})`;
-			if (record.deliveryMode === "background") deps.notStarted(reason);
-			// A Resume that did not start leaves its session as it was, to be resumed again.
-			return {
-				status: launch.sessionFile ? "closed" : "failed",
-				summaryText: "",
-				errorMessage: `It did not start: ${reason}${untakenNote()}`,
-			};
+			return didNotStart(`its shell cannot be contained (${ready.reason})`);
 		}
 		contained = { helper: ready.helper, marker: runMarker(record.runId) };
 	}
@@ -598,9 +600,9 @@ export async function executeRpcRun(
 		try {
 			await materializeWorktree(workspace);
 		} catch (error) {
-			const reason = `its worktree could not be made (${error instanceof Error ? error.message : String(error)})`;
-			if (record.deliveryMode === "background") deps.notStarted(reason);
-			return { status: "failed", summaryText: "", errorMessage: `It did not start: ${reason}${untakenNote()}` };
+			return didNotStart(
+				`its worktree could not be made (${error instanceof Error ? error.message : String(error)})`,
+			);
 		}
 	}
 	// Its session's entries from here on are this generation's: an earlier one ended before it was claimed. A generation
@@ -623,13 +625,7 @@ export async function executeRpcRun(
 	}
 	if (!("hostPid" in turn)) {
 		const reason = "refused" in turn ? turn.refused : `the daemon could not start it (${turn.error})`;
-		if (record.deliveryMode === "background" && !deps.reports.awaited(record.runId)) deps.notStarted(reason);
-		// A Resume that did not start leaves its session as it was, to be resumed again.
-		return {
-			status: launch.sessionFile ? "closed" : "failed",
-			summaryText: "",
-			errorMessage: `It did not start: ${reason}${untakenNote()}`,
-		};
+		return didNotStart(reason);
 	}
 	controller.markRunning();
 	/** The generation's host: the one that took it, which a host launched again leaves it to, or the one launched. */
@@ -703,6 +699,9 @@ export async function executeRpcRun(
 	const terminated = gone ? !contained || (await endRunProcesses(contained)) : await endHostGroup(hostPid, contained);
 	if (deps.handOff.aborted) return new Promise<never>(() => {});
 	if (terminated && contained) rmSync(runShellTmp(launch.agentDir, record.runId), { recursive: true, force: true });
+	// Its host gave up before it started a pi: the run did not start, as when the daemon could not start its host.
+	const notStarted = terminated ? ownState()?.notStarted : undefined;
+	if (notStarted) return didNotStart(notStarted);
 	// Once nothing of it runs, a worktree it left as it was made goes, a Resume making it again; any other stays.
 	if (workspace && terminated && !launch.keepWorktree) {
 		await releaseUnchangedWorktree(workspace, {

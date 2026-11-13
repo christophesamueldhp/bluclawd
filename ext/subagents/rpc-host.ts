@@ -78,6 +78,8 @@ export interface RpcHostState {
 	exit?: { code: number | null; signal: string | null };
 	/** Set when a Resume opened for the user to type in ended with nothing typed: there is no Report to deliver. */
 	idle?: true;
+	/** Why its pi was never started: a host in a pane could not take the run's environment from the daemon. */
+	notStarted?: string;
 }
 
 /** What a run's pi in a pane stores of its work (pane-child.ts), which its host takes into its state once it exits. */
@@ -85,6 +87,9 @@ export type PaneChildState = Pick<RpcHostState, "sessionFile" | "sessionId" | "o
 	/** Whether it waits on a blocking dialog of its own, an approval among them, which the user answers in its pane. */
 	awaiting?: boolean;
 };
+
+/** Why a run in a pane stopped once its pane was ended from outside its pi. */
+export const PANE_ENDED = "its pane was ended";
 
 export const paneChildStatePath = (runDir: string) => join(runDir, "pane-child.json");
 
@@ -102,6 +107,8 @@ const statePath = (runDir: string) => join(runDir, "rpc-host.json");
 const hostClaimPath = (runDir: string, generation: number) => join(runDir, "hosts", String(generation));
 /** Child stderr: pi reports a failed start only there. */
 const stderrPath = (runDir: string) => join(runDir, "rpc-child.stderr");
+/** How long a run's host and its pi may take to end, once stopped or done, before what is left of them is killed. */
+export const STOP_GRACE_MS = 10_000;
 /** How often the host looks for messages posted to the run. */
 const INBOX_CHECK_MS = 50;
 /** How long the orchestrator may go without noting it sees an approval the run asks for: past it, no one is there. */
@@ -573,14 +580,38 @@ async function paneHost(
 ): Promise<void> {
 	// Ctrl+C reaches the pane's process group while its pi does not hold the terminal: it is not the host's to act on.
 	process.on("SIGINT", () => {});
+	// Its pane ended from outside, as by tmux kill-session, hangs its process group up: the host stays to store how its
+	// pi ended. The hang-up may reach the host alone, its pane's session leader, so its pi is passed it; a pi that does
+	// not end on it in time is killed, since nothing else ends it while the host waits for it.
+	let paneEnded = false;
+	let running: ChildProcess | undefined;
+	process.on("SIGHUP", () => {
+		paneEnded = true;
+		running?.kill("SIGHUP");
+		setTimeout(() => running?.kill("SIGKILL"), STOP_GRACE_MS).unref();
+	});
 	// What an earlier generation's pi stored is not this one's.
 	rmSync(paneChildStatePath(runDir), { force: true });
-	const launched = await new OrchestratorClient().takeRunEnv(spec.pane.session);
+	let launched: Record<string, string>;
+	try {
+		launched = await new OrchestratorClient().takeRunEnv(spec.pane.session);
+	} catch (error) {
+		// The daemon holds the environment in memory only: one started since it launched this host has none to give.
+		state.notStarted = `the daemon restarted, or could not be reached, between launching the run's host and that host taking the run's environment (${error instanceof Error ? error.message : String(error)})`;
+		save();
+		return;
+	}
+	if (paneEnded) {
+		state.notStarted = `${PANE_ENDED} before its pi started`;
+		save();
+		return;
+	}
 	const child = spawn(process.execPath, [piEntry(), ...spec.args], {
 		cwd: spec.cwd,
 		env: paneChildEnv(launched, process.env, runDir, spec.pane, spec.agentDir),
 		stdio: "inherit",
 	});
+	running = child;
 	const exited = new Promise<{ code: number | null; signal: string | null }>((resolve) => {
 		child.on("exit", (code, signal) => resolve({ code, signal }));
 		child.on("error", (error) => {
@@ -604,7 +635,12 @@ async function paneHost(
 		sealRunInbox(runDir, spec.generation);
 		state.outcome = stopped
 			? { status: "stopped", error: "its work was stopped" }
-			: { status: "failed", error: `its pi exited before its work settled (${exit.signal ?? `code ${exit.code}`})` };
+			: paneEnded
+				? { status: "stopped", error: PANE_ENDED }
+				: {
+						status: "failed",
+						error: `its pi exited before its work settled (${exit.signal ?? `code ${exit.code}`})`,
+					};
 		state.reportSeq = storeRunReport(runDir, {
 			text: "",
 			outcome: state.outcome,
