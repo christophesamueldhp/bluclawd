@@ -482,6 +482,8 @@ interface ResponseMeta {
 	 */
 	version?: string;
 	buildId?: string;
+	/** The answering daemon's process, so a client tells it from a daemon started since on the same socket. */
+	pid?: number;
 }
 
 interface ResponseBase extends ResponseMeta {

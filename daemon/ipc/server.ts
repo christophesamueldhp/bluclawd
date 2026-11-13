@@ -12,9 +12,9 @@ import {
 
 export type IpcRequestHandler = (request: ServerRequest) => Promise<ServerResponse> | ServerResponse;
 
-/** Stamp the daemon's version/buildId onto every reply. */
+/** Stamp the daemon's version/buildId/pid onto every reply. */
 function withDaemonMeta<T extends ServerResponse>(response: T): T {
-	return { ...response, version: VERSION, buildId: BUILD_ID };
+	return { ...response, version: VERSION, buildId: BUILD_ID, pid: process.pid };
 }
 
 export async function startIpcServer(handler: IpcRequestHandler): Promise<Server> {
