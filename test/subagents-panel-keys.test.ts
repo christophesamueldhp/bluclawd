@@ -324,7 +324,8 @@ describe("x on a row", () => {
 		const runId = t.session.messages.flatMap((m) => JSON.stringify(m).match(/sub_[0-9a-f-]{36}/) ?? [])[0];
 		await waitFor(() => readRecord(t, runId)?.status === "cancelled");
 		expect(readRecord(t, runId)).toMatchObject({ status: "cancelled", stopSource: "user" });
-		expect(t.runs[0]).toMatchObject({ name: "scout", ended: true });
+		// The fake host's exit event comes once this process reaps it, which may be after the run counted it ended.
+		await waitFor(() => expect(t.runs[0]).toMatchObject({ name: "scout", ended: true }));
 
 		await new Promise((resolve) => setTimeout(resolve, 80));
 		expect(parentTurns).toBe(2);

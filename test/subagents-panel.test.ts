@@ -185,7 +185,8 @@ describe("the run panel below the status line", () => {
 
 		await waitFor(() => !row(tui!, "scout"));
 		expect(tui.status(STATUS_KEYS.subagents)).toContain("/tasks to see subagents");
-		expect(tui.runs[0]).toMatchObject({ name: "scout", ended: true });
+		// The fake host's exit event comes once this process reaps it, which may be after the run counted it ended.
+		await waitFor(() => expect(tui!.runs[0]).toMatchObject({ name: "scout", ended: true }));
 		// For 30 s, as Claude Code's footer does.
 		tui.advance(31_000);
 		await waitFor(() => tui!.status(STATUS_KEYS.subagents) === undefined);
