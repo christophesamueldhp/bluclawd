@@ -12,6 +12,8 @@ export default defineConfig({
 		environment: "node",
 		// A poll waits up to readinessMs (test/helpers/wait-for.ts), so a test outlasts it and the poll reports first.
 		testTimeout: 2 * readinessMs,
+		// A real pi's teardown sweeps its leftovers for up to readinessMs (test/helpers/real-pi.ts): cut short, it leaves them.
+		hookTimeout: 2 * readinessMs,
 		expect: { poll: { timeout: readinessMs } },
 		env: { PI_OFFLINE: "1" },
 		unstubEnvs: true,

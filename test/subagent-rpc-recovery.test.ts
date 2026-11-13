@@ -217,29 +217,35 @@ describe.skipIf(!hasTmux)("recovering RPC runs", () => {
 	);
 
 	/**
-	 * A batch of two with one slot: "first" works, "second" waits its turn. Resolves once the orchestrator crashed with
-	 * both so, and "first" was let go on to finish while it was gone.
+	 * A batch of two with one slot: one member works, the other waits its turn. Which one works is the daemon's: the
+	 * members claim their slots side by side, so their claims may reach it in any order. Resolves once the orchestrator
+	 * crashed with both so, and the working one was let go on to finish while it was gone.
 	 */
 	async function crashWithQueuedMember(real: RealPi) {
 		addSettings(real, { subagents: { panes: false, maxActive: 1 } });
-		const gate = join(real.cwd, "first.go");
-		real.script("main", [batch("first", "second"), { text: "waiting" }, { text: "noted" }, { text: "noted again" }]);
-		real.script("first", [{ text: "First done.", until: gate }]);
-		real.script("second", [{ text: "Second done." }]);
+		const names = ["first", "second"];
+		const gate = (name: string) => join(real.cwd, `${name}.go`);
+		real.script("main", [batch(...names), { text: "waiting" }, { text: "noted" }, { text: "noted again" }]);
+		for (const name of names) real.script(name, [{ text: `${name} done.`, until: gate(name) }]);
 		const pane = real.start(["--", "delegate"]);
-		await real.waitForRequests("first", 1);
+		const [working] = await waitFor(() => {
+			const started = names.filter((name) => real.requests(name).length > 0);
+			expect(started).toHaveLength(1);
+			return started;
+		});
+		const [queued] = names.filter((name) => name !== working);
 		await real.waitForRequests("main", 2);
 		const sessionFile = await sessionFileOf(real, pane);
-		expect(recordOf(real, "second").status).toBe("starting");
+		expect(recordOf(real, queued).status).toBe("starting");
 
 		crash(real, pane);
-		writeFileSync(gate, "");
-		await waitFor(() => expect(hostOf(real, "first").exit).toBeDefined());
+		for (const name of names) writeFileSync(gate(name), "");
+		await waitFor(() => expect(hostOf(real, working).exit).toBeDefined());
 		// Its slot is free, and no orchestrator is there to revalidate it: the queued member waits.
 		await sleep(3000);
-		expect(real.requests("second")).toHaveLength(0);
-		expect(existsSync(join(runDir(real.agentDir, "second"), "rpc-host.json"))).toBe(false);
-		return sessionFile;
+		expect(real.requests(queued)).toHaveLength(0);
+		expect(existsSync(join(runDir(real.agentDir, queued), "rpc-host.json"))).toBe(false);
+		return { sessionFile, working, queued };
 	}
 
 	it(
@@ -247,17 +253,17 @@ describe.skipIf(!hasTmux)("recovering RPC runs", () => {
 		async () => {
 			const real = await startOrchestrator();
 			pi = real;
-			const sessionFile = await crashWithQueuedMember(real);
+			const { sessionFile, working, queued } = await crashWithQueuedMember(real);
 
 			real.start(["--session", sessionFile]);
-			await real.waitForRequests("second", 1);
-			await waitFor(() => expect(recordOf(real, "second").status).toBe("closed"));
+			await real.waitForRequests(queued, 1);
+			await waitFor(() => expect(recordOf(real, queued).status).toBe("closed"));
 			await waitFor(() => {
 				const last = real.requests("main").at(-1);
-				expect(last && countHolding(last, "First done.")).toBe(1);
-				expect(last && countHolding(last, "Second done.")).toBe(1);
+				expect(last && countHolding(last, `${working} done.`)).toBe(1);
+				expect(last && countHolding(last, `${queued} done.`)).toBe(1);
 			});
-			expect(real.requests("first")).toHaveLength(1);
+			expect(real.requests(working)).toHaveLength(1);
 		},
 		4 * readinessMs,
 	);
@@ -267,19 +273,19 @@ describe.skipIf(!hasTmux)("recovering RPC runs", () => {
 		async () => {
 			const real = await startOrchestrator();
 			pi = real;
-			const sessionFile = await crashWithQueuedMember(real);
+			const { sessionFile, working, queued } = await crashWithQueuedMember(real);
 			addSettings(real, { permissions: { deny: ["Subagent(explorer)"] } });
 
 			real.start(["--session", sessionFile]);
-			await waitFor(() => expect(recordOf(real, "second").status).toBe("failed"));
-			expect(recordOf(real, "second").errorMessage).toMatch(/did not start.*Subagent\(explorer\)/s);
+			await waitFor(() => expect(recordOf(real, queued).status).toBe("failed"));
+			expect(recordOf(real, queued).errorMessage).toMatch(/did not start.*Subagent\(explorer\)/s);
 			await waitFor(() => {
 				const last = real.requests("main").at(-1);
-				expect(last && countHolding(last, "First done.")).toBe(1);
+				expect(last && countHolding(last, `${working} done.`)).toBe(1);
 			});
 			await sleep(2000);
-			expect(real.requests("second")).toHaveLength(0);
-			expect(existsSync(join(runDir(real.agentDir, "second"), "rpc-host.json"))).toBe(false);
+			expect(real.requests(queued)).toHaveLength(0);
+			expect(existsSync(join(runDir(real.agentDir, queued), "rpc-host.json"))).toBe(false);
 		},
 		4 * readinessMs,
 	);
