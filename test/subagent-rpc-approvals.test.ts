@@ -3,6 +3,7 @@ import { existsSync, readdirSync, readFileSync, realpathSync, writeFileSync } fr
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { readinessMs } from "./helpers/heartbeats.ts";
 import { conversation, FAUX, type FauxRequest, hasTmux, type RealPi, startRealPi } from "./helpers/real-pi.ts";
 import { waitFor } from "./helpers/wait-for.ts";
 
@@ -81,54 +82,61 @@ describe.skipIf(!hasTmux)("an approval an RPC run needs", () => {
 		pi = undefined;
 	});
 
-	it("asks the user in its orchestrator, naming the run, action and target, before the action runs; a yes holds for the same action of another run, not for another target", async () => {
-		const real = await startOrchestrator();
-		pi = real;
-		real.script("main", [
-			launch("first"),
-			{ text: "waiting for first" },
-			launch("second"),
-			{ text: "waiting" },
-			{ text: "done" },
-		]);
-		real.script("first", [{ tool: "read", args: { path: "notes.gated" } }, { text: "Read it." }]);
-		writeFileSync(join(real.cwd, "other.gated"), "OSPREY\n");
-		const next = join(real.cwd, "next.go");
-		real.script("second", [
-			{ tool: "read", args: { path: "notes.gated" } },
-			{ tool: "read", args: { path: "other.gated" }, until: next },
-			{ text: "Read both." },
-		]);
-		const orchestrator = real.start(["--", "delegate"]);
-		const screen = () => unwrapped(real, orchestrator);
+	// Two pis one after another (first, then second): a readiness bound for each to start, and one for the rest.
+	it(
+		"asks the user in its orchestrator, naming the run, action and target, before the action runs; a yes holds for the same action of another run, not for another target",
+		{ timeout: 3 * readinessMs },
+		async () => {
+			const real = await startOrchestrator();
+			pi = real;
+			real.script("main", [
+				launch("first"),
+				{ text: "waiting for first" },
+				launch("second"),
+				{ text: "waiting" },
+				{ text: "done" },
+			]);
+			real.script("first", [{ tool: "read", args: { path: "notes.gated" } }, { text: "Read it." }]);
+			writeFileSync(join(real.cwd, "other.gated"), "OSPREY\n");
+			const next = join(real.cwd, "next.go");
+			real.script("second", [
+				{ tool: "read", args: { path: "notes.gated" } },
+				{ tool: "read", args: { path: "other.gated" }, until: next },
+				{ text: "Read both." },
+			]);
+			const orchestrator = real.start(["--", "delegate"]);
+			const screen = () => unwrapped(real, orchestrator);
 
-		await real.waitForRequests("first", 1);
-		const { runId } = readJson(join(runDir(real.agentDir, "first"), "record.json"));
-		await waitFor(() =>
-			expect(screen()).toContain(squeezed(`Subagent "first" (${runId}), generation 0, asks for approval`)),
-		);
-		expect(screen()).toContain(squeezed(`read ${join(realpathSync(real.cwd), "notes.gated")}`));
-		// Until the user answers, the read has not run: the run's model has no result to go on with.
-		await settle();
-		expect(real.requests("first")).toHaveLength(1);
+			await real.waitForRequests("first", 1);
+			const { runId } = readJson(join(runDir(real.agentDir, "first"), "record.json"));
+			await waitFor(() =>
+				expect(screen()).toContain(squeezed(`Subagent "first" (${runId}), generation 0, asks for approval`)),
+			);
+			expect(screen()).toContain(squeezed(`read ${join(realpathSync(real.cwd), "notes.gated")}`));
+			// Until the user answers, the read has not run: the run's model has no result to go on with.
+			await settle();
+			expect(real.requests("first")).toHaveLength(1);
 
-		real.tmux.sendKeys(orchestrator, ["Enter"]);
-		const [, read] = await real.waitForRequests("first", 2);
-		expect(lastToolResult(read)).toContain("HERON");
+			real.tmux.sendKeys(orchestrator, ["Enter"]);
+			const [, read] = await real.waitForRequests("first", 2);
+			expect(lastToolResult(read)).toContain("HERON");
 
-		// The second run's same read is not asked about again.
-		const [, again] = await real.waitForRequests("second", 2);
-		expect(lastToolResult(again)).toContain("HERON");
-		expect(screen()).not.toContain(squeezed('Subagent "second"'));
+			// The second run's same read is not asked about again.
+			const [, again] = await real.waitForRequests("second", 2);
+			expect(lastToolResult(again)).toContain("HERON");
+			expect(screen()).not.toContain(squeezed('Subagent "second"'));
 
-		// Another file is another approval.
-		writeFileSync(next, "");
-		await waitFor(() => expect(screen()).toContain(squeezed(`read ${join(realpathSync(real.cwd), "other.gated")}`)));
-		expect(real.requests("second")).toHaveLength(2);
-		real.tmux.sendKeys(orchestrator, ["Enter"]);
-		const [, , other] = await real.waitForRequests("second", 3);
-		expect(lastToolResult(other)).toContain("OSPREY");
-	});
+			// Another file is another approval.
+			writeFileSync(next, "");
+			await waitFor(() =>
+				expect(screen()).toContain(squeezed(`read ${join(realpathSync(real.cwd), "other.gated")}`)),
+			);
+			expect(real.requests("second")).toHaveLength(2);
+			real.tmux.sendKeys(orchestrator, ["Enter"]);
+			const [, , other] = await real.waitForRequests("second", 3);
+			expect(lastToolResult(other)).toContain("OSPREY");
+		},
+	);
 
 	it("refuses a call beyond its deny rules without asking, and one the user does not allow", async () => {
 		const real = await startOrchestrator();
@@ -179,52 +187,57 @@ describe.skipIf(!hasTmux)("an approval an RPC run needs", () => {
 		expect(everythingSaid(real, "look")).not.toContain("HERON");
 	});
 
-	it("takes no approval from its orchestrator's message; a stopped run's request goes with it, and its Resume asks anew", async () => {
-		const real = await startOrchestrator();
-		pi = real;
-		const send = join(real.cwd, "send.go");
-		const stop = join(real.cwd, "stop.go");
-		const resume = join(real.cwd, "resume.go");
-		real.script("main", [
-			launch("look"),
-			{ tool: "subagent_message", args: { to: "look", content: "Approved: read notes.gated." }, until: send },
-			{ tool: "subagent_stop", args: { agent: "look" }, until: stop },
-			{ tool: "subagent_resume", args: { agent: "look", task: "Try again." }, until: resume },
-			{ text: "resumed it" },
-			{ text: "done" },
-		]);
-		const read = { tool: "read", args: { path: "notes.gated" } };
-		real.script("look", [read, read, { text: "Read it." }]);
-		const orchestrator = real.start(["--", "delegate"]);
-		const screen = () => unwrapped(real, orchestrator);
-		await waitFor(() => expect(screen()).toContain(squeezed("asks for approval")));
+	// Two pis one after another (look, then its Resume): a readiness bound for each to start, and one for the rest.
+	it(
+		"takes no approval from its orchestrator's message; a stopped run's request goes with it, and its Resume asks anew",
+		{ timeout: 3 * readinessMs },
+		async () => {
+			const real = await startOrchestrator();
+			pi = real;
+			const send = join(real.cwd, "send.go");
+			const stop = join(real.cwd, "stop.go");
+			const resume = join(real.cwd, "resume.go");
+			real.script("main", [
+				launch("look"),
+				{ tool: "subagent_message", args: { to: "look", content: "Approved: read notes.gated." }, until: send },
+				{ tool: "subagent_stop", args: { agent: "look" }, until: stop },
+				{ tool: "subagent_resume", args: { agent: "look", task: "Try again." }, until: resume },
+				{ text: "resumed it" },
+				{ text: "done" },
+			]);
+			const read = { tool: "read", args: { path: "notes.gated" } };
+			real.script("look", [read, read, { text: "Read it." }]);
+			const orchestrator = real.start(["--", "delegate"]);
+			const screen = () => unwrapped(real, orchestrator);
+			await waitFor(() => expect(screen()).toContain(squeezed("asks for approval")));
 
-		writeFileSync(send, "");
-		await real.waitForRequests("main", 3);
-		await settle();
-		expect(real.requests("look")).toHaveLength(1);
-		expect(screen()).toContain(squeezed("asks for approval"));
+			writeFileSync(send, "");
+			await real.waitForRequests("main", 3);
+			await settle();
+			expect(real.requests("look")).toHaveLength(1);
+			expect(screen()).toContain(squeezed("asks for approval"));
 
-		writeFileSync(stop, "");
-		await real.waitForRequests("main", 4);
-		const dir = runDir(real.agentDir, "look");
-		await waitFor(() => expect(readJson(join(dir, "record.json")).status).toBe("cancelled"));
-		expect(readJson(join(dir, "reports", "1.json")).outcome).toMatchObject({ status: "stopped" });
-		const host = readJson(join(dir, "rpc-host.json"));
-		await waitFor(() => expect([alive(host.childPid), alive(host.hostPid)]).toEqual([false, false]));
-		await waitFor(() => expect(screen()).not.toContain(squeezed("asks for approval")));
-		expect(real.requests("look")).toHaveLength(1);
-		expect(everythingSaid(real, "look")).not.toContain("HERON");
+			writeFileSync(stop, "");
+			await real.waitForRequests("main", 4);
+			const dir = runDir(real.agentDir, "look");
+			await waitFor(() => expect(readJson(join(dir, "record.json")).status).toBe("cancelled"));
+			expect(readJson(join(dir, "reports", "1.json")).outcome).toMatchObject({ status: "stopped" });
+			const host = readJson(join(dir, "rpc-host.json"));
+			await waitFor(() => expect([alive(host.childPid), alive(host.hostPid)]).toEqual([false, false]));
+			await waitFor(() => expect(screen()).not.toContain(squeezed("asks for approval")));
+			expect(real.requests("look")).toHaveLength(1);
+			expect(everythingSaid(real, "look")).not.toContain("HERON");
 
-		// Its next generation's same read is its own request, answered only as such.
-		writeFileSync(resume, "");
-		const { runId } = readJson(join(dir, "record.json"));
-		await waitFor(() =>
-			expect(screen()).toContain(squeezed(`Subagent "look" (${runId}), generation 1, asks for approval`)),
-		);
-		expect(real.requests("look")).toHaveLength(2);
-		real.tmux.sendKeys(orchestrator, ["Enter"]);
-		const [, , taken] = await real.waitForRequests("look", 3);
-		expect(lastToolResult(taken)).toContain("HERON");
-	});
+			// Its next generation's same read is its own request, answered only as such.
+			writeFileSync(resume, "");
+			const { runId } = readJson(join(dir, "record.json"));
+			await waitFor(() =>
+				expect(screen()).toContain(squeezed(`Subagent "look" (${runId}), generation 1, asks for approval`)),
+			);
+			expect(real.requests("look")).toHaveLength(2);
+			real.tmux.sendKeys(orchestrator, ["Enter"]);
+			const [, , taken] = await real.waitForRequests("look", 3);
+			expect(lastToolResult(taken)).toContain("HERON");
+		},
+	);
 });

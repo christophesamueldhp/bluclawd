@@ -397,6 +397,8 @@ describe.skipIf(!hasTmux)("recovering RPC runs", () => {
 		4 * readinessMs,
 	);
 
+	// Four pis one after another (a, the orchestrator reopened, b, then a's Resume): a readiness bound for each to
+	// start, and one for the rest.
 	it(
 		"pauses a chain's later steps while its orchestrator is gone, and goes on with them once it is reopened",
 		async () => {
@@ -443,7 +445,7 @@ describe.skipIf(!hasTmux)("recovering RPC runs", () => {
 			expect(real.requests("main")).toHaveLength(3);
 			expect(real.requests("b")).toHaveLength(1);
 		},
-		4 * readinessMs,
+		5 * readinessMs,
 	);
 
 	it(
@@ -483,6 +485,8 @@ describe.skipIf(!hasTmux)("recovering RPC runs", () => {
 		4 * readinessMs,
 	);
 
+	// Four pis one after another (a, b, the orchestrator reopened, then a's Resume): a readiness bound for each to
+	// start, and one for the rest.
 	it(
 		"goes on with a chain whose step was working when its orchestrator crashed, admitting the next step once reopened",
 		async () => {
@@ -528,6 +532,6 @@ describe.skipIf(!hasTmux)("recovering RPC runs", () => {
 			expect(real.requests("main")).toHaveLength(3);
 			expect(real.requests("b")).toHaveLength(1);
 		},
-		4 * readinessMs,
+		5 * readinessMs,
 	);
 });

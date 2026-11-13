@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, symlinkSync, writeFil
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { readinessMs } from "./helpers/heartbeats.ts";
 import { conversation, FAUX, type FauxRequest, hasTmux, type RealPi, startRealPi } from "./helpers/real-pi.ts";
 import { waitFor } from "./helpers/wait-for.ts";
 
@@ -303,57 +304,62 @@ describe.skipIf(!hasTmux)("integrating an RPC run's changes", () => {
 		expect(existsSync(join(repo, "two.txt"))).toBe(false);
 	});
 
-	it("integrates a chain once every step completed, never a halted one or a step on its own", async () => {
-		const real = await startOrchestrator();
-		pi = real;
-		const repo = real.cwd;
-		repository(repo, { "a.txt": SEVEN });
-		const chain = (worker: string, reviewer: string) => ({
-			tool: "subagent",
-			args: {
-				chain: [
-					{ agent: writer, name: worker, task: "Write." },
-					{ agent: "reviewer", name: reviewer, task: "Review." },
-				],
-			},
-		});
-		real.script("main", [chain("hw", "hrev"), chain("cw", "crev"), { text: "two chains" }]);
-		real.script("hw", [{ tool: "write", args: { path: "halted.txt", content: "halted\n" } }, { text: "Wrote." }]);
-		real.script("hrev", [{ text: "Half a review.", error: "the faux provider broke" }]);
-		real.script("cw", [{ tool: "write", args: { path: "done.txt", content: "done\n" } }, { text: "Wrote." }]);
-		real.script("crev", [{ text: "Looks right." }]);
-		const pane = real.start(["--", "delegate"]);
-		// Each step's pi start gets a readiness wait of its own.
-		for (const step of ["hw", "hrev", "cw", "crev"]) {
-			await waitFor(() => expect(real.requests(step).length).toBeGreaterThan(0));
-		}
-		const first = await real.waitForRequests("main", 3);
-		const [halted, completed] = chainIds(first[2]);
-		expect([halted, completed].every(Boolean)).toBe(true);
+	// Four pis one after another (hw, hrev, cw, then crev): a readiness bound for each to start, and one for the rest.
+	it(
+		"integrates a chain once every step completed, never a halted one or a step on its own",
+		{ timeout: 5 * readinessMs },
+		async () => {
+			const real = await startOrchestrator();
+			pi = real;
+			const repo = real.cwd;
+			repository(repo, { "a.txt": SEVEN });
+			const chain = (worker: string, reviewer: string) => ({
+				tool: "subagent",
+				args: {
+					chain: [
+						{ agent: writer, name: worker, task: "Write." },
+						{ agent: "reviewer", name: reviewer, task: "Review." },
+					],
+				},
+			});
+			real.script("main", [chain("hw", "hrev"), chain("cw", "crev"), { text: "two chains" }]);
+			real.script("hw", [{ tool: "write", args: { path: "halted.txt", content: "halted\n" } }, { text: "Wrote." }]);
+			real.script("hrev", [{ text: "Half a review.", error: "the faux provider broke" }]);
+			real.script("cw", [{ tool: "write", args: { path: "done.txt", content: "done\n" } }, { text: "Wrote." }]);
+			real.script("crev", [{ text: "Looks right." }]);
+			const pane = real.start(["--", "delegate"]);
+			// Each step's pi start gets a readiness wait of its own.
+			for (const step of ["hw", "hrev", "cw", "crev"]) {
+				await waitFor(() => expect(real.requests(step).length).toBeGreaterThan(0));
+			}
+			const first = await real.waitForRequests("main", 3);
+			const [halted, completed] = chainIds(first[2]);
+			expect([halted, completed].every(Boolean)).toBe(true);
 
-		real.script("main", [
-			chain("hw", "hrev"),
-			chain("cw", "crev"),
-			{ text: "two chains" },
-			{
-				calls: [
-					{ tool: "subagent_integrate", args: { agent: halted } },
-					{ tool: "subagent_integrate", args: { agent: "cw" } },
-				],
-			},
-			{ tool: "subagent_integrate", args: { agent: completed } },
-			{ text: "done" },
-		]);
-		real.tmux.sendKeys(pane, ["integrate", "Enter"]);
-		const main = await real.waitForRequests("main", 6);
-		const [refusedHalted, refusedStep, applied] = toolResults(main[5]).slice(2);
-		expect(refusedHalted).toMatch(new RegExp(`^Not integrated: chain ${halted} halted \\(chain\\[1\\] failed\\)`));
-		expect(refusedStep).toMatch(new RegExp(`is a step of chain ${completed}: integrate the chain`));
-		expect(applied).toMatch(/^Integration: applied A done\.txt to /m);
-		expect(applied).toMatch(new RegExp(`^Run: chain ${completed}, 2 steps, every one completed`, "m"));
-		expect(read(repo, "done.txt")).toBe("done\n");
-		expect(existsSync(join(repo, "halted.txt"))).toBe(false);
-	});
+			real.script("main", [
+				chain("hw", "hrev"),
+				chain("cw", "crev"),
+				{ text: "two chains" },
+				{
+					calls: [
+						{ tool: "subagent_integrate", args: { agent: halted } },
+						{ tool: "subagent_integrate", args: { agent: "cw" } },
+					],
+				},
+				{ tool: "subagent_integrate", args: { agent: completed } },
+				{ text: "done" },
+			]);
+			real.tmux.sendKeys(pane, ["integrate", "Enter"]);
+			const main = await real.waitForRequests("main", 6);
+			const [refusedHalted, refusedStep, applied] = toolResults(main[5]).slice(2);
+			expect(refusedHalted).toMatch(new RegExp(`^Not integrated: chain ${halted} halted \\(chain\\[1\\] failed\\)`));
+			expect(refusedStep).toMatch(new RegExp(`is a step of chain ${completed}: integrate the chain`));
+			expect(applied).toMatch(/^Integration: applied A done\.txt to /m);
+			expect(applied).toMatch(new RegExp(`^Run: chain ${completed}, 2 steps, every one completed`, "m"));
+			expect(read(repo, "done.txt")).toBe("done\n");
+			expect(existsSync(join(repo, "halted.txt"))).toBe(false);
+		},
+	);
 
 	it("writes nothing the orchestrator's deny rules forbid now, or through a link in its checkout", async () => {
 		const real = await startOrchestrator();
@@ -405,41 +411,46 @@ describe.skipIf(!hasTmux)("integrating an RPC run's changes", () => {
 		expect(existsSync(join(repo, "locked.txt"))).toBe(false);
 	});
 
-	it("runs the check after pi's shellCommandPrefix, as its bash does, and holds it to deny rules as the model wrote it", async () => {
-		const real = await startOrchestrator();
-		pi = real;
-		const repo = real.cwd;
-		repository(repo, { "a.txt": SEVEN });
-		const gate = join(repo, "..", "prefixed");
-		const check = 'test "$PFX" = applied';
-		real.script("main", [
-			{ tool: "subagent", args: { agent: writer, name: "w1", task: "Write." } },
-			{ tool: "subagent_integrate", args: { agent: "w1", check } },
-			{ tool: "subagent", args: { agent: writer, name: "w2", task: "Write." }, until: gate },
-			{ tool: "subagent_integrate", args: { agent: "w2", check } },
-			{ text: "done" },
-		]);
-		real.script("w1", [{ tool: "write", args: { path: "one.txt", content: "1\n" } }, { text: "Wrote." }]);
-		real.script("w2", [{ tool: "write", args: { path: "two.txt", content: "2\n" } }, { text: "Wrote." }]);
-		real.start(["--", "delegate"]);
-		await real.waitForRequests("main", 3);
-		// A rule the prefixed command would match, but the model's command does not.
-		const settings = join(real.agentDir, "settings.json");
-		writeFileSync(
-			settings,
-			JSON.stringify({
-				...JSON.parse(readFileSync(settings, "utf8")),
-				shellCommandPrefix: "export PFX=applied",
-				permissions: { deny: ["Bash(export *)"] },
-			}),
-		);
-		writeFileSync(gate, "");
+	// Two pis one after another (w1, then w2): a readiness bound for each to start, and one for the rest.
+	it(
+		"runs the check after pi's shellCommandPrefix, as its bash does, and holds it to deny rules as the model wrote it",
+		{ timeout: 3 * readinessMs },
+		async () => {
+			const real = await startOrchestrator();
+			pi = real;
+			const repo = real.cwd;
+			repository(repo, { "a.txt": SEVEN });
+			const gate = join(repo, "..", "prefixed");
+			const check = 'test "$PFX" = applied';
+			real.script("main", [
+				{ tool: "subagent", args: { agent: writer, name: "w1", task: "Write." } },
+				{ tool: "subagent_integrate", args: { agent: "w1", check } },
+				{ tool: "subagent", args: { agent: writer, name: "w2", task: "Write." }, until: gate },
+				{ tool: "subagent_integrate", args: { agent: "w2", check } },
+				{ text: "done" },
+			]);
+			real.script("w1", [{ tool: "write", args: { path: "one.txt", content: "1\n" } }, { text: "Wrote." }]);
+			real.script("w2", [{ tool: "write", args: { path: "two.txt", content: "2\n" } }, { text: "Wrote." }]);
+			real.start(["--", "delegate"]);
+			await real.waitForRequests("main", 3);
+			// A rule the prefixed command would match, but the model's command does not.
+			const settings = join(real.agentDir, "settings.json");
+			writeFileSync(
+				settings,
+				JSON.stringify({
+					...JSON.parse(readFileSync(settings, "utf8")),
+					shellCommandPrefix: "export PFX=applied",
+					permissions: { deny: ["Bash(export *)"] },
+				}),
+			);
+			writeFileSync(gate, "");
 
-		const main = await real.waitForRequests("main", 5);
-		const [, without, , prefixed] = toolResults(main[4]);
-		expect(without).toContain(`Validation: \`${check}\` exited with code 1`);
-		expect(prefixed).toContain(`Validation: \`${check}\` exited with code 0`);
-	});
+			const main = await real.waitForRequests("main", 5);
+			const [, without, , prefixed] = toolResults(main[4]);
+			expect(without).toContain(`Validation: \`${check}\` exited with code 1`);
+			expect(prefixed).toContain(`Validation: \`${check}\` exited with code 0`);
+		},
+	);
 
 	it("runs no check for an orchestrator that may not run bash itself, and says why", async () => {
 		const real = await startOrchestrator();

@@ -2,6 +2,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { readinessMs } from "./helpers/heartbeats.ts";
 import {
 	conversation,
 	DEFAULT_EXTENSIONS,
@@ -98,9 +99,11 @@ describe.skipIf(!hasTmux)("an RPC run's Report", () => {
 		expect(JSON.stringify(main)).not.toContain("ran dry");
 	});
 
-	// Commands run only where a backend can confirm their processes ended.
+	// Commands run only where a backend can confirm their processes ended. Two pis one after another (gp, then its
+	// Resume): a readiness bound for each to start, and one for the rest.
 	it.skipIf(process.platform !== "darwin")(
 		"lists the checks its transcript shows it ran, with how each ended, whatever its text claims",
+		{ timeout: 3 * readinessMs },
 		async () => {
 			const real = await startOrchestrator();
 			pi = real;
@@ -145,104 +148,136 @@ describe.skipIf(!hasTmux)("an RPC run's Report", () => {
 		},
 	);
 
-	it("keeps every batch member's status reachable while it works, and a cancelled call gives the Reports stored", async () => {
-		const real = await startOrchestrator();
-		pi = real;
-		const settings = join(real.agentDir, "settings.json");
-		writeFileSync(
-			settings,
-			JSON.stringify({ ...JSON.parse(readFileSync(settings, "utf8")), subagents: { panes: false, maxActive: 1 } }),
-		);
-		const tasks = ["a", "b", "c"].map((name) => ({ agent: "explorer", name, task: `Look, ${name}.` }));
-		real.script("main", [{ tool: "subagent", args: { tasks } }]);
-		real.script("a", [{ text: "a found it." }]);
-		real.script("b", [{ text: "Never.", until: join(real.cwd, "never") }]);
-		real.script("c", [{ text: "Never started." }]);
-		const pane = real.start(["--", "delegate"]);
-		await real.waitForRequests("main", 1);
-		await started(real, "a");
-		await started(real, "b");
+	// Two pis one after another (the first member to start, then the next once it is done): a readiness bound for each
+	// to start, and one for the rest.
+	it(
+		"keeps every batch member's status reachable while it works, and a cancelled call gives the Reports stored",
+		{ timeout: 3 * readinessMs },
+		async () => {
+			const real = await startOrchestrator();
+			pi = real;
+			const settings = join(real.agentDir, "settings.json");
+			writeFileSync(
+				settings,
+				JSON.stringify({
+					...JSON.parse(readFileSync(settings, "utf8")),
+					subagents: { panes: false, maxActive: 1 },
+				}),
+			);
+			const names = ["a", "b", "c"];
+			const tasks = names.map((name) => ({ agent: "explorer", name, task: `Look, ${name}.` }));
+			const gate = (name: string) => join(real.cwd, `${name}.go`);
+			real.script("main", [{ tool: "subagent", args: { tasks } }]);
+			for (const name of names) real.script(name, [{ text: `${name} found it.`, until: gate(name) }]);
+			const pane = real.start(["--", "delegate"]);
+			await real.waitForRequests("main", 1);
+			// Its members claim the one slot side by side, in any order: the first to start is let finish, the next works.
+			const startedRuns = () => names.filter((name) => real.requests(name).length > 0);
+			const [done] = await waitFor(() => {
+				expect(startedRuns()).toHaveLength(1);
+				return startedRuns();
+			});
+			writeFileSync(gate(done), "");
+			const [working] = await waitFor(() => {
+				expect(startedRuns()).toHaveLength(2);
+				return startedRuns().filter((name) => name !== done);
+			});
+			const [queued] = names.filter((name) => name !== done && name !== working);
+			const entry = (name: string) => `- tasks\\[${names.indexOf(name)}\\] "${name}" \\(sub_[\\w-]+\\)`;
 
-		// Before it settles, the manifest says what each member did: one settled, one working, one queued.
-		const manifest = await waitFor(() => {
-			const dir = join(dirname(runDir(real.agentDir, "a") ?? ""), "batches");
-			const [file] = readdirSync(dir);
-			const text = readFileSync(join(dir, file), "utf8");
-			expect(text).toMatch(/- tasks\[0\] "a" \(sub_[\w-]+\): completed/);
-			expect(text).toMatch(/- tasks\[1\] "b" \(sub_[\w-]+\): not settled yet: (queued|running)/);
-			expect(text).toMatch(/- tasks\[2\] "c" \(sub_[\w-]+\): not settled yet: queued/);
-			return join(dir, file);
-		});
-		const aReport = join(runDir(real.agentDir, "a") ?? "", "reports", "1.md");
-		expect(readFileSync(manifest, "utf8")).toContain(`Report: ${aReport}`);
+			// Before it settles, the manifest says what each member did: one settled, one working, one queued.
+			const manifest = await waitFor(() => {
+				const dir = join(dirname(runDir(real.agentDir, done) ?? ""), "batches");
+				const [file] = readdirSync(dir);
+				const text = readFileSync(join(dir, file), "utf8");
+				expect(text).toMatch(new RegExp(`${entry(done)}: completed`));
+				expect(text).toMatch(new RegExp(`${entry(working)}: not settled yet: (queued|running)`));
+				expect(text).toMatch(new RegExp(`${entry(queued)}: not settled yet: queued`));
+				return join(dir, file);
+			});
+			const doneReport = join(runDir(real.agentDir, done) ?? "", "reports", "1.md");
+			expect(readFileSync(manifest, "utf8")).toContain(`Report: ${doneReport}`);
 
-		// Cancelled, the call still gives what settled, its Report with it, and where the rest will be.
-		real.tmux.sendKeys(pane, ["Escape"]);
-		real.script("main", [
-			{ tool: "subagent", args: { tasks } },
-			{ tool: "read", args: { path: manifest } },
-			{ text: "noted" },
-		]);
-		await waitFor(() => expect(readFileSync(manifest, "utf8")).toMatch(/Settled: all 3 members\./));
-		real.tmux.sendKeys(pane, ["What became of the batch?", "Enter"]);
-		const main = await real.waitForRequests("main", 3);
-		const [cancelled] = toolResults(main[1]);
-		expect(cancelled).toMatch(/^Cancelling batch batch_\w+: every member was asked to stop\./);
-		expect(cancelled).toContain(`Every member's status, full Report and transcript: ${manifest}`);
-		expect(cancelled).toMatch(
-			/### "a" \(sub_[\w-]+\): completed\nChecks: none ran: it had no tool that runs commands\.\na found it\./,
-		);
-		expect(cancelled).toMatch(/- "b" \(sub_[\w-]+\): (not settled yet: stopping|cancelled)/);
-		expect(cancelled).toMatch(/- "c" \(sub_[\w-]+\): (not settled yet: (queued|stopping)|cancelled)/);
-		// Every member's final status, for the orchestrator to read.
-		const read = toolResults(main[2]).at(-1) ?? "";
-		expect(read).toMatch(/- tasks\[1\] "b" \(sub_[\w-]+\): cancelled/);
-		expect(read).toMatch(/- tasks\[2\] "c" \(sub_[\w-]+\): cancelled/);
-		expect(real.requests("c")).toEqual([]);
-	});
+			// Cancelled, the call still gives what settled, its Report with it, and where the rest will be.
+			real.tmux.sendKeys(pane, ["Escape"]);
+			real.script("main", [
+				{ tool: "subagent", args: { tasks } },
+				{ tool: "read", args: { path: manifest } },
+				{ text: "noted" },
+			]);
+			await waitFor(() => expect(readFileSync(manifest, "utf8")).toMatch(/Settled: all 3 members\./));
+			real.tmux.sendKeys(pane, ["What became of the batch?", "Enter"]);
+			const main = await real.waitForRequests("main", 3);
+			const [cancelled] = toolResults(main[1]);
+			expect(cancelled).toMatch(/^Cancelling batch batch_\w+: every member was asked to stop\./);
+			expect(cancelled).toContain(`Every member's status, full Report and transcript: ${manifest}`);
+			expect(cancelled).toMatch(
+				new RegExp(
+					`### "${done}" \\(sub_[\\w-]+\\): completed\\nChecks: none ran: it had no tool that runs commands\\.\\n${done} found it\\.`,
+				),
+			);
+			expect(cancelled).toMatch(
+				new RegExp(`- "${working}" \\(sub_[\\w-]+\\): (not settled yet: stopping|cancelled)`),
+			);
+			expect(cancelled).toMatch(
+				new RegExp(`- "${queued}" \\(sub_[\\w-]+\\): (not settled yet: (queued|stopping)|cancelled)`),
+			);
+			// Every member's final status, for the orchestrator to read.
+			const read = toolResults(main[2]).at(-1) ?? "";
+			expect(read).toMatch(new RegExp(`${entry(working)}: cancelled`));
+			expect(read).toMatch(new RegExp(`${entry(queued)}: cancelled`));
+			expect(real.requests(queued)).toEqual([]);
+		},
+	);
 
-	it("counts its session once, apart from the orchestrator's own usage, however many generations and Reports", async () => {
-		const real = await startOrchestrator([...DEFAULT_EXTENSIONS, "help"]);
-		pi = real;
-		real.script("main", [
-			{ tool: "subagent", args: { agent: "explorer", name: "look", task: "Look around." } },
-			{ tool: "subagent_resume", args: { agent: "look", task: "Look again." } },
-			{ text: "waiting for look" },
-			{ tool: "subagent_resume", args: { agent: "look", task: "Once more." } },
-			{ text: "waiting for look again" },
-			{ text: "done" },
-		]);
-		real.script("look", [{ text: "First look." }, { text: "Second look." }, { text: "Third look." }]);
-		const orchestrator = real.start(["--", "delegate"]);
-		await real.waitForRequests("main", 1);
-		await started(real, "look");
-		await started(real, "look", 1);
-		await started(real, "look", 2);
-		await real.waitForRequests("main", 6);
+	// Three pis one after another (look, then two Resumes of it): a readiness bound for each to start, and one for the
+	// rest.
+	it(
+		"counts its session once, apart from the orchestrator's own usage, however many generations and Reports",
+		{ timeout: 4 * readinessMs },
+		async () => {
+			const real = await startOrchestrator([...DEFAULT_EXTENSIONS, "help"]);
+			pi = real;
+			real.script("main", [
+				{ tool: "subagent", args: { agent: "explorer", name: "look", task: "Look around." } },
+				{ tool: "subagent_resume", args: { agent: "look", task: "Look again." } },
+				{ text: "waiting for look" },
+				{ tool: "subagent_resume", args: { agent: "look", task: "Once more." } },
+				{ text: "waiting for look again" },
+				{ text: "done" },
+			]);
+			real.script("look", [{ text: "First look." }, { text: "Second look." }, { text: "Third look." }]);
+			const orchestrator = real.start(["--", "delegate"]);
+			await real.waitForRequests("main", 1);
+			await started(real, "look");
+			await started(real, "look", 1);
+			await started(real, "look", 2);
+			await real.waitForRequests("main", 6);
 
-		// Three generations in one session: what that session's file holds is the run's usage, each token once.
-		const dir = runDir(real.agentDir, "look") ?? "";
-		const sessions = readdirSync(dir).filter((file) => file.endsWith(".jsonl"));
-		expect(sessions).toHaveLength(1);
-		const tokens = entries(join(dir, sessions[0]))
-			.filter((entry) => entry.type === "message" && entry.message?.role === "assistant")
-			.reduce((sum, entry) => sum + (entry.message?.usage?.totalTokens ?? 0), 0);
-		expect(tokens).toBeGreaterThan(0);
-		// None of it in the orchestrator's own session, whose tool results carry no usage.
-		const own = readdirSync(join(real.agentDir, "sessions"), { recursive: true, encoding: "utf8" })
-			.filter((file) => file.endsWith(".jsonl"))
-			.flatMap((file) => entries(join(real.agentDir, "sessions", file)))
-			.filter((entry) => entry.type === "message" && entry.message?.role === "toolResult");
-		expect(own.length).toBeGreaterThanOrEqual(3);
-		for (const entry of own) expect(entry.message).not.toHaveProperty("usage");
-		// Its faux model has no price: the cost is unknown, not $0.
-		real.tmux.sendKeys(orchestrator, ["/status", "Enter"]);
-		await waitFor(() =>
-			expect(real.tmux.capture(orchestrator, 200).join("\n")).toMatch(
-				new RegExp(`Subagents\\s+1 runs, ${tokens} tokens, cost unknown`),
-			),
-		);
-	});
+			// Three generations in one session: what that session's file holds is the run's usage, each token once.
+			const dir = runDir(real.agentDir, "look") ?? "";
+			const sessions = readdirSync(dir).filter((file) => file.endsWith(".jsonl"));
+			expect(sessions).toHaveLength(1);
+			const tokens = entries(join(dir, sessions[0]))
+				.filter((entry) => entry.type === "message" && entry.message?.role === "assistant")
+				.reduce((sum, entry) => sum + (entry.message?.usage?.totalTokens ?? 0), 0);
+			expect(tokens).toBeGreaterThan(0);
+			// None of it in the orchestrator's own session, whose tool results carry no usage.
+			const own = readdirSync(join(real.agentDir, "sessions"), { recursive: true, encoding: "utf8" })
+				.filter((file) => file.endsWith(".jsonl"))
+				.flatMap((file) => entries(join(real.agentDir, "sessions", file)))
+				.filter((entry) => entry.type === "message" && entry.message?.role === "toolResult");
+			expect(own.length).toBeGreaterThanOrEqual(3);
+			for (const entry of own) expect(entry.message).not.toHaveProperty("usage");
+			// Its faux model has no price: the cost is unknown, not $0.
+			real.tmux.sendKeys(orchestrator, ["/status", "Enter"]);
+			await waitFor(() =>
+				expect(real.tmux.capture(orchestrator, 200).join("\n")).toMatch(
+					new RegExp(`Subagents\\s+1 runs, ${tokens} tokens, cost unknown`),
+				),
+			);
+		},
+	);
 });
 
 /** Each entry of the session file `path`, as far as these tests read it. */

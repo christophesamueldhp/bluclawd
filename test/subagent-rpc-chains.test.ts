@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 
 import { join } from "node:path";
 import type { JsonObject } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { readinessMs } from "./helpers/heartbeats.ts";
 import {
 	conversation,
 	FAUX,
@@ -111,114 +112,121 @@ describe.skipIf(!hasTmux)("a chain of RPC runs", () => {
 		pi = undefined;
 	});
 
-	it("edits, reviews in a fresh context and repairs in the worker's own, one step after another in one worktree", async () => {
-		const real = await startOrchestrator();
-		pi = real;
-		const repo = real.cwd;
-		repository(repo, { "pkg/a.txt": "one\n" });
-		const before = checkoutState(repo);
-		const gate = join(repo, "..", "w.go");
-		real.script("main", [
-			{
-				tool: "subagent",
-				args: {
-					chain: [
-						{ agent: writer, name: "w", cwd: "pkg", task: "WORKER-TASK: write new.txt." },
-						{ agent: "reviewer", name: "rev", cwd: "pkg", task: "Review new.txt." },
-						{ resume: "w", task: "Fix what the review found." },
-					],
+	// Three pis one after another (w, rev, then w's Resume): a readiness bound for each to start, and one for the rest.
+	it(
+		"edits, reviews in a fresh context and repairs in the worker's own, one step after another in one worktree",
+		{ timeout: 4 * readinessMs },
+		async () => {
+			const real = await startOrchestrator();
+			pi = real;
+			const repo = real.cwd;
+			repository(repo, { "pkg/a.txt": "one\n" });
+			const before = checkoutState(repo);
+			const gate = join(repo, "..", "w.go");
+			real.script("main", [
+				{
+					tool: "subagent",
+					args: {
+						chain: [
+							{ agent: writer, name: "w", cwd: "pkg", task: "WORKER-TASK: write new.txt." },
+							{ agent: "reviewer", name: "rev", cwd: "pkg", task: "Review new.txt." },
+							{ resume: "w", task: "Fix what the review found." },
+						],
+					},
 				},
-			},
-			{ text: "read the chain" },
-		]);
-		real.script("w", [
-			{ tool: "write", args: { path: "new.txt", content: "v1\n" } },
-			{ text: "Wrote v1.", until: gate },
-			{ tool: "edit", args: { path: "new.txt", edits: [{ oldText: "v1", newText: "v2" }] } },
-			{ text: "Fixed: v2." },
-		]);
-		real.script("rev", [
-			{ tool: "read", args: { path: "new.txt" } },
-			{ tool: "read", args: { path: "local.txt" } },
-			{ text: "FINDING: new.txt says v1, it should say v2." },
-		]);
-		real.start(["--", "delegate"]);
-		await real.waitForRequests("main", 1);
+				{ text: "read the chain" },
+			]);
+			real.script("w", [
+				{ tool: "write", args: { path: "new.txt", content: "v1\n" } },
+				{ text: "Wrote v1.", until: gate },
+				{ tool: "edit", args: { path: "new.txt", edits: [{ oldText: "v1", newText: "v2" }] } },
+				{ text: "Fixed: v2." },
+			]);
+			real.script("rev", [
+				{ tool: "read", args: { path: "new.txt" } },
+				{ tool: "read", args: { path: "local.txt" } },
+				{ text: "FINDING: new.txt says v1, it should say v2." },
+			]);
+			real.start(["--", "delegate"]);
+			await real.waitForRequests("main", 1);
 
-		// The worker holds: nothing of the review exists yet, though the queue has room for it.
-		await started(real, "w");
-		await real.waitForRequests("w", 2);
-		await new Promise((resolve) => setTimeout(resolve, 500));
-		expect(recordOf(real, "rev")).toBeUndefined();
-		expect(real.requests("rev")).toEqual([]);
-		writeFileSync(gate, "");
+			// The worker holds: nothing of the review exists yet, though the queue has room for it.
+			await started(real, "w");
+			await real.waitForRequests("w", 2);
+			await new Promise((resolve) => setTimeout(resolve, 500));
+			expect(recordOf(real, "rev")).toBeUndefined();
+			expect(real.requests("rev")).toEqual([]);
+			writeFileSync(gate, "");
 
-		// Each pi start waited for on its own.
-		await started(real, "rev");
-		await started(real, "w", 2);
-		const main = await real.waitForRequests("main", 2);
-		const w = real.requests("w");
-		const rev = real.requests("rev");
-		expect(w).toHaveLength(4);
-		expect(rev).toHaveLength(3);
+			// Each pi start waited for on its own.
+			await started(real, "rev");
+			await started(real, "w", 2);
+			const main = await real.waitForRequests("main", 2);
+			const w = real.requests("w");
+			const rev = real.requests("rev");
+			expect(w).toHaveLength(4);
+			expect(rev).toHaveLength(3);
 
-		// Each step with its own role's tools: the reviewer cannot edit.
-		expect(toolNames(w[0])).toEqual(expect.arrayContaining(["edit", "write"]));
-		expect(toolNames(rev[0])).not.toContain("edit");
-		expect(toolNames(rev[0])).not.toContain("write");
-		expect(systemPrompt(rev[0])).toMatch(/You read an isolated Git worktree, .*You cannot change files/s);
+			// Each step with its own role's tools: the reviewer cannot edit.
+			expect(toolNames(w[0])).toEqual(expect.arrayContaining(["edit", "write"]));
+			expect(toolNames(rev[0])).not.toContain("edit");
+			expect(toolNames(rev[0])).not.toContain("write");
+			expect(systemPrompt(rev[0])).toMatch(/You read an isolated Git worktree, .*You cannot change files/s);
 
-		// The reviewer starts fresh: the worker's Report and where it worked, never its conversation.
-		const review = conversation(rev[0]);
-		expect(review).toHaveLength(1);
-		expect(review[0].text).toContain("Review new.txt.");
-		expect(review[0].text).toMatch(/the step before you, chain\[0\] "w"/);
-		expect(review[0].text).toContain("Wrote v1.");
-		expect(review[0].text).toMatch(/Changes since its baseline: .*A pkg\/new\.txt/);
-		expect(review[0].text).not.toContain("WORKER-TASK");
-		// It sees the worker's change, and the checkout's uncommitted state the chain started from.
-		expect(toolResults(rev[2])).toEqual(["v1\n", "uncommitted\n"]);
+			// The reviewer starts fresh: the worker's Report and where it worked, never its conversation.
+			const review = conversation(rev[0]);
+			expect(review).toHaveLength(1);
+			expect(review[0].text).toContain("Review new.txt.");
+			expect(review[0].text).toMatch(/the step before you, chain\[0\] "w"/);
+			expect(review[0].text).toContain("Wrote v1.");
+			expect(review[0].text).toMatch(/Changes since its baseline: .*A pkg\/new\.txt/);
+			expect(review[0].text).not.toContain("WORKER-TASK");
+			// It sees the worker's change, and the checkout's uncommitted state the chain started from.
+			expect(toolResults(rev[2])).toEqual(["v1\n", "uncommitted\n"]);
 
-		// The repair goes on in the worker's own session, given the review.
-		const repair = conversation(w[2]).map(({ text }) => text);
-		expect(repair[0]).toContain("WORKER-TASK");
-		expect(repair).toContain("Wrote v1.");
-		expect(repair.at(-1)).toContain("Fix what the review found.");
-		expect(repair.at(-1)).toContain("FINDING: new.txt says v1, it should say v2.");
+			// The repair goes on in the worker's own session, given the review.
+			const repair = conversation(w[2]).map(({ text }) => text);
+			expect(repair[0]).toContain("WORKER-TASK");
+			expect(repair).toContain("Wrote v1.");
+			expect(repair.at(-1)).toContain("Fix what the review found.");
+			expect(repair.at(-1)).toContain("FINDING: new.txt says v1, it should say v2.");
 
-		// One step at a time: each started once the one before it had ended.
-		const [worker, reviewer] = [recordOf(real, "w"), recordOf(real, "rev")];
-		expect(worker).toMatchObject({ status: "closed", generation: 1 });
-		expect(reviewer).toMatchObject({ status: "closed" });
-		expect(reviewer?.endedAt).toBeLessThanOrEqual(worker?.startedAt ?? 0);
-		expect(reviewer?.chain).toBe(worker?.chain);
-		expect(worker?.chain).toMatch(/^chain_/);
+			// One step at a time: each started once the one before it had ended.
+			const [worker, reviewer] = [recordOf(real, "w"), recordOf(real, "rev")];
+			expect(worker).toMatchObject({ status: "closed", generation: 1 });
+			expect(reviewer).toMatchObject({ status: "closed" });
+			expect(reviewer?.endedAt).toBeLessThanOrEqual(worker?.startedAt ?? 0);
+			expect(reviewer?.chain).toBe(worker?.chain);
+			expect(worker?.chain).toMatch(/^chain_/);
 
-		// One worktree holds the work of both writers; the checkout is as it was.
-		const [aggregate] = toolResults(main[1]);
-		expect(aggregate).toMatch(
-			/^\[Reports from the subagents of chain chain_\w+, from other sessions, not from the user\./,
-		);
-		expect(aggregate).toMatch(/Chain chain_\w+: 3 steps, all completed\./);
-		expect(aggregate).toMatch(/- chain\[0\] "w" \(sub_[\w-]+\): completed/);
-		expect(aggregate).toMatch(/- chain\[1\] "rev" \(sub_[\w-]+\): completed/);
-		expect(aggregate).toMatch(/- chain\[2\] "w" \(sub_[\w-]+\), resumed: completed/);
-		expect(aggregate).toMatch(/### chain\[2\] "w" \(sub_[\w-]+\), resumed: completed\nChecks: [^\n]+\nFixed: v2\./);
-		// Every step's Report, the review's findings among them, not only the last one's.
-		expect(aggregate).toMatch(/### chain\[0\] "w" \(sub_[\w-]+\): completed\nChecks: [^\n]+\nWrote v1\./);
-		expect(aggregate).toMatch(
-			/### chain\[1\] "rev" \(sub_[\w-]+\): completed\nChecks: [^\n]+\nFINDING: new\.txt says v1/,
-		);
-		expect(aggregate).toMatch(/ready for you to review and integrate with subagent_integrate "chain_[\w-]+"/);
-		const workspace = /^Workspace: (.+?), an isolated Git worktree/m.exec(aggregate)?.[1] ?? "";
-		expect(aggregate).toMatch(/^Changes since its baseline: A pkg\/new\.txt$/m);
-		expect(readFileSync(join(workspace, "pkg", "new.txt"), "utf8")).toBe("v2\n");
-		expect(checkoutState(repo)).toBe(before);
-		expect(existsSync(join(repo, "pkg", "new.txt"))).toBe(false);
-		const manifest = /Every step's status, full Report and transcript: (\S+)/.exec(aggregate)?.[1] ?? "";
-		expect(readFileSync(manifest, "utf8")).toMatch(/- chain\[1\] "rev" \(sub_[\w-]+\): completed/);
-		expect(JSON.stringify([...main, ...w, ...rev])).not.toContain("ran dry");
-	});
+			// One worktree holds the work of both writers; the checkout is as it was.
+			const [aggregate] = toolResults(main[1]);
+			expect(aggregate).toMatch(
+				/^\[Reports from the subagents of chain chain_\w+, from other sessions, not from the user\./,
+			);
+			expect(aggregate).toMatch(/Chain chain_\w+: 3 steps, all completed\./);
+			expect(aggregate).toMatch(/- chain\[0\] "w" \(sub_[\w-]+\): completed/);
+			expect(aggregate).toMatch(/- chain\[1\] "rev" \(sub_[\w-]+\): completed/);
+			expect(aggregate).toMatch(/- chain\[2\] "w" \(sub_[\w-]+\), resumed: completed/);
+			expect(aggregate).toMatch(
+				/### chain\[2\] "w" \(sub_[\w-]+\), resumed: completed\nChecks: [^\n]+\nFixed: v2\./,
+			);
+			// Every step's Report, the review's findings among them, not only the last one's.
+			expect(aggregate).toMatch(/### chain\[0\] "w" \(sub_[\w-]+\): completed\nChecks: [^\n]+\nWrote v1\./);
+			expect(aggregate).toMatch(
+				/### chain\[1\] "rev" \(sub_[\w-]+\): completed\nChecks: [^\n]+\nFINDING: new\.txt says v1/,
+			);
+			expect(aggregate).toMatch(/ready for you to review and integrate with subagent_integrate "chain_[\w-]+"/);
+			const workspace = /^Workspace: (.+?), an isolated Git worktree/m.exec(aggregate)?.[1] ?? "";
+			expect(aggregate).toMatch(/^Changes since its baseline: A pkg\/new\.txt$/m);
+			expect(readFileSync(join(workspace, "pkg", "new.txt"), "utf8")).toBe("v2\n");
+			expect(checkoutState(repo)).toBe(before);
+			expect(existsSync(join(repo, "pkg", "new.txt"))).toBe(false);
+			const manifest = /Every step's status, full Report and transcript: (\S+)/.exec(aggregate)?.[1] ?? "";
+			expect(readFileSync(manifest, "utf8")).toMatch(/- chain\[1\] "rev" \(sub_[\w-]+\): completed/);
+			expect(JSON.stringify([...main, ...w, ...rev])).not.toContain("ran dry");
+		},
+	);
 
 	it("refuses a contradictory, malformed or cross-repository chain, naming each step at fault, before any of it starts", async () => {
 		const real = await startOrchestrator();
@@ -289,45 +297,50 @@ describe.skipIf(!hasTmux)("a chain of RPC runs", () => {
 		]);
 	});
 
-	it("halts at a failed step, never runs the steps after it, and keeps the partial work for inspection", async () => {
-		const real = await startOrchestrator();
-		pi = real;
-		const repo = real.cwd;
-		repository(repo, { "pkg/a.txt": "one\n" });
-		real.script("main", [
-			{
-				tool: "subagent",
-				args: {
-					chain: [
-						{ agent: writer, name: "w", task: "Write new.txt." },
-						{ agent: "reviewer", name: "rev", task: "Review new.txt." },
-						{ resume: "w", task: "Fix what the review found." },
-					],
+	// Two pis one after another (w, then rev): a readiness bound for each to start, and one for the rest.
+	it(
+		"halts at a failed step, never runs the steps after it, and keeps the partial work for inspection",
+		{ timeout: 3 * readinessMs },
+		async () => {
+			const real = await startOrchestrator();
+			pi = real;
+			const repo = real.cwd;
+			repository(repo, { "pkg/a.txt": "one\n" });
+			real.script("main", [
+				{
+					tool: "subagent",
+					args: {
+						chain: [
+							{ agent: writer, name: "w", task: "Write new.txt." },
+							{ agent: "reviewer", name: "rev", task: "Review new.txt." },
+							{ resume: "w", task: "Fix what the review found." },
+						],
+					},
 				},
-			},
-			{ text: "read the chain" },
-		]);
-		real.script("w", [{ tool: "write", args: { path: "new.txt", content: "v1\n" } }, { text: "Wrote v1." }]);
-		real.script("rev", [{ text: "Half a review.", error: "the faux provider broke" }]);
-		real.start(["--", "delegate"]);
-		await started(real, "w");
-		await started(real, "rev");
-		const main = await real.waitForRequests("main", 2);
-		const [aggregate] = toolResults(main[1]);
-		expect(aggregate).toMatch(
-			/Chain chain_\w+: 3 steps, halted at chain\[1\] \("rev"\), failed; 1 step did not run\./,
-		);
-		expect(aggregate).toMatch(/- chain\[0\] "w" \(sub_[\w-]+\): completed/);
-		expect(aggregate).toMatch(/- chain\[1\] "rev" \(sub_[\w-]+\): failed: the faux provider broke/);
-		expect(aggregate).toMatch(/- chain\[2\] \("w"\): not run, since chain\[1\] \("rev"\) failed/);
-		expect(aggregate).toMatch(/keeps the partial work for you to inspect\. It is not ready to integrate/);
-		expect(aggregate).toMatch(/### chain\[0\] "w" \(sub_[\w-]+\): completed\nChecks: [^\n]+\nWrote v1\./);
-		const workspace = /^Workspace: (.+?), an isolated Git worktree/m.exec(aggregate)?.[1] ?? "";
-		expect(readFileSync(join(workspace, "new.txt"), "utf8")).toBe("v1\n");
-		// The repair never ran: the worker's session holds its first generation only.
-		expect(real.requests("w")).toHaveLength(2);
-		expect(recordOf(real, "w")).toMatchObject({ status: "closed", generation: 0 });
-	});
+				{ text: "read the chain" },
+			]);
+			real.script("w", [{ tool: "write", args: { path: "new.txt", content: "v1\n" } }, { text: "Wrote v1." }]);
+			real.script("rev", [{ text: "Half a review.", error: "the faux provider broke" }]);
+			real.start(["--", "delegate"]);
+			await started(real, "w");
+			await started(real, "rev");
+			const main = await real.waitForRequests("main", 2);
+			const [aggregate] = toolResults(main[1]);
+			expect(aggregate).toMatch(
+				/Chain chain_\w+: 3 steps, halted at chain\[1\] \("rev"\), failed; 1 step did not run\./,
+			);
+			expect(aggregate).toMatch(/- chain\[0\] "w" \(sub_[\w-]+\): completed/);
+			expect(aggregate).toMatch(/- chain\[1\] "rev" \(sub_[\w-]+\): failed: the faux provider broke/);
+			expect(aggregate).toMatch(/- chain\[2\] \("w"\): not run, since chain\[1\] \("rev"\) failed/);
+			expect(aggregate).toMatch(/keeps the partial work for you to inspect\. It is not ready to integrate/);
+			expect(aggregate).toMatch(/### chain\[0\] "w" \(sub_[\w-]+\): completed\nChecks: [^\n]+\nWrote v1\./);
+			const workspace = /^Workspace: (.+?), an isolated Git worktree/m.exec(aggregate)?.[1] ?? "";
+			expect(readFileSync(join(workspace, "new.txt"), "utf8")).toBe("v1\n");
+			// The repair never ran: the worker's session holds its first generation only.
+			expect(real.requests("w")).toHaveLength(2);
+			expect(recordOf(real, "w")).toMatchObject({ status: "closed", generation: 0 });
+		},
+	);
 
 	it("cancels the working step when the foreground call is cancelled, and never starts the next", async () => {
 		const real = await startOrchestrator();
@@ -366,123 +379,137 @@ describe.skipIf(!hasTmux)("a chain of RPC runs", () => {
 		expect(real.requests("b")).toEqual([]);
 	});
 
-	it("runs a background chain, refuses a Resume into its worktree while a step works there, and stops whole by its ID", async () => {
-		const real = await startOrchestrator();
-		pi = real;
-		repository(real.cwd, { "pkg/a.txt": "one\n" });
-		const steps = (chain: string): FauxStep[] => [
-			{
-				tool: "subagent",
-				args: {
-					chain: [
-						{ agent: writer, name: "w", task: "Write new.txt." },
-						{ agent: "reviewer", name: "rev", task: "Review new.txt." },
-						{ resume: "w", task: "Fix what the review found." },
-					],
-					background: true,
+	// Two pis one after another (w, then rev): a readiness bound for each to start, and one for the rest.
+	it(
+		"runs a background chain, refuses a Resume into its worktree while a step works there, and stops whole by its ID",
+		{ timeout: 3 * readinessMs },
+		async () => {
+			const real = await startOrchestrator();
+			pi = real;
+			repository(real.cwd, { "pkg/a.txt": "one\n" });
+			const steps = (chain: string): FauxStep[] => [
+				{
+					tool: "subagent",
+					args: {
+						chain: [
+							{ agent: writer, name: "w", task: "Write new.txt." },
+							{ agent: "reviewer", name: "rev", task: "Review new.txt." },
+							{ resume: "w", task: "Fix what the review found." },
+						],
+						background: true,
+					},
 				},
-			},
-			{ text: "waiting" },
-			{ tool: "subagent_resume", args: { agent: "w", task: "Sneak in an edit." } },
-			{ text: "refused" },
-			{ tool: "subagent_stop", args: { agent: chain } },
-			{ text: "stopped the chain" },
-			{ text: "read the chain" },
-		];
-		real.script("main", steps("unknown"));
-		real.script("w", [{ tool: "write", args: { path: "new.txt", content: "v1\n" } }, { text: "Wrote v1." }]);
-		real.script("rev", [{ text: "Never.", until: join(real.cwd, "..", "never") }]);
-		const pane = real.start(["--", "delegate"]);
-		const [, launched] = await real.waitForRequests("main", 2);
-		const [result] = toolResults(launched);
-		expect(result).toMatch(/^Background chain launched: chain_\w+, 3 steps, from chain\[0\] \("w"\) "w" \(sub_/);
-		// What to do after a call is said in its result.
-		expect(result).toContain("do not redo or touch its work, including the files in its scope");
-		expect(result).toContain("Never predict or invent its results; if the user asks, say it is still running.");
-		expect(result).toContain("Progress does not wake you; findings, questions and blockers reach you as messages.");
-		expect(result).toContain("Its processes end by themselves once it reports: there is nothing to close.");
-		expect(result).toContain(
-			[
-				"While it runs, do not redo or touch its work, including the files in its scope, and do not poll `subagent_status` by reflex. With no independent work left, end your turn and say you are waiting for the chain: its report will wake you. Never predict or invent its results; if the user asks, say it is still running.",
-				"Progress does not wake you; findings, questions and blockers reach you as messages. Its processes end by themselves once it reports: there is nothing to close.",
-			].join("\n"),
-		);
-		const chain = /chain_\w+/.exec(result)?.[0] ?? "";
-		real.script("main", steps(chain));
+				{ text: "waiting" },
+				{ tool: "subagent_resume", args: { agent: "w", task: "Sneak in an edit." } },
+				{ text: "refused" },
+				{ tool: "subagent_stop", args: { agent: chain } },
+				{ text: "stopped the chain" },
+				{ text: "read the chain" },
+			];
+			real.script("main", steps("unknown"));
+			real.script("w", [{ tool: "write", args: { path: "new.txt", content: "v1\n" } }, { text: "Wrote v1." }]);
+			real.script("rev", [{ text: "Never.", until: join(real.cwd, "..", "never") }]);
+			const pane = real.start(["--", "delegate"]);
+			const [, launched] = await real.waitForRequests("main", 2);
+			const [result] = toolResults(launched);
+			expect(result).toMatch(/^Background chain launched: chain_\w+, 3 steps, from chain\[0\] \("w"\) "w" \(sub_/);
+			// What to do after a call is said in its result.
+			expect(result).toContain("do not redo or touch its work, including the files in its scope");
+			expect(result).toContain("Never predict or invent its results; if the user asks, say it is still running.");
+			expect(result).toContain(
+				"Progress does not wake you; findings, questions and blockers reach you as messages.",
+			);
+			expect(result).toContain("Its processes end by themselves once it reports: there is nothing to close.");
+			expect(result).toContain(
+				[
+					"While it runs, do not redo or touch its work, including the files in its scope, and do not poll `subagent_status` by reflex. With no independent work left, end your turn and say you are waiting for the chain: its report will wake you. Never predict or invent its results; if the user asks, say it is still running.",
+					"Progress does not wake you; findings, questions and blockers reach you as messages. Its processes end by themselves once it reports: there is nothing to close.",
+				].join("\n"),
+			);
+			const chain = /chain_\w+/.exec(result)?.[0] ?? "";
+			real.script("main", steps(chain));
 
-		await started(real, "w");
-		await real.waitForRequests("rev", 1);
-		real.tmux.sendKeys(pane, ["try", "Enter"]);
-		const tried = await real.waitForRequests("main", 4);
-		expect(toolResults(tried[3]).at(-1)).toMatch(
-			/Cannot resume "w" \(sub_[\w-]+\): its worktree .* is in use by "rev" \(sub_[\w-]+\): no two runs work in one worktree at once/,
-		);
-		expect(real.requests("w")).toHaveLength(2);
+			await started(real, "w");
+			await real.waitForRequests("rev", 1);
+			real.tmux.sendKeys(pane, ["try", "Enter"]);
+			const tried = await real.waitForRequests("main", 4);
+			expect(toolResults(tried[3]).at(-1)).toMatch(
+				/Cannot resume "w" \(sub_[\w-]+\): its worktree .* is in use by "rev" \(sub_[\w-]+\): no two runs work in one worktree at once/,
+			);
+			expect(real.requests("w")).toHaveLength(2);
 
-		real.tmux.sendKeys(pane, ["stop", "Enter"]);
-		const main = await real.waitForRequests("main", 7);
-		expect(toolResults(main[5]).at(-1)).toMatch(/Stopped "rev" \(sub_[\w-]+\): its work was cancelled/);
-		const aggregate =
-			conversation(main[6])
-				.map(({ text }) => text)
-				.find((text) => text.includes(`Reports from the subagents of chain ${chain}`)) ?? "";
-		expect(aggregate).toMatch(new RegExp(`Chain ${chain}: 3 steps, halted at chain\\[1\\] \\("rev"\\), cancelled`));
-		expect(aggregate).toMatch(
-			new RegExp(`- chain\\[1\\] "rev" \\(sub_[\\w-]+\\): cancelled: Its chain ${chain} was stopped`),
-		);
-		expect(aggregate).toMatch(/- chain\[2\] \("w"\): not run/);
-		expect(real.requests("w")).toHaveLength(2);
-		// Proves only that nothing else woke the orchestrator within this while.
-		await new Promise((resolve) => setTimeout(resolve, 500));
-		expect(real.requests("main")).toHaveLength(7);
-	});
+			real.tmux.sendKeys(pane, ["stop", "Enter"]);
+			const main = await real.waitForRequests("main", 7);
+			expect(toolResults(main[5]).at(-1)).toMatch(/Stopped "rev" \(sub_[\w-]+\): its work was cancelled/);
+			const aggregate =
+				conversation(main[6])
+					.map(({ text }) => text)
+					.find((text) => text.includes(`Reports from the subagents of chain ${chain}`)) ?? "";
+			expect(aggregate).toMatch(
+				new RegExp(`Chain ${chain}: 3 steps, halted at chain\\[1\\] \\("rev"\\), cancelled`),
+			);
+			expect(aggregate).toMatch(
+				new RegExp(`- chain\\[1\\] "rev" \\(sub_[\\w-]+\\): cancelled: Its chain ${chain} was stopped`),
+			);
+			expect(aggregate).toMatch(/- chain\[2\] \("w"\): not run/);
+			expect(real.requests("w")).toHaveLength(2);
+			// Proves only that nothing else woke the orchestrator within this while.
+			await new Promise((resolve) => setTimeout(resolve, 500));
+			expect(real.requests("main")).toHaveLength(7);
+		},
+	);
 
-	it("hands the worktree to a fresh writer after the worker, which starts without the worker's context", async () => {
-		const real = await startOrchestrator();
-		pi = real;
-		const repo = real.cwd;
-		repository(repo, { "pkg/a.txt": "one\n" });
-		real.script("main", [
-			{
-				tool: "subagent",
-				args: {
-					chain: [
-						{ agent: writer, name: "w", task: "WORKER-TASK: write new.txt." },
-						{ agent: writer, name: "fix", cwd: "pkg", task: "Make new.txt say v2." },
-					],
+	// Two pis one after another (w, then fix): a readiness bound for each to start, and one for the rest.
+	it(
+		"hands the worktree to a fresh writer after the worker, which starts without the worker's context",
+		{ timeout: 3 * readinessMs },
+		async () => {
+			const real = await startOrchestrator();
+			pi = real;
+			const repo = real.cwd;
+			repository(repo, { "pkg/a.txt": "one\n" });
+			real.script("main", [
+				{
+					tool: "subagent",
+					args: {
+						chain: [
+							{ agent: writer, name: "w", task: "WORKER-TASK: write new.txt." },
+							{ agent: writer, name: "fix", cwd: "pkg", task: "Make new.txt say v2." },
+						],
+					},
 				},
-			},
-			{ text: "read the chain" },
-		]);
-		real.script("w", [{ tool: "write", args: { path: "pkg/new.txt", content: "v1\n" } }, { text: "Wrote v1." }]);
-		real.script("fix", [
-			{ tool: "edit", args: { path: "new.txt", edits: [{ oldText: "v1", newText: "v2" }] } },
-			{ text: "Made it v2." },
-		]);
-		real.start(["--", "delegate"]);
-		await started(real, "w");
-		await started(real, "fix");
-		const main = await real.waitForRequests("main", 2);
-		const fix = real.requests("fix");
-		expect(fix).toHaveLength(2);
-		expect(toolNames(fix[0])).toEqual(expect.arrayContaining(["edit", "write"]));
-		const first = conversation(fix[0]);
-		expect(first).toHaveLength(1);
-		expect(first[0].text).toContain("Wrote v1.");
-		expect(first[0].text).not.toContain("WORKER-TASK");
-		// Its edit of the worker's file succeeded, in the one worktree of the chain.
-		expect(toolResults(fix[1])).toEqual([expect.stringMatching(/Successfully replaced/)]);
+				{ text: "read the chain" },
+			]);
+			real.script("w", [{ tool: "write", args: { path: "pkg/new.txt", content: "v1\n" } }, { text: "Wrote v1." }]);
+			real.script("fix", [
+				{ tool: "edit", args: { path: "new.txt", edits: [{ oldText: "v1", newText: "v2" }] } },
+				{ text: "Made it v2." },
+			]);
+			real.start(["--", "delegate"]);
+			await started(real, "w");
+			await started(real, "fix");
+			const main = await real.waitForRequests("main", 2);
+			const fix = real.requests("fix");
+			expect(fix).toHaveLength(2);
+			expect(toolNames(fix[0])).toEqual(expect.arrayContaining(["edit", "write"]));
+			const first = conversation(fix[0]);
+			expect(first).toHaveLength(1);
+			expect(first[0].text).toContain("Wrote v1.");
+			expect(first[0].text).not.toContain("WORKER-TASK");
+			// Its edit of the worker's file succeeded, in the one worktree of the chain.
+			expect(toolResults(fix[1])).toEqual([expect.stringMatching(/Successfully replaced/)]);
 
-		const [aggregate] = toolResults(main[1]);
-		expect(aggregate).toMatch(/Chain chain_\w+: 2 steps, all completed\./);
-		const workspace = /^Workspace: (.+?), an isolated Git worktree/m.exec(aggregate)?.[1] ?? "";
-		expect(readFileSync(join(workspace, "pkg", "new.txt"), "utf8")).toBe("v2\n");
-		expect(recordOf(real, "fix")?.cwd).toBe(join(workspace, "pkg"));
-		expect(git(repo, "for-each-ref", "--format=%(refname)", "refs/bluclawd").trim().split("\n")).toEqual([
-			`refs/bluclawd/runs/${recordOf(real, "w")?.runId}/baseline`,
-		]);
-		expect(git(repo, "worktree", "list", "--porcelain").match(/^worktree /gm)).toHaveLength(2);
-	});
+			const [aggregate] = toolResults(main[1]);
+			expect(aggregate).toMatch(/Chain chain_\w+: 2 steps, all completed\./);
+			const workspace = /^Workspace: (.+?), an isolated Git worktree/m.exec(aggregate)?.[1] ?? "";
+			expect(readFileSync(join(workspace, "pkg", "new.txt"), "utf8")).toBe("v2\n");
+			expect(recordOf(real, "fix")?.cwd).toBe(join(workspace, "pkg"));
+			expect(git(repo, "for-each-ref", "--format=%(refname)", "refs/bluclawd").trim().split("\n")).toEqual([
+				`refs/bluclawd/runs/${recordOf(real, "w")?.runId}/baseline`,
+			]);
+			expect(git(repo, "worktree", "list", "--porcelain").match(/^worktree /gm)).toHaveLength(2);
+		},
+	);
 
 	it("halts at a step its Admission refuses once its turn comes, and names it blocked", async () => {
 		const real = await startOrchestrator();
@@ -525,48 +552,53 @@ describe.skipIf(!hasTmux)("a chain of RPC runs", () => {
 		expect(real.requests("b")).toEqual([]);
 	});
 
-	it("keeps the worktree a reading first step recorded, unchanged, for each step after it, and lets it go once the chain settles", async () => {
-		const real = await startOrchestrator();
-		pi = real;
-		const repo = real.cwd;
-		repository(repo, { "pkg/a.txt": "one\n" });
-		real.script("main", [
-			{
-				tool: "subagent",
-				args: {
-					chain: [
-						{ agent: "explorer", name: "look", cwd: "pkg", task: "Look at a.txt." },
-						{ agent: writer, name: "w", task: "Change nothing." },
-						{ agent: "reviewer", name: "rev", cwd: "pkg", task: "Review a.txt." },
-					],
+	// Three pis one after another (look, w, then rev): a readiness bound for each to start, and one for the rest.
+	it(
+		"keeps the worktree a reading first step recorded, unchanged, for each step after it, and lets it go once the chain settles",
+		{ timeout: 4 * readinessMs },
+		async () => {
+			const real = await startOrchestrator();
+			pi = real;
+			const repo = real.cwd;
+			repository(repo, { "pkg/a.txt": "one\n" });
+			real.script("main", [
+				{
+					tool: "subagent",
+					args: {
+						chain: [
+							{ agent: "explorer", name: "look", cwd: "pkg", task: "Look at a.txt." },
+							{ agent: writer, name: "w", task: "Change nothing." },
+							{ agent: "reviewer", name: "rev", cwd: "pkg", task: "Review a.txt." },
+						],
+					},
 				},
-			},
-			{ text: "read the chain" },
-		]);
-		real.script("look", [{ tool: "read", args: { path: "local.txt" } }, { text: "Looked." }]);
-		real.script("w", [{ text: "Nothing to change." }]);
-		real.script("rev", [{ tool: "read", args: { path: "a.txt" } }, { text: "Fine as it is." }]);
-		real.start(["--", "delegate"]);
-		await started(real, "look");
-		await started(real, "w");
-		await started(real, "rev");
-		const main = await real.waitForRequests("main", 2);
+				{ text: "read the chain" },
+			]);
+			real.script("look", [{ tool: "read", args: { path: "local.txt" } }, { text: "Looked." }]);
+			real.script("w", [{ text: "Nothing to change." }]);
+			real.script("rev", [{ tool: "read", args: { path: "a.txt" } }, { text: "Fine as it is." }]);
+			real.start(["--", "delegate"]);
+			await started(real, "look");
+			await started(real, "w");
+			await started(real, "rev");
+			const main = await real.waitForRequests("main", 2);
 
-		// The first step only reads, yet works in the worktree its Admission recorded, the checkout's local state in it.
-		const look = real.requests("look");
-		expect(systemPrompt(look[0])).toMatch(/You read an isolated Git worktree/);
-		expect(toolResults(look[1])).toEqual(["uncommitted\n"]);
-		// Unchanged after the first two steps, it was still there for the third.
-		const rev = real.requests("rev");
-		expect(toolResults(rev[1])).toEqual(["one\n"]);
-		const [look1, w1, rev1] = ["look", "w", "rev"].map((name) => recordOf(real, name));
-		expect(rev1?.cwd).toBe(join(String(w1?.cwd), "pkg"));
-		expect(look1?.cwd).toBe(rev1?.cwd);
+			// The first step only reads, yet works in the worktree its Admission recorded, the checkout's local state in it.
+			const look = real.requests("look");
+			expect(systemPrompt(look[0])).toMatch(/You read an isolated Git worktree/);
+			expect(toolResults(look[1])).toEqual(["uncommitted\n"]);
+			// Unchanged after the first two steps, it was still there for the third.
+			const rev = real.requests("rev");
+			expect(toolResults(rev[1])).toEqual(["one\n"]);
+			const [look1, w1, rev1] = ["look", "w", "rev"].map((name) => recordOf(real, name));
+			expect(rev1?.cwd).toBe(join(String(w1?.cwd), "pkg"));
+			expect(look1?.cwd).toBe(rev1?.cwd);
 
-		const [aggregate] = toolResults(main[1]);
-		expect(aggregate).toMatch(/Chain chain_\w+: 3 steps, all completed\./);
-		// Unchanged once the chain settled, it went, as any run's unchanged worktree does.
-		expect(aggregate).toMatch(/^Workspace: .+, removed: it held no change since its baseline/m);
-		expect(existsSync(String(w1?.cwd))).toBe(false);
-	});
+			const [aggregate] = toolResults(main[1]);
+			expect(aggregate).toMatch(/Chain chain_\w+: 3 steps, all completed\./);
+			// Unchanged once the chain settled, it went, as any run's unchanged worktree does.
+			expect(aggregate).toMatch(/^Workspace: .+, removed: it held no change since its baseline/m);
+			expect(existsSync(String(w1?.cwd))).toBe(false);
+		},
+	);
 });

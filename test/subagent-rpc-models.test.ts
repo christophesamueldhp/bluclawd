@@ -2,6 +2,7 @@ import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { readinessMs } from "./helpers/heartbeats.ts";
 import { conversation, FAUX, type FauxRequest, hasTmux, type RealPi, startRealPi } from "./helpers/real-pi.ts";
 import { waitFor } from "./helpers/wait-for.ts";
 
@@ -52,89 +53,100 @@ describe.skipIf(!hasTmux)("an RPC run's model and thinking", () => {
 		pi = undefined;
 	});
 
-	it("takes each of model and thinking from the call, else the role, else the orchestrator, as its pi asks the model", async () => {
-		const real = await startOrchestrator();
-		pi = real;
-		const role = (name: string, defaults: { model?: string; thinkingLevel?: string } = {}) => ({
-			name,
-			description: "A role.",
-			instructions: "Answer.",
-			...defaults,
-		});
-		const tuned = { model: "faux/faux-3", thinkingLevel: "low" };
-		const runs: { name: string; args: Record<string, unknown> }[] = [
-			{ name: "parents", args: { agent: role("plain") } },
-			{ name: "roles", args: { agent: role("tuned", tuned) } },
-			{ name: "mixed", args: { agent: role("modelled", { model: "faux/faux-3" }) } },
-			{ name: "chosen", args: { agent: role("tuned", tuned), model: "faux/faux-1", thinkingLevel: "off" } },
-			{ name: "inherited", args: { agent: role("tuned", tuned), model: "inherit", thinkingLevel: "inherit" } },
-			{ name: "half", args: { agent: role("tuned", tuned), model: "inherit" } },
-			// The orchestrator's level, which faux-1 cannot think at: refused, not lowered.
-			{ name: "refused", args: { agent: role("plain"), model: "faux/faux-1" } },
-		];
-		// In the background, so the runs start side by side; each Report then wakes the orchestrator.
-		real.script("main", [
-			...runs.map(({ name, args }) => ({
-				tool: "subagent",
-				args: { ...args, name, task: "Answer.", background: true },
-			})),
-			...runs.map(() => ({ text: "noted" })),
-		]);
-		for (const { name } of runs) real.script(name, [{ text: `${name} answered` }]);
-		real.start(["--model", "faux/faux-2", "--thinking", "medium", "--", "delegate"]);
-		// Reports may wake it more than once by now.
-		await waitFor(() => expect(real.requests("main").length).toBeGreaterThan(runs.length));
-		const results = subagentResults(real.requests("main").slice(0, runs.length + 1));
-		for (const { name } of runs.slice(0, -1)) await real.waitForRequests(name, 1);
+	// Two pis one after another (four side by side, then the two left once slots free): a readiness bound for each to
+	// start, and one for the rest.
+	it(
+		"takes each of model and thinking from the call, else the role, else the orchestrator, as its pi asks the model",
+		{ timeout: 3 * readinessMs },
+		async () => {
+			const real = await startOrchestrator();
+			pi = real;
+			const role = (name: string, defaults: { model?: string; thinkingLevel?: string } = {}) => ({
+				name,
+				description: "A role.",
+				instructions: "Answer.",
+				...defaults,
+			});
+			const tuned = { model: "faux/faux-3", thinkingLevel: "low" };
+			const runs: { name: string; args: Record<string, unknown> }[] = [
+				{ name: "parents", args: { agent: role("plain") } },
+				{ name: "roles", args: { agent: role("tuned", tuned) } },
+				{ name: "mixed", args: { agent: role("modelled", { model: "faux/faux-3" }) } },
+				{ name: "chosen", args: { agent: role("tuned", tuned), model: "faux/faux-1", thinkingLevel: "off" } },
+				{ name: "inherited", args: { agent: role("tuned", tuned), model: "inherit", thinkingLevel: "inherit" } },
+				{ name: "half", args: { agent: role("tuned", tuned), model: "inherit" } },
+				// The orchestrator's level, which faux-1 cannot think at: refused, not lowered.
+				{ name: "refused", args: { agent: role("plain"), model: "faux/faux-1" } },
+			];
+			// In the background, so the runs start side by side; each Report then wakes the orchestrator.
+			real.script("main", [
+				...runs.map(({ name, args }) => ({
+					tool: "subagent",
+					args: { ...args, name, task: "Answer.", background: true },
+				})),
+				...runs.map(() => ({ text: "noted" })),
+			]);
+			for (const { name } of runs) real.script(name, [{ text: `${name} answered` }]);
+			real.start(["--model", "faux/faux-2", "--thinking", "medium", "--", "delegate"]);
+			// Reports may wake it more than once by now.
+			await waitFor(() => expect(real.requests("main").length).toBeGreaterThan(runs.length));
+			const results = subagentResults(real.requests("main").slice(0, runs.length + 1));
+			for (const { name } of runs.slice(0, -1)) await real.waitForRequests(name, 1);
 
-		expect(Object.fromEntries(runs.map(({ name }) => [name, asked(real.requests(name))]))).toEqual({
-			parents: ["faux/faux-2:medium"],
-			roles: ["faux/faux-3:low"],
-			mixed: ["faux/faux-3:medium"],
-			chosen: ["faux/faux-1:off"],
-			inherited: ["faux/faux-2:medium"],
-			half: ["faux/faux-2:low"],
-			refused: [],
-		});
-		// Admitted as resolved, beside the role's own defaults.
-		expect(admitted(real.agentDir, "half")).toMatchObject({
-			model: "faux/faux-3",
-			thinkingLevel: "low",
-			admitted: { provider: "faux", modelId: "faux-2", thinkingLevel: "low" },
-		});
-		expect(results.at(-1)).toContain(
-			'Thinking level "medium" is not supported by subagent model "faux/faux-1" (supported: off).',
-		);
-	});
+			expect(Object.fromEntries(runs.map(({ name }) => [name, asked(real.requests(name))]))).toEqual({
+				parents: ["faux/faux-2:medium"],
+				roles: ["faux/faux-3:low"],
+				mixed: ["faux/faux-3:medium"],
+				chosen: ["faux/faux-1:off"],
+				inherited: ["faux/faux-2:medium"],
+				half: ["faux/faux-2:low"],
+				refused: [],
+			});
+			// Admitted as resolved, beside the role's own defaults.
+			expect(admitted(real.agentDir, "half")).toMatchObject({
+				model: "faux/faux-3",
+				thinkingLevel: "low",
+				admitted: { provider: "faux", modelId: "faux-2", thinkingLevel: "low" },
+			});
+			expect(results.at(-1)).toContain(
+				'Thinking level "medium" is not supported by subagent model "faux/faux-1" (supported: off).',
+			);
+		},
+	);
 
-	it("fails a run whose pi does not run the admitted model and thinking, before it is given its task", async () => {
-		// Its pi finds faux-2 unable to think, and no faux-1 at all: pi lowers the level, and takes faux-1 for a
-		// custom id it knows nothing of, without failing either way.
-		const real = await startOrchestrator(DRIFTED);
-		pi = real;
-		real.script("main", [
-			{
-				tool: "subagent",
-				args: { agent: "explorer", name: "lowered", task: "Look.", model: "faux/faux-2", thinkingLevel: "high" },
-			},
-			{
-				tool: "subagent",
-				args: { agent: "explorer", name: "invented", task: "Look.", model: "faux/faux-1", thinkingLevel: "off" },
-			},
-			{ text: "both failed" },
-		]);
-		real.start(["--model", "faux/faux-2", "--thinking", "medium", "--", "delegate"]);
-		const [lowered, invented] = subagentResults(await real.waitForRequests("main", 3));
+	// Two pis one after another (lowered, then invented): a readiness bound for each to start, and one for the rest.
+	it(
+		"fails a run whose pi does not run the admitted model and thinking, before it is given its task",
+		{ timeout: 3 * readinessMs },
+		async () => {
+			// Its pi finds faux-2 unable to think, and no faux-1 at all: pi lowers the level, and takes faux-1 for a
+			// custom id it knows nothing of, without failing either way.
+			const real = await startOrchestrator(DRIFTED);
+			pi = real;
+			real.script("main", [
+				{
+					tool: "subagent",
+					args: { agent: "explorer", name: "lowered", task: "Look.", model: "faux/faux-2", thinkingLevel: "high" },
+				},
+				{
+					tool: "subagent",
+					args: { agent: "explorer", name: "invented", task: "Look.", model: "faux/faux-1", thinkingLevel: "off" },
+				},
+				{ text: "both failed" },
+			]);
+			real.start(["--model", "faux/faux-2", "--thinking", "medium", "--", "delegate"]);
+			const [lowered, invented] = subagentResults(await real.waitForRequests("main", 3));
 
-		expect(lowered).toMatch(
-			/Outcome: failed: its pi runs faux\/faux-2 at thinking off, not faux\/faux-2 at thinking high\./,
-		);
-		expect(invented).toMatch(
-			/Outcome: failed: its pi cannot use faux\/faux-1: the model is unknown to it, or it has no authentication for it\./,
-		);
-		expect(real.requests("lowered")).toHaveLength(0);
-		expect(real.requests("invented")).toHaveLength(0);
-	});
+			expect(lowered).toMatch(
+				/Outcome: failed: its pi runs faux\/faux-2 at thinking off, not faux\/faux-2 at thinking high\./,
+			);
+			expect(invented).toMatch(
+				/Outcome: failed: its pi cannot use faux\/faux-1: the model is unknown to it, or it has no authentication for it\./,
+			);
+			expect(real.requests("lowered")).toHaveLength(0);
+			expect(real.requests("invented")).toHaveLength(0);
+		},
+	);
 
 	it("refuses before any run starts a model it does not know or cannot authenticate, and a router it cannot follow", async () => {
 		// No key in the environment for openai, whose models pi knows without one.
@@ -203,46 +215,58 @@ describe.skipIf(!hasTmux)("an RPC run's model and thinking", () => {
 		});
 	});
 
-	it("keeps the model and thinking a queued run was admitted with when its orchestrator changes its own before the run's turn", async () => {
-		const real = await startOrchestrator();
-		pi = real;
-		const settings = join(real.agentDir, "settings.json");
-		writeFileSync(
-			settings,
-			JSON.stringify({ ...JSON.parse(readFileSync(settings, "utf8")), subagents: { panes: false, maxActive: 1 } }),
-		);
-		const release = join(real.cwd, "release");
-		const background = (name: string) => ({
-			tool: "subagent",
-			args: { agent: "explorer", name, task: "List.", background: true },
-		});
-		real.script("main", [
-			{ calls: [background("holder"), background("queued")] },
-			{ text: "launched" },
-			{ text: "switched" },
-			...Array(3).fill({ text: "noted" }),
-		]);
-		real.script("holder", [{ text: "holder listed", until: release }]);
-		real.script("queued", [{ text: "queued listed" }]);
-		const pane = real.start(["--model", "faux/faux-2", "--thinking", "medium", "--", "delegate"]);
-		await real.waitForRequests("main", 2);
-		await real.waitForRequests("holder", 1);
+	// Two pis one after another (holder, then queued): a readiness bound for each to start, and one for the rest.
+	it(
+		"keeps the model and thinking a queued run was admitted with when its orchestrator changes its own before the run's turn",
+		{ timeout: 3 * readinessMs },
+		async () => {
+			const real = await startOrchestrator();
+			pi = real;
+			const settings = join(real.agentDir, "settings.json");
+			writeFileSync(
+				settings,
+				JSON.stringify({
+					...JSON.parse(readFileSync(settings, "utf8")),
+					subagents: { panes: false, maxActive: 1 },
+				}),
+			);
+			const release = join(real.cwd, "release");
+			const queue = join(real.cwd, "queue");
+			const background = (name: string) => ({
+				tool: "subagent",
+				args: { agent: "explorer", name, task: "List.", background: true },
+			});
+			// One at a time, so the one queued is known: launched side by side, either may claim the slot first.
+			real.script("main", [
+				background("holder"),
+				{ ...background("queued"), until: queue },
+				{ text: "launched" },
+				{ text: "switched" },
+				...Array(3).fill({ text: "noted" }),
+			]);
+			real.script("holder", [{ text: "holder listed", until: release }]);
+			real.script("queued", [{ text: "queued listed" }]);
+			const pane = real.start(["--model", "faux/faux-2", "--thinking", "medium", "--", "delegate"]);
+			await real.waitForRequests("holder", 1);
+			writeFileSync(queue, "");
+			await real.waitForRequests("main", 3);
 
-		// The only slot is the holder's, so the other run waits with no model call while the orchestrator switches.
-		real.tmux.sendKeys(pane, ["/model faux/faux-1", "Enter"]);
-		await waitFor(() => expect(real.tmux.capture(pane, 50).join("\n")).toContain("Model: faux-1"));
-		real.tmux.sendKeys(pane, ["anything new?", "Enter"]);
-		expect(asked((await real.waitForRequests("main", 3)).slice(2))).toEqual(["faux/faux-1:off"]);
-		expect(real.requests("queued")).toEqual([]);
-		writeFileSync(release, "");
+			// The only slot is the holder's, so the other run waits with no model call while the orchestrator switches.
+			real.tmux.sendKeys(pane, ["/model faux/faux-1", "Enter"]);
+			await waitFor(() => expect(real.tmux.capture(pane, 50).join("\n")).toContain("Model: faux-1"));
+			real.tmux.sendKeys(pane, ["anything new?", "Enter"]);
+			expect(asked((await real.waitForRequests("main", 4)).slice(3))).toEqual(["faux/faux-1:off"]);
+			expect(real.requests("queued")).toEqual([]);
+			writeFileSync(release, "");
 
-		expect(asked(await real.waitForRequests("queued", 1))).toEqual(["faux/faux-2:medium"]);
-		expect(admitted(real.agentDir, "queued").admitted).toEqual({
-			provider: "faux",
-			modelId: "faux-2",
-			thinkingLevel: "medium",
-		});
-		await waitFor(() => expect(JSON.stringify(real.requests("main"))).toContain("queued listed"));
-		expect(JSON.stringify([...real.requests("main"), ...real.requests("queued")])).not.toContain("ran dry");
-	});
+			expect(asked(await real.waitForRequests("queued", 1))).toEqual(["faux/faux-2:medium"]);
+			expect(admitted(real.agentDir, "queued").admitted).toEqual({
+				provider: "faux",
+				modelId: "faux-2",
+				thinkingLevel: "medium",
+			});
+			await waitFor(() => expect(JSON.stringify(real.requests("main"))).toContain("queued listed"));
+			expect(JSON.stringify([...real.requests("main"), ...real.requests("queued")])).not.toContain("ran dry");
+		},
+	);
 });
