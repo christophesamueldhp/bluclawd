@@ -867,7 +867,8 @@ function until(done: () => boolean, signal: AbortSignal): Promise<boolean> {
  */
 async function endHostGroup(hostPid: number, contained: RunContainment | undefined): Promise<boolean> {
 	const gone = () => !processGroupAlive(hostPid);
-	if (!(await until(gone, AbortSignal.timeout(STOP_GRACE_MS)))) {
+	// The last look may be a second old: a fresh one first, so a group that has ended since is not killed.
+	if (!(await until(gone, AbortSignal.timeout(STOP_GRACE_MS))) && processGroupAlive(hostPid, { fresh: true })) {
 		try {
 			process.kill(-hostPid, "SIGKILL");
 		} catch {
