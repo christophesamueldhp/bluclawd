@@ -36,13 +36,15 @@ export const RUN_PANE_ENV = "BLUCLAWD_RUN_PANE";
 /** The command ←← dispatches; not meant to be typed. */
 export const AGENT_VIEW_COMMAND = "agent-view";
 
+// `-q` on extended-keys-format: tmux 3.3 and 3.4 have no such option (3.4 sends CSI u anyway), and a config error
+// opens view mode over the first pane a terminal attaches to, which then takes its keys.
 const CONFIG = `set -g prefix None
 set -g prefix2 None
 unbind-key -a
 set -g status off
 set -g escape-time 0
 set -g extended-keys always
-set -g extended-keys-format csi-u
+set -gq extended-keys-format csi-u
 set -g default-terminal tmux-256color
 set -as terminal-features ',*:RGB:extkeys:hyperlinks:sync:clipboard:title'
 set -g allow-passthrough on
