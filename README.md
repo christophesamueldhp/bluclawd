@@ -634,7 +634,8 @@ A file rule also blocks a bash command that names a matching path —
 it: an output redirect target is never read, so a `Read` rule lets `echo x >> .env`
 and `echo x > .env` through, a `Write` rule only `>>`, and an `Edit` rule neither
 (`echo x > .git/config` is an `Edit` rule's). `Read(**/.env*)` + `Write(**/.env*)`
-keeps `.env` unread and whole while `>>` still appends to it. `powershell` is
+keeps `.env` unread and whole while `>>` still appends to it (except under the
+Linux [sandbox](#sandbox), which refuses it). `powershell` is
 judged as bash, and a `grep` over a folder drops the lines it found in a denied
 file. Deny rules
 match text, not behavior: a command that builds the path or name at run time
@@ -680,7 +681,8 @@ it is read when a session starts, so `/reload` after editing:
 
 - Reads: everything except what a `Read` rule denies, plus `filesystem.denyRead`.
 - Writes: the working directory and the temp directory, plus `filesystem.allowWrite`; never
-  what an `Edit` or `Write` rule denies. Under the sandbox a `Write` rule blocks `>>` too.
+  what an `Edit` or `Write` rule denies. Under the sandbox a `Write` rule blocks `>>` too. On
+  Linux a file a `Read` rule or `filesystem.denyRead` denies is not writable either, `>>` included.
 - Network: hosts in `network.allowedDomains`. For any other host, pi asks once per host and port
   per session, the one prompt bluclawd adds (without a UI, the host is refused).
 - Rule paths are anchored at the working directory: `Read(**/.env*)` covers `.env` files

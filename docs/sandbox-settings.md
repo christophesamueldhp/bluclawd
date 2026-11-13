@@ -140,7 +140,7 @@ nothing from settings): `allowPlaintextHeaderSet`, `stripResponseHeaders`, `refu
 
 | Key | Value | What it does |
 |---|---|---|
-| `denyRead` | paths | Not readable (plus `Read` deny rules) |
+| `denyRead` | paths | Not readable (plus `Read` deny rules). On Linux a denied file is not writable either |
 | `allowRead` | paths | Readable again inside a `denyRead` area; wins over `denyRead`. E.g. deny `~/.ssh`, allow `~/.ssh/known_hosts` |
 | `allowWrite` | paths | Writable (plus the working directory and temp) |
 | `denyWrite` | paths | Not writable even inside `allowWrite`; wins over `allowWrite` |
