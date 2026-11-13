@@ -23,7 +23,7 @@ import type { SessionMessage, SessionUsage } from "../../daemon/ipc/protocol.ts"
 import { OrchestratorClient } from "../../daemon/orchestrator-client.ts";
 import { processAlive, processGroupAlive } from "../../daemon/processes.ts";
 import { runMarker } from "../../daemon/run-members.ts";
-import { type RunHostLaunch, runPaneSession } from "../../daemon/run-queue.ts";
+import { type RunHostLaunch, runPaneSession, runQueueKey, type SlotClaim } from "../../daemon/run-queue.ts";
 import * as forkSettings from "../_shared/settings.ts";
 import {
 	endRunProcesses,
@@ -388,6 +388,8 @@ export interface RunSlots {
 	ensure(): Promise<boolean>;
 	/** True once run `run` of orchestrator `parent` is granted a slot; false when the daemon's wait passed first. */
 	claim(run: string, parent: string, signal: AbortSignal): Promise<boolean>;
+	/** Grants run `run` a slot at once if one is free, never queuing it; says how many are taken, of how many. */
+	claimNow(run: string, parent: string): Promise<SlotClaim>;
 	/** Has the daemon start a granted run's host; returns its pid. */
 	launch(run: string, host: RunHostLaunch): Promise<number>;
 	/** Gives up a claim, or a slot not launched yet. */
@@ -406,6 +408,7 @@ export function daemonRunSlots(): RunSlots {
 			return ensuring;
 		},
 		claim: (run, parent, signal) => new OrchestratorClient().claimRun(run, parent, signal),
+		claimNow: (run, parent) => new OrchestratorClient().claimRunNow(run, parent),
 		launch: (run, host) => new OrchestratorClient().launchRun(run, host),
 		release: (run) => new OrchestratorClient().releaseRun(run),
 	};
@@ -474,6 +477,8 @@ export interface RpcRunDeps {
 	 * its recipient holds it for good yet, or refused it for good.
 	 */
 	relay(message: RunOutboxMessage): () => boolean;
+	/** A prompt the user typed in the run's pane: its orchestrator is told, without a turn. */
+	typed(text: string): void;
 	/** An approval the run asks for, answered by the user or blocked; `signal` aborts once it takes no answer. */
 	approve(request: RunApprovalRequest, signal: AbortSignal): Promise<RunApprovalAnswer>;
 }
@@ -523,6 +528,11 @@ export async function executeRpcRun(
 		const pending = readRunOutbox(launch.runDir, record.generation, relayed);
 		for (const message of pending) {
 			if (handed.has(message.seq)) continue;
+			if (message.kind === "typed") {
+				deps.typed(message.text);
+				handed.set(message.seq, () => true);
+				continue;
+			}
 			if (message.kind === "progress") controller.updateProgress(message.content);
 			handed.set(message.seq, message.kind === "progress" ? () => true : deps.relay(message));
 		}
@@ -611,7 +621,7 @@ export async function executeRpcRun(
 	const turn = taken
 		? { hostPid: taken }
 		: await startInTurn(
-				`${record.runId}/${record.generation}`,
+				runQueueKey(record.runId, record.generation),
 				record.parentSessionId,
 				contained ? { ...host, contained: true } : host,
 				launch.recheck,

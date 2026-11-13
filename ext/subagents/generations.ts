@@ -18,6 +18,7 @@ import { inParentScope, type ParentScope, type ParentScopeChecks, type ScopedRun
 import { buildSubagentResultEnvelope, MAX_PARENT_REPORT_BYTES, type SubagentResultDetails } from "./results.ts";
 import { executeRpcRun, type RunSlots } from "./rpc-runs.ts";
 import { NETWORK_ACCESS, type RunApprovalAnswer, type RunApprovalRequest } from "./run-approvals.ts";
+import { userInstructionNote } from "./run-intervention.ts";
 import { postToRun, whenGiven } from "./run-mailbox.ts";
 import { type RpcRunSender, rpcRunMessageText } from "./run-messages.ts";
 import { isTerminalSubagentStatus, type SubagentRunRecord, SubagentRunScheduler } from "./runs.ts";
@@ -177,6 +178,23 @@ export function createGenerations(deps: GenerationDeps) {
 				if (!record) return;
 				deps.scope.notify(record, noticeOf(deps.agentDir(), record, report));
 			};
+			/** Kept in the orchestrator's session while the run is in its scope: it starts no turn. */
+			const note = (text: (record: Readonly<SubagentRunRecord>) => string) => {
+				const record = scheduler.getRun(runId);
+				if (!record || !deps.scope.inScope(record)) return;
+				try {
+					deps.pi.sendMessage(
+						{
+							customType: SUBAGENT_MESSAGE_CUSTOM_TYPE,
+							content: [{ type: "text", text: text(record) }],
+							display: true,
+						},
+						{ deliverAs: "steer", triggerTurn: false },
+					);
+				} catch {
+					// The orchestrator's session was replaced meanwhile.
+				}
+			};
 			const usage = (sessionId: string, totals: SessionUsage) =>
 				recordRunSessionUsage(deps.agentDir(), params.record, sessionId, totals);
 			if ("rpc" in execCtx) {
@@ -242,6 +260,7 @@ export function createGenerations(deps: GenerationDeps) {
 							// The orchestrator holds it once its session does: before, it may be only in its pi's memory.
 							return (): boolean => sibling || deps.scope.holds(id);
 						},
+						typed: (text) => note((record) => userInstructionNote(record, text)),
 						approve: (request, signal) => approve(runId, request, signal),
 					});
 				} finally {
@@ -281,19 +300,11 @@ export function createGenerations(deps: GenerationDeps) {
 					notify,
 					usage,
 					// Kept in the orchestrator's session for the user, who answers in the run's own: it starts no turn.
-					needsInput: (dialog) => {
-						const record = scheduler.getRun(runId);
-						if (!record || !deps.scope.inScope(record)) return;
-						const text = `Subagent ${formatRunLabel(record)} needs input${dialog ? `: ${dialog}` : ""}. Open it to answer.`;
-						try {
-							deps.pi.sendMessage(
-								{ customType: SUBAGENT_MESSAGE_CUSTOM_TYPE, content: [{ type: "text", text }], display: true },
-								{ deliverAs: "steer", triggerTurn: false },
-							);
-						} catch {
-							// The orchestrator's session was replaced meanwhile.
-						}
-					},
+					needsInput: (dialog) =>
+						note(
+							(record) =>
+								`Subagent ${formatRunLabel(record)} needs input${dialog ? `: ${dialog}` : ""}. Open it to answer.`,
+						),
 				});
 			} finally {
 				deps.bus.unregister(runId, "has been closed");

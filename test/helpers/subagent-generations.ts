@@ -95,6 +95,7 @@ export function createGenerationsFixture(earlier?: { cwd: string; agentDir: stri
 		slots: {
 			ensure: async () => false,
 			claim: async () => false,
+			claimNow: async () => ({ granted: false, active: 0, capacity: 0 }),
 			launch: async () => {
 				throw new Error("no queue");
 			},

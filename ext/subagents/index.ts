@@ -11,7 +11,7 @@ import { isKeyRelease, matchesKey, type TUI } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import type { SessionMessage } from "../../daemon/ipc/protocol.ts";
 import { OrchestratorClient } from "../../daemon/orchestrator-client.ts";
-import { runPaneSession } from "../../daemon/run-queue.ts";
+import { runPaneSession, runQueueKey, type SlotClaim } from "../../daemon/run-queue.ts";
 import { endPane, runParent, Tmux } from "../../daemon/tmux.ts";
 import { notifyAgentTasksChanged, publishAgentTasks } from "../_shared/agent-tasks.ts";
 import { commandBlock } from "../_shared/command-block.ts";
@@ -83,7 +83,7 @@ const relaysGiven = sharedRef("subagentRelaysGiven", new Set<string>()).get();
 const ENDED_SHOWN_MS = 30_000;
 /** How many open runs `subagent_status` describes at once. */
 const MAX_STATUS_RUNS = 30;
-/** How long opening a finished run waits for the pane its Resume runs in, before saying it waits for its turn. */
+/** How long opening a finished run waits for the pane its Resume runs in, in the slot it took. */
 const PANE_OPEN_WAIT_MS = 5000;
 const timedTmux = (): Tmux => new Tmux(undefined, undefined, { timeoutMs: 2000 });
 const SUBAGENT_DESCRIPTION_LEAD = "Delegate a task to a child agent";
@@ -441,8 +441,8 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 
 		/**
 		 * Opens a run from an orchestrator in a pane (ADR-0013): its generation's pane while it runs in one. A finished
-		 * run resumes in a pane for the user to type in, opened once its turn in the queue comes; one still queued opens
-		 * once it runs. A generation on pi's RPC, launched from no pane, has none: its conversation shows here instead.
+		 * run resumes in a pane for the user to type in, when a slot is free for it now; one still queued opens once it
+		 * runs. A generation on pi's RPC, launched from no pane, has none: its conversation shows here instead.
 		 */
 		const openPaneRun = async (run: SubagentRunRecord, ctx: ExtensionContext): Promise<void> => {
 			const label = run.name ?? run.runId;
@@ -465,8 +465,34 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 				return;
 			}
 			if (!isResumableSubagentStatus(run.status)) return openRpcRun(run, ctx);
+			// No terminal would show a Resume that started later, after a wait in the queue: it takes a slot free now,
+			// or starts nothing (#353).
+			const key = runQueueKey(run.runId, run.generation + 1);
+			let slot: SlotClaim;
+			try {
+				if (!(await slots.ensure())) throw new Error("the daemon that queues runs is not running");
+				slot = await slots.claimNow(key, run.parentSessionId);
+			} catch (error) {
+				ctx.ui.notify(
+					`Could not open ${label}: ${error instanceof Error ? error.message : String(error)}`,
+					"warning",
+				);
+				return;
+			}
+			if (slot.claimed) {
+				ctx.ui.notify(`${label} is opening already: its pane shows once it starts.`, "info");
+				return;
+			}
+			if (!slot.granted) {
+				ctx.ui.notify(
+					`No slot is free for ${label} (${slot.active} of ${slot.capacity} runs active): nothing was started. Open it again once a run ends.`,
+					"info",
+				);
+				return;
+			}
 			const resumed = await admission.resume(run, () => "", ctx, { from: "user", typed: true });
 			if (!resumed.ok) {
+				slots.release(key).catch(() => {});
 				ctx.ui.notify(resumed.error, "warning");
 				// It cannot resume now: its conversation shows here instead, as for a run with no pane.
 				return openRpcRun(run, ctx);
@@ -476,7 +502,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 				if (await show(generation)) return;
 				await new Promise((resolve) => setTimeout(resolve, 200));
 			}
-			ctx.ui.notify(`${label} waits for its turn; open it again once it runs.`, "info");
+			ctx.ui.notify(`${label} was slow to start, and ends with nothing done; open it again.`, "info");
 		};
 
 		/**

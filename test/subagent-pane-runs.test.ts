@@ -51,6 +51,10 @@ function crash(real: RealPi, pane: string): void {
 	process.kill(pid, "SIGKILL");
 }
 
+/** The notes of what the user typed to a run, in a request of its orchestrator's. */
+const notes = (request: FauxRequest) =>
+	conversation(request).flatMap(({ text }) => text.match(/The user instructed subagent .*/g) ?? []);
+
 /**
  * Starts the host of the run in `runDir` in its pane `pane` ahead of the daemon, which launches the run into that pane
  * as it finds it: the host waits there until `gate` exists.
@@ -394,7 +398,7 @@ describe.skipIf(!hasTmux)("a run in a pane of its own", () => {
 		await waitFor(() => expect(real.tmux.hasSession(pane)).toBe(false));
 	});
 
-	it("resumes once finished in a pane the user types its next instruction in, opened from /tasks", async () => {
+	it("resumes once finished in a pane the user types its next instruction in, opened from /tasks; its orchestrator is told of it (#357)", async () => {
 		const real = await startOrchestrator([...DEFAULT_EXTENSIONS, "background-bash"]);
 		pi = real;
 		real.script("main", [
@@ -424,11 +428,143 @@ describe.skipIf(!hasTmux)("a run in a pane of its own", () => {
 		real.tmux.sendKeys(pane, ["Also remember HERON.", "Enter"]);
 		const kept = await real.waitForRequests("kept", 2);
 		expect(conversation(kept[1]).at(-1)?.text).toBe("Also remember HERON.");
+		// Told once of the instruction, which woke it for no turn of its own: its next turn is the Report's.
 		const main = await real.waitForRequests("main", 3);
 		expect(conversation(main[2]).at(-1)?.text).toContain("You also said HERON.");
+		expect(notes(main[2])).toEqual([`The user instructed subagent "kept" (${runId}) directly: Also remember HERON.`]);
 		await waitFor(() => expect(real.tmux.hasSession(pane)).toBe(false));
 		await waitFor(() => expect(real.shown()).toBe(orchestrator));
 	});
+
+	it("tells its orchestrator of each prompt the user types in its pane while it works, without a turn, and of none its orchestrator sent (#357)", async () => {
+		const real = await startOrchestrator();
+		pi = real;
+		const gate = join(real.cwd, "look.go");
+		real.script("main", [
+			{ tool: "subagent", args: { agent: "explorer", name: "look", task: "Look.", background: true } },
+			{ text: "waiting for look" },
+			{ tool: "subagent_message", args: { to: "look", content: "Also say OSPREY." } },
+			{ text: "told look" },
+			{ text: "read the report" },
+		]);
+		real.script("look", [
+			{ text: "Looked.", until: gate },
+			{ text: "Said HERON." },
+			{ text: "Said IBIS." },
+			{ text: "Said them all." },
+		]);
+		const orchestrator = real.start(["--", "delegate"]);
+		real.attach(orchestrator);
+		await real.waitForRequests("main", 2);
+		await real.waitForRequests("look", 1);
+		const { runId } = runRecord(real.agentDir, "look");
+		const pane = runPaneSession(runId, 0);
+		const screen = () => real.tmux.capture(orchestrator, 80).join("\n");
+		await waitFor(() => expect(screen()).toMatch(/^\s+look\s+explorer\s/m));
+		real.tmux.sendKeys(orchestrator, ["Down", "Enter"]);
+		await waitFor(() => expect(real.shown()).toBe(pane));
+
+		// Each prompt typed while its model works is noted to its orchestrator, which takes no turn for it.
+		real.tmux.sendKeys(pane, ["Also say HERON.", "Enter"]);
+		await waitFor(() => expect(screen()).toContain("Also say HERON."));
+		real.tmux.sendKeys(pane, ["And say IBIS.", "Enter"]);
+		await waitFor(() => expect(screen()).toContain("And say IBIS."));
+		expect(real.requests("main")).toHaveLength(2);
+
+		// Its orchestrator's own message to it is noted nowhere. The user goes back as agent view would: ← may take
+		// back a prompt pi still queues.
+		real.tmux.moveClients(pane, orchestrator);
+		await waitFor(() => expect(real.shown()).toBe(orchestrator));
+		real.tmux.sendKeys(orchestrator, ["tell look"]);
+		await waitFor(() => expect(screen()).toContain("tell look"));
+		real.tmux.sendKeys(orchestrator, ["Enter"]);
+		// Its fourth request, its message's result, may follow at once.
+		await waitFor(() => expect(real.requests("main").length).toBeGreaterThanOrEqual(3));
+		const told = real.requests("main");
+		expect(conversation(told[2]).map(({ text }) => text)).toContain("tell look");
+		const typed = [
+			`The user instructed subagent "look" (${runId}) directly: Also say HERON.`,
+			`The user instructed subagent "look" (${runId}) directly: And say IBIS.`,
+		];
+		expect(notes(told[2])).toEqual(typed);
+		await real.waitForRequests("main", 4);
+
+		writeFileSync(gate, "");
+		// pi gives its run the queued prompts one per turn.
+		const look = await real.waitForRequests("look", 4);
+		expect(conversation(look[3]).at(-1)?.text).toContain("Also say OSPREY.");
+		const main = await real.waitForRequests("main", 5);
+		expect(conversation(main[4]).at(-1)?.text).toContain("Said them all.");
+		expect(notes(main[4])).toEqual(typed);
+	}, 60_000);
+
+	it("starts nothing when opened finished with every slot taken, and says why; opened again once one is free, it resumes (#353)", async () => {
+		const real = await startOrchestrator([...DEFAULT_EXTENSIONS, "background-bash"]);
+		pi = real;
+		const settings = join(real.agentDir, "settings.json");
+		writeFileSync(
+			settings,
+			JSON.stringify({ ...JSON.parse(readFileSync(settings, "utf8")), subagents: { maxActive: 1, panes: true } }),
+		);
+		const gate = join(real.cwd, "busy.go");
+		real.script("main", [
+			{ tool: "subagent", args: { agent: "explorer", name: "kept", task: "Remember PELICAN." } },
+			{ tool: "subagent", args: { agent: "explorer", name: "busy", task: "Hold.", background: true } },
+			{ text: "waiting for busy" },
+			{ text: "busy is done" },
+			{ text: "read its next report" },
+		]);
+		real.script("kept", [{ text: "Remembered." }, { text: "You also said HERON." }]);
+		real.script("busy", [{ text: "Held.", until: gate }]);
+		const orchestrator = real.start(["--", "delegate"]);
+		real.attach(orchestrator);
+		await real.waitForRequests("busy", 1);
+		await real.waitForRequests("main", 3);
+		const { runId, dir } = runRecord(real.agentDir, "kept");
+		const record = () => JSON.parse(readFileSync(join(dir, "record.json"), "utf8"));
+		await waitFor(() => expect(record().status).toBe("closed"));
+		const before = record();
+		const screen = () => real.tmux.capture(orchestrator, 80).join("\n");
+		/** Opens kept from /tasks: the cursor starts on the first run listed. */
+		const openKept = async () => {
+			real.tmux.sendKeys(orchestrator, ["/tasks", "Enter"]);
+			await waitFor(() => expect(screen()).toMatch(/Done \(\d\)/));
+			const rows = screen()
+				.split("\n")
+				.filter((line) => line.includes("explorer: "));
+			const at = rows.findIndex((line) => line.includes("Remember PELICAN"));
+			expect(at).toBeGreaterThanOrEqual(0);
+			real.tmux.sendKeys(orchestrator, [...Array(at).fill("Down"), "Enter"]);
+		};
+
+		// busy holds the only slot: kept starts nothing, and the user is told why.
+		await openKept();
+		await waitFor(() => expect(screen()).toMatch(/No slot is free for kept \(1 of 1 runs active\)/));
+		expect(screen()).not.toMatch(/waiting for 2/);
+		expect(record()).toMatchObject({ status: "closed", generation: 0, summaryText: before.summaryText });
+
+		// Once busy's slot is free, nothing of kept starts in it: its next generation was never admitted.
+		writeFileSync(gate, "");
+		const main = await real.waitForRequests("main", 4);
+		expect(conversation(main[3]).at(-1)?.text).toContain("Held.");
+		await waitFor(() =>
+			expect(real.tmux.hasSession(runPaneSession(runRecord(real.agentDir, "busy").runId, 0))).toBe(false),
+		);
+		expect(real.tmux.hasSession(runPaneSession(runId, 1))).toBe(false);
+		expect(record()).toMatchObject({ status: "closed", generation: 0, summaryText: "Remembered." });
+		expect(real.requests("kept")).toHaveLength(1);
+
+		// Opened again with the slot free, it resumes in its pane as ever.
+		await openKept();
+		const pane = runPaneSession(runId, 1);
+		await waitFor(() => expect(real.shown()).toBe(pane));
+		await waitFor(() => expect(real.tmux.capture(pane, 200).join("\n")).toContain("Remembered."));
+		real.tmux.sendKeys(pane, ["Also remember HERON.", "Enter"]);
+		const kept = await real.waitForRequests("kept", 2);
+		expect(conversation(kept[1]).at(-1)?.text).toBe("Also remember HERON.");
+		const next = await real.waitForRequests("main", 5);
+		expect(conversation(next[4]).at(-1)?.text).toContain("You also said HERON.");
+	}, 90_000);
 
 	it("ends with nothing done when the user looks at a finished run and leaves without typing", async () => {
 		const real = await startOrchestrator([...DEFAULT_EXTENSIONS, "background-bash"]);

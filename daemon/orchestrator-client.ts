@@ -22,7 +22,7 @@ import type {
 	WakeupsRequest,
 } from "./ipc/protocol.ts";
 import { daemonBuildId, getSocketPath } from "./paths.ts";
-import type { RunHostLaunch } from "./run-queue.ts";
+import type { RunHostLaunch, SlotClaim } from "./run-queue.ts";
 import type { HeldWakeups } from "./wakeups.ts";
 
 const OUT_OF_DATE = "The agent daemon is out of date — restart pi to update it";
@@ -74,6 +74,9 @@ interface AnyResponse {
 	superseded?: boolean;
 	id?: string;
 	granted?: boolean;
+	claimed?: true;
+	active?: number;
+	capacity?: number;
 	hostPid?: number;
 	env?: Record<string, string>;
 	collaboration?: Collaboration;
@@ -313,6 +316,26 @@ export class OrchestratorClient {
 		const res = await this.request({ type: "run_queue", action: "claim", run, parent }, 30_000, signal);
 		if (res.type !== "run_queue_result") throw new Error(OUT_OF_DATE);
 		return res.granted === true;
+	}
+
+	/** Claims a slot for run `run` that is granted at once or not at all, never queued: how many are taken, of how many. */
+	async claimRunNow(run: string, parent: string): Promise<SlotClaim> {
+		const res = await this.request({ type: "run_queue", action: "claim_now", run, parent }).catch(
+			(error: unknown) => {
+				// A daemon built before claim_now takes it for a launch of a run it never granted a slot.
+				if (error instanceof Error && /was not granted a slot/.test(error.message)) throw new Error(OUT_OF_DATE);
+				throw error;
+			},
+		);
+		if (res.type !== "run_queue_result" || res.active === undefined || res.capacity === undefined) {
+			throw new Error(OUT_OF_DATE);
+		}
+		return {
+			granted: res.granted === true,
+			...(res.claimed ? { claimed: true as const } : {}),
+			active: res.active,
+			capacity: res.capacity,
+		};
 	}
 
 	/** Has the daemon launch granted run `run`'s host; returns the host's pid. */
