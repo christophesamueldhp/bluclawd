@@ -92,9 +92,17 @@ describe.skipIf(!supported)(
 			expect(output).not.toContain("hunter2");
 		});
 
-		it("appends to .env in the project, but cannot write outside it", async () => {
-			expect((await run("echo ADDED=1 >> .env")).code).toBe(0);
-			expect(readFileSync(join(dir, ".env"), "utf8")).toContain("ADDED=1");
+		it("appends to .env in the project (not on Linux), but cannot write outside it", async () => {
+			const append = await run("echo ADDED=1 >> .env");
+			if (process.platform === "linux") {
+				// bubblewrap hides a Read-denied file behind a read-only /dev/null, which refuses writes too.
+				expect(append.code).not.toBe(0);
+				expect(append.output).toContain(".env: Permission denied");
+				expect(readFileSync(join(dir, ".env"), "utf8")).toBe("SECRET=hunter2\n");
+			} else {
+				expect(append.code).toBe(0);
+				expect(readFileSync(join(dir, ".env"), "utf8")).toContain("ADDED=1");
+			}
 			const outside = await run(`echo x > ${probe}`);
 			expect(outside.code).not.toBe(0);
 			expect(existsSync(probe)).toBe(false);

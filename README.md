@@ -678,7 +678,8 @@ it is read when a session starts, so `/reload` after editing:
 
 - Reads: everything except what a `Read` rule denies, plus `filesystem.denyRead`.
 - Writes: the working directory and the temp directory, plus `filesystem.allowWrite`; never
-  what an `Edit` or `Write` rule denies. Under the sandbox a `Write` rule blocks `>>` too.
+  what an `Edit` or `Write` rule denies. Under the sandbox a `Write` rule blocks `>>` too. On
+  Linux a file a `Read` rule or `filesystem.denyRead` denies is not writable either, `>>` included.
 - Network: hosts in `network.allowedDomains`. For any other host, pi asks once per host and port
   per session, the one prompt bluclawd adds (without a UI, the host is refused).
 - Rule paths are anchored at the working directory: `Read(**/.env*)` covers `.env` files
