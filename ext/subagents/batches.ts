@@ -378,30 +378,35 @@ export async function settleBatch(
 			const settled = new AbortController();
 			void reports.next(runId, settled.signal);
 			const record = await completion.finally(() => settled.abort());
-			const runDir = subagentRunDir(agentDir, record.parentSessionId, record.runId);
-			const report = readRunReports(runDir, 0)
-				.filter(({ generation }) => generation === record.generation)
-				.at(-1);
-			const definition = readRunDefinition(runDefinitionPath(runDir, record.generation));
-			const isolated = definition?.workspace;
-			const workspace = isolated && { root: isolated.root, lines: await describeWorkspace(isolated, runDir) };
-			// What its transcript shows of this generation, which started when the scheduler started it.
-			const entries = report && record.transcriptPath ? sessionFileEntries(record.transcriptPath) : undefined;
-			const checks =
-				report &&
-				(entries
-					? checksSummary(definition?.tools ?? [], commandsRun(entries, record.startedAt ?? 0))
-					: "Checks: unknown: its transcript could not be read.");
-			const member: BatchMember = {
-				record,
-				...(report ? { report, reportFile: storedRunReportTextPath(runDir, report.seq) } : {}),
-				...(workspace ? { workspace } : {}),
-				...(checks ? { checks } : {}),
-			};
+			const member = await settledMember(agentDir, record);
 			onSettled?.(i, member);
 			return member;
 		}),
 	);
+}
+
+/** A final run as a member: its generation's Report, where it worked and what it changed, and the checks it ran. */
+export async function settledMember(agentDir: string, record: Readonly<SubagentRunRecord>): Promise<BatchMember> {
+	const runDir = subagentRunDir(agentDir, record.parentSessionId, record.runId);
+	const report = readRunReports(runDir, 0)
+		.filter(({ generation }) => generation === record.generation)
+		.at(-1);
+	const definition = readRunDefinition(runDefinitionPath(runDir, record.generation));
+	const isolated = definition?.workspace;
+	const workspace = isolated && { root: isolated.root, lines: await describeWorkspace(isolated, runDir) };
+	// What its transcript shows of this generation, which started when the scheduler started it.
+	const entries = report && record.transcriptPath ? sessionFileEntries(record.transcriptPath) : undefined;
+	const checks =
+		report &&
+		(entries
+			? checksSummary(definition?.tools ?? [], commandsRun(entries, record.startedAt ?? 0))
+			: "Checks: unknown: its transcript could not be read.");
+	return {
+		record,
+		...(report ? { report, reportFile: storedRunReportTextPath(runDir, report.seq) } : {}),
+		...(workspace ? { workspace } : {}),
+		...(checks ? { checks } : {}),
+	};
 }
 
 /** Stores the manifest of a settled batch; the aggregate pointing to it says so if it could not be stored. */

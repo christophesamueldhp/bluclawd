@@ -87,6 +87,37 @@ function crash(real: RealPi, pane: string): void {
 	process.kill(pid, "SIGKILL");
 }
 
+/** A committed repository in `dir`: a chain with a step that edits works in a worktree made from it. */
+function repository(dir: string): void {
+	writeFileSync(join(dir, "a.txt"), "one\n");
+	for (const args of [
+		["init", "-q"],
+		["add", "."],
+		[
+			"-c",
+			"user.name=F",
+			"-c",
+			"user.email=f@example.com",
+			"-c",
+			"commit.gpgsign=false",
+			"commit",
+			"-q",
+			"-m",
+			"start",
+		],
+	]) {
+		expect(spawnSync("git", args, { cwd: dir }).status).toBe(0);
+	}
+}
+
+/** An inline role that edits files: it works in a worktree, its chain's. */
+const writer = {
+	name: "writer",
+	description: "Edits files.",
+	instructions: "Make the change asked.",
+	tools: ["read", "edit", "write"],
+};
+
 /** A launch of an explorer named `name`, in the background. */
 const launch = (name: string) => ({
 	tool: "subagent",
@@ -531,6 +562,59 @@ describe.skipIf(!hasTmux)("recovering RPC runs", () => {
 			await sleep(2000);
 			expect(real.requests("main")).toHaveLength(3);
 			expect(real.requests("b")).toHaveLength(1);
+		},
+		5 * readinessMs,
+	);
+
+	// Four pis one after another (a, b, the orchestrator reopened, then c): a readiness bound for each to start, and one
+	// for the rest.
+	it(
+		"gives a chain taken over after a step that edits completed the checks of every step, as one never taken over",
+		async () => {
+			const real = await startOrchestrator();
+			pi = real;
+			repository(real.cwd);
+			const gate = join(real.cwd, "..", "b.go");
+			real.script("main", [
+				{
+					tool: "subagent",
+					args: {
+						chain: [
+							{ agent: writer, name: "a", task: "Write new.txt." },
+							{ agent: "explorer", name: "b", task: "Look next." },
+							{ agent: "explorer", name: "c", task: "Look last." },
+						],
+						background: true,
+					},
+				},
+				{ text: "waiting for the chain" },
+				{ text: "read the chain" },
+			]);
+			real.script("a", [{ tool: "write", args: { path: "new.txt", content: "v1\n" } }, { text: "Wrote v1." }]);
+			real.script("b", [{ text: "B done.", until: gate }]);
+			real.script("c", [{ text: "C done." }]);
+			const pane = real.start(["--", "delegate"]);
+			await real.waitForRequests("b", 1);
+			await real.waitForRequests("main", 2);
+			const sessionFile = await sessionFileOf(real, pane);
+
+			crash(real, pane);
+			writeFileSync(gate, "");
+			await waitFor(() => expect(hostOf(real, "b").exit).toBeDefined());
+
+			real.start(["--session", sessionFile]);
+			const [c] = await real.waitForRequests("c", 1);
+			expect(countHolding(c, "B done.")).toBe(1);
+			expect(conversation(c)[0].text).toMatch(/Changes since its baseline: .*A new\.txt/);
+			const main = await real.waitForRequests("main", 3);
+			const aggregate = conversation(main[2]).at(-1)?.text ?? "";
+			expect(aggregate).toMatch(/Chain chain_\w+: 3 steps, all completed\./);
+			expect(aggregate).toMatch(/### chain\[0\] "a" \(sub_[\w-]+\): completed\nChecks: [^\n]+\nWrote v1\./);
+			expect(aggregate).toMatch(/### chain\[1\] "b" \(sub_[\w-]+\): completed\nChecks: [^\n]+\nB done\./);
+			expect(aggregate).toMatch(/### chain\[2\] "c" \(sub_[\w-]+\): completed\nChecks: [^\n]+\nC done\./);
+			await sleep(2000);
+			expect(real.requests("main")).toHaveLength(3);
+			expect(real.requests("c")).toHaveLength(1);
 		},
 		5 * readinessMs,
 	);
