@@ -7,29 +7,16 @@
  * blocked. The host takes what this stores once the pi exits.
  */
 
-import { realpathSync } from "node:fs";
 import { dirname } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { PARENT_ENV, RUN_PANE_ENV, Tmux } from "../../daemon/tmux.ts";
 import { BLOCKING_PROMPT_KINDS } from "../agent-view/self-registration.ts";
-import { SUBAGENT_MESSAGE_TOOL } from "./messages.ts";
-import { textOf } from "./results.ts";
+import { startGeneration } from "./generation-protocol.ts";
 import { PANE_ENDED, type PaneChildState, paneChildStatePath, paneParent, readRpcHostSpec } from "./rpc-host.ts";
 import { paneApprovalsUnanswerable } from "./run-approvals.ts";
-import {
-	markGiven,
-	type RunInboxMessage,
-	type RunOutboxMessage,
-	readRunInbox,
-	sealRunInbox,
-	unsealRunInbox,
-	writeRunOutbox,
-} from "./run-mailbox.ts";
-import type { RunRuntimeOutcome } from "./runs.ts";
-import { storeRunReport, writeAtomicPrivateFile } from "./storage.ts";
+import { writeAtomicPrivateFile } from "./storage.ts";
 
-/** How often the inbox is looked at, and whether a terminal still shows the pane. */
-const CHECK_MS = 100;
+/** How often it looks whether a terminal still shows the pane. */
 const SHOWN_CHECK_MS = 500;
 /**
  * How long a Resume opened to type in waits before a terminal that shows no longer counts as having left it: its
@@ -50,79 +37,47 @@ export default function paneChild(pi: ExtensionAPI): void {
 	const tmux = socket ? new Tmux(dirname(socket), undefined, { timeoutMs: 2000 }) : undefined;
 
 	let ctx: ExtensionContext | undefined;
-	let last: { text: string; stopReason?: string; errorMessage?: string } = { text: "" };
-	/** Messages from the inbox given to pi, and those of them its conversation does not hold yet. */
-	const given = new Set<string>();
-	const taken = new Set<string>();
-	let waiting: RunInboxMessage[] = [];
-	let sent = 0;
 	let done = false;
+	/** Set once pi shuts down: it ends by itself, so it is not ended again. */
+	let shuttingDown = false;
 	/** Whether it has work: a Resume the user opened to type in has none until they type. */
 	let working = spec.prompt !== "";
 	/** Set once the user stopped its work with Esc: it waits for them, not for its orchestrator. */
 	let held = false;
 	let shown = false;
 	const openedAt = Date.now();
-	let checks: ReturnType<typeof setInterval>[] = [];
+	let checks: ReturnType<typeof setInterval> | undefined;
 
-	/** Stores its Report, or, with no outcome, that nothing was done; then ends its pi. */
-	const finish = (outcome: RunRuntimeOutcome | undefined, shutdown = true) => {
-		if (done) return;
-		done = true;
-		for (const check of checks) clearInterval(check);
-		const untaken = sealRunInbox(runDir, generation).filter(({ id }) => !taken.has(id)).length;
-		if (outcome) {
-			state.outcome = outcome;
-			state.reportSeq = storeRunReport(runDir, {
-				text: last.text,
-				outcome,
-				sessionId: state.sessionId,
-				generation,
-				...(untaken ? { untaken } : {}),
-			});
-		} else state.idle = true;
-		state.awaiting = false;
-		save();
-		if (shutdown) ctx?.shutdown();
-	};
-
-	/** Gives pi each message not given yet: it steers work under way, and starts work when there is none. */
-	const give = (messages: RunInboxMessage[]) => {
-		for (const message of messages) {
-			if (given.has(message.id) || !ctx) continue;
-			given.add(message.id);
-			waiting.push(message);
-			try {
-				pi.sendUserMessage(message.text, ctx.isIdle() ? undefined : { deliverAs: "steer" });
-			} catch {
-				given.delete(message.id);
-				waiting = waiting.filter((held) => held !== message);
-				continue;
-			}
-			markGiven(runDir, generation, message.id);
-			working = true;
-			held = false;
-		}
-	};
-
-	/** Once its work settled with nothing pending, and nothing landed in its inbox meanwhile, its Report is stored. */
-	const settle = () => {
-		if (!ctx || done) return;
-		give(readRunInbox(runDir, generation));
-		if (!ctx.isIdle() || ctx.hasPendingMessages() || waiting.length > 0) return;
-		// What landed before the seal is its to take: it goes on with it.
-		const late = sealRunInbox(runDir, generation).filter(({ id }) => !given.has(id));
-		if (late.length > 0) {
-			unsealRunInbox(runDir, generation);
-			give(late);
-			return;
-		}
-		finish(
-			last.stopReason === "error"
-				? { status: "failed", error: last.errorMessage ?? "its model failed" }
-				: { status: "completed" },
-		);
-	};
+	const work = startGeneration({
+		runDir,
+		spec,
+		link: {
+			give: async (text) => {
+				if (!ctx) return {};
+				try {
+					pi.sendUserMessage(text, ctx.isIdle() ? undefined : { deliverAs: "steer" });
+				} catch {
+					return {};
+				}
+				working = true;
+				held = false;
+				return true;
+			},
+			quiet: async () => ctx?.isIdle() === true && !ctx.hasPendingMessages(),
+		},
+		save: (record) => {
+			Object.assign(state, record);
+			save();
+		},
+		// Its Report is stored, or that nothing was done: its pi ends.
+		ended: () => {
+			done = true;
+			clearInterval(checks);
+			state.awaiting = false;
+			save();
+			if (!shuttingDown) ctx?.shutdown();
+		},
+	});
 
 	/** Whether a terminal shows its pane; undefined when tmux cannot say. */
 	const isShown = () => {
@@ -178,43 +133,23 @@ export default function paneChild(pi: ExtensionAPI): void {
 		if (now) shown = true;
 		// A Resume opened to type in was shown from the start, however soon the user left it.
 		const left = now === false && (shown || (!working && Date.now() - openedAt > OPEN_GRACE_MS));
-		if (left) finish(working ? { status: "stopped", error: "the user stopped its work in its pane" } : undefined);
+		if (left) work.end(working ? { status: "stopped", error: "the user stopped its work in its pane" } : undefined);
 	};
 
 	pi.on("session_start", (event, started) => {
 		ctx = started;
 		if (event.reason !== "startup") return;
-		state.sessionFile = started.sessionManager.getSessionFile();
-		state.sessionId = started.sessionManager.getSessionId();
-		save();
-		// pi starts a new session at a path that holds none, without a word.
-		if (spec.sessionFile && !sameFile(state.sessionFile, spec.sessionFile)) {
-			return finish({
-				status: "failed",
-				error: `its pi opened ${state.sessionFile ?? "no session"}, not the run's session ${spec.sessionFile}`,
-			});
-		}
-		// pi lowers a level its model lacks, and takes an id its provider lacks for a custom one, warning only.
-		const { provider, id } = started.model ?? {};
-		const thinkingLevel = pi.getThinkingLevel();
-		const admitted = spec.model;
-		if (provider !== admitted.provider || id !== admitted.id || thinkingLevel !== admitted.thinkingLevel) {
-			return finish({
-				status: "failed",
-				error: `its pi runs ${provider ?? "no model"}/${id ?? ""} at thinking ${thinkingLevel}, not ${admitted.provider}/${admitted.id} at thinking ${admitted.thinkingLevel}`,
-			});
-		}
-		if (spec.prompt) pi.sendUserMessage(spec.prompt);
-		checks = [
-			setInterval(() => {
-				if (!done) give(readRunInbox(runDir, generation));
-			}, CHECK_MS),
-			setInterval(() => {
-				followParent();
-				checkLeft();
-				checkOrphaned();
-			}, SHOWN_CHECK_MS),
-		];
+		checks = setInterval(() => {
+			followParent();
+			checkLeft();
+			checkOrphaned();
+		}, SHOWN_CHECK_MS);
+		void work.started({
+			sessionFile: started.sessionManager.getSessionFile(),
+			sessionId: started.sessionManager.getSessionId(),
+			model: started.model,
+			thinkingLevel: pi.getThinkingLevel(),
+		});
 	});
 
 	// The run's session is what its orchestrator follows: the user keeps to it in its pane.
@@ -230,31 +165,13 @@ export default function paneChild(pi: ExtensionAPI): void {
 			working = true;
 			held = false;
 			// Its orchestrator still owns the work, so it is told, without a turn (ADR-0005).
-			writeRunOutbox(runDir, generation, { seq: ++sent, kind: "typed", text: event.text });
+			work.send({ kind: "typed", text: event.text });
 		}
 		return { action: "continue" };
 	});
 
-	pi.on("message_end", (event) => {
-		const message = event.message as { role?: string; content?: unknown; stopReason?: string; errorMessage?: string };
-		if (message.role === "assistant") {
-			last = { text: textOf(message.content), stopReason: message.stopReason, errorMessage: message.errorMessage };
-		}
-		// pi queues a message in memory only: it is the run's once its conversation holds it.
-		const text = message.role === "user" ? textOf(message.content) : undefined;
-		const at = waiting.findIndex((held) => held.text === text);
-		if (at >= 0) {
-			taken.add(waiting[at].id);
-			waiting = waiting.filter((_, index) => index !== at);
-		}
-	});
-
-	// What the run sends out is read off its own tool's results, which its pi alone produces.
-	pi.on("tool_execution_end", (event) => {
-		if (event.toolName !== SUBAGENT_MESSAGE_TOOL || event.isError) return;
-		const details = (event.result as { details?: Omit<RunOutboxMessage, "seq"> } | undefined)?.details;
-		if (details) writeRunOutbox(runDir, generation, { ...details, seq: ++sent });
-	});
+	pi.on("message_end", (event) => work.messageEnded(event.message));
+	pi.on("tool_execution_end", (event) => work.toolEnded(event));
 
 	pi.on("agent_settled", (event, settled) => {
 		ctx = settled;
@@ -265,7 +182,7 @@ export default function paneChild(pi: ExtensionAPI): void {
 			held = shown = true;
 			return;
 		}
-		settle();
+		void work.settled();
 	});
 
 	pi.on("ui_prompt_start", (event) => {
@@ -287,19 +204,7 @@ export default function paneChild(pi: ExtensionAPI): void {
 	// Ended before its work settled, by a stop from its host, the user quitting it or its pane ended: what it did so far
 	// is its Report.
 	pi.on("session_shutdown", () => {
-		if (!done)
-			finish(
-				working ? { status: "stopped", error: paneEnded ? PANE_ENDED : "its work was stopped" } : undefined,
-				false,
-			);
+		shuttingDown = true;
+		work.end(working ? { status: "stopped", error: paneEnded ? PANE_ENDED : "its work was stopped" } : undefined);
 	});
-}
-
-function sameFile(path: string | undefined, expected: string): boolean {
-	if (!path) return false;
-	try {
-		return realpathSync(path) === realpathSync(expected);
-	} catch {
-		return false;
-	}
 }

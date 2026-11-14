@@ -16,8 +16,7 @@ import { OrchestratorClient, piPackageRoot } from "../../daemon/orchestrator-cli
 import { processAlive, processGroupAlive } from "../../daemon/processes.ts";
 import type { RunHostLaunch } from "../../daemon/run-queue.ts";
 import { PANE_ENV, PARENT_ENV, RUN_PANE_ENV, Tmux } from "../../daemon/tmux.ts";
-import { SUBAGENT_MESSAGE_TOOL } from "./messages.ts";
-import { textOf } from "./results.ts";
+import { type StartedPi, startGeneration } from "./generation-protocol.ts";
 import {
 	dialogAnswer,
 	type RunApprovalAnswer,
@@ -27,15 +26,7 @@ import {
 	storeRunApprovalRequest,
 	withdrawRunApproval,
 } from "./run-approvals.ts";
-import {
-	markGiven,
-	type RunInboxMessage,
-	type RunOutboxMessage,
-	readRunInbox,
-	sealRunInbox,
-	unsealRunInbox,
-	writeRunOutbox,
-} from "./run-mailbox.ts";
+import { sealRunInbox } from "./run-mailbox.ts";
 import type { RunRuntimeOutcome } from "./runs.ts";
 import { storeRunReport, writeAtomicPrivateFile } from "./storage.ts";
 
@@ -109,8 +100,8 @@ const hostClaimPath = (runDir: string, generation: number) => join(runDir, "host
 const stderrPath = (runDir: string) => join(runDir, "rpc-child.stderr");
 /** How long a run's host and its pi may take to end, once stopped or done, before what is left of them is killed. */
 export const STOP_GRACE_MS = 10_000;
-/** How often the host looks for messages posted to the run. */
-const INBOX_CHECK_MS = 50;
+/** How often the host looks for answers to the approvals the run asks for. */
+const APPROVAL_CHECK_MS = 50;
 /** How long the orchestrator may go without noting it sees an approval the run asks for: past it, no one is there. */
 const APPROVAL_SEEN_MS = 5000;
 /** pi's dialogs, each of which waits for an answer. */
@@ -362,54 +353,69 @@ async function host(runDir: string): Promise<void> {
 		for (const id of approvals.keys()) withdrawRunApproval(runDir, spec.generation, id);
 		approvals.clear();
 	};
+	const watching = setInterval(checkApprovals, APPROVAL_CHECK_MS);
+
+	let reported: () => void = () => {};
+	const stored = new Promise<void>((resolve) => {
+		reported = resolve;
+	});
+	const work = startGeneration({
+		runDir,
+		spec,
+		link: {
+			/**
+			 * A prompt steers pi at its next safe point when it works and starts it when it is idle: a bare steer would
+			 * wait on an idle pi for a prompt that never comes.
+			 */
+			give: async (text) => {
+				const reply = await request({ type: "prompt", message: text, streamingBehavior: "steer" });
+				return reply.success ? true : { refused: reply.error === undefined ? undefined : String(reply.error) };
+			},
+			quiet: async () => {
+				const now = (await request({ type: "get_state" })).data as {
+					isStreaming?: boolean;
+					pendingMessageCount?: number;
+				};
+				return !now.isStreaming && !now.pendingMessageCount;
+			},
+			availableModels: async () =>
+				((await request({ type: "get_available_models" })).data as { models?: { provider: string; id: string }[] })
+					.models ?? [],
+		},
+		save: (record) => {
+			Object.assign(state, record);
+			save();
+		},
+		ended: () => reported(),
+	});
 
 	let stopped = false;
 	process.on("SIGTERM", () => {
 		stopped = true;
-		// A stopped run takes no more messages: those posted from now on are refused, not left untaken.
-		clearInterval(watching);
-		sealRunInbox(runDir, spec.generation);
+		work.stop();
 		withdrawApprovals();
 		// pi ends its work in order on a SIGTERM, its shell commands included.
 		child.kill("SIGTERM");
 	});
+	void exited.then((exit) =>
+		work.end(
+			stopped
+				? { status: "stopped", error: "its work was stopped" }
+				: {
+						status: "failed",
+						error: `its pi exited first (${exit.signal ?? `code ${exit.code}`}): ${stderrTail(runDir)}`,
+					},
+		),
+	);
 
-	let last: { text: string; stopReason?: string; errorMessage?: string } = { text: "" };
-	let onSettled: ((aborted: boolean) => void) | undefined;
-	/** Messages from the inbox given to pi, by id, and those of them its conversation does not hold yet. */
-	const given = new Set<string>();
-	const taken = new Set<string>();
-	let waiting: RunInboxMessage[] = [];
-	let sent = 0;
 	const request = connect(child, (event) => {
-		if (event.type === "message_end") {
-			const message = event.message as {
-				role?: string;
-				content?: unknown;
-				stopReason?: string;
-				errorMessage?: string;
-			};
-			if (message.role === "assistant") {
-				last = {
-					text: textOf(message.content),
-					stopReason: message.stopReason,
-					errorMessage: message.errorMessage,
-				};
-			}
-			// pi queues a message in memory only: it is the run's once its conversation holds it.
-			const text = message.role === "user" ? textOf(message.content) : undefined;
-			const at = waiting.findIndex((given) => given.text === text);
-			if (at >= 0) {
-				taken.add(waiting[at].id);
-				waiting = waiting.filter((_, index) => index !== at);
-			}
+		if (event.type === "message_end") work.messageEnded(event.message as Parameters<typeof work.messageEnded>[0]);
+		if (event.type === "tool_execution_end")
+			work.toolEnded({ toolName: event.toolName, isError: event.isError, result: event.result });
+		if (event.type === "agent_settled") {
+			if (event.aborted === true || stopped) work.end({ status: "stopped", error: "its work was stopped" });
+			else void work.settled();
 		}
-		// What the run sends out is read off its own tool's results, which its pi alone produces.
-		if (event.type === "tool_execution_end" && event.toolName === SUBAGENT_MESSAGE_TOOL && !event.isError) {
-			const details = (event.result as { details?: Omit<RunOutboxMessage, "seq"> } | undefined)?.details;
-			if (details) writeRunOutbox(runDir, spec.generation, { ...details, seq: ++sent });
-		}
-		if (event.type === "agent_settled") onSettled?.(event.aborted === true);
 		// A dialog waits for its answer: only an approval the run asks for goes to its orchestrator, and any other is
 		// dismissed at once, as if no one were there.
 		if (
@@ -423,144 +429,16 @@ async function host(runDir: string): Promise<void> {
 			} else answerDialog(event.id, undefined);
 		}
 	});
-	// One at a time, so the last look at the inbox and its seal cannot interleave with a message being given.
-	let turn = Promise.resolve();
-	const serial = <T>(task: () => Promise<T>): Promise<T> => {
-		const next = turn.then(task);
-		turn = next.then(
-			() => {},
-			() => {},
-		);
-		return next;
-	};
-	/**
-	 * Gives pi each message not given yet, as a prompt that steers it at its next safe point when it works and starts
-	 * it when it is idle: a bare steer would wait on an idle pi for a prompt that never comes.
-	 */
-	const give = async (messages: RunInboxMessage[]) => {
-		for (const message of messages) {
-			if (given.has(message.id)) continue;
-			given.add(message.id);
-			waiting.push(message);
-			const reply = await request({ type: "prompt", message: message.text, streamingBehavior: "steer" });
-			if (!reply.success) {
-				given.delete(message.id);
-				waiting = waiting.filter((held) => held !== message);
-			} else markGiven(runDir, spec.generation, message.id);
-		}
-	};
-	let watching: ReturnType<typeof setInterval> | undefined;
-	const settled = () =>
-		new Promise<boolean>((resolve) => {
-			onSettled = resolve;
-		});
+	// Rejected only once pi exited, which ends the work.
+	request({ type: "get_state" }).then(
+		(reply) => work.started(reply.data as StartedPi),
+		() => {},
+	);
 
-	const work = async (): Promise<RunRuntimeOutcome> => {
-		const started = await request({ type: "get_state" });
-		const data = started.data as {
-			model?: { provider?: string; id?: string };
-			thinkingLevel?: string;
-			sessionFile?: string;
-			sessionId?: string;
-		};
-		state.sessionFile = data.sessionFile;
-		state.sessionId = data.sessionId;
-		save();
-		// pi starts a new session at a path that holds none, without a word.
-		if (spec.sessionFile && !sameFile(data.sessionFile, spec.sessionFile)) {
-			return {
-				status: "failed",
-				error: `its pi opened ${data.sessionFile ?? "no session"}, not the run's session ${spec.sessionFile}`,
-			};
-		}
-		// pi lowers a level its model lacks, and takes an id its provider lacks for a custom one, warning only.
-		const { provider, id } = data.model ?? {};
-		const admitted = spec.model;
-		if (provider !== admitted.provider || id !== admitted.id || data.thinkingLevel !== admitted.thinkingLevel) {
-			return {
-				status: "failed",
-				error: `its pi runs ${provider ?? "no model"}/${id ?? ""} at thinking ${data.thinkingLevel}, not ${admitted.provider}/${admitted.id} at thinking ${admitted.thinkingLevel}`,
-			};
-		}
-		const available = (await request({ type: "get_available_models" })).data as {
-			models?: { provider: string; id: string }[];
-		};
-		if (!available.models?.some((model) => model.provider === admitted.provider && model.id === admitted.id)) {
-			return {
-				status: "failed",
-				error: `its pi cannot use ${admitted.provider}/${admitted.id}: the model is unknown to it, or it has no authentication for it`,
-			};
-		}
-		// Subscribed before the prompt goes, so its settling cannot be missed.
-		let next = settled();
-		const prompted = await request({ type: "prompt", message: spec.prompt });
-		if (!prompted.success) return { status: "failed", error: String(prompted.error ?? "its task was refused") };
-		const inbox = () => readRunInbox(runDir, spec.generation);
-		watching = setInterval(() => {
-			checkApprovals();
-			void serial(() => give(inbox())).catch(() => {});
-		}, INBOX_CHECK_MS);
-		for (;;) {
-			const aborted = await next;
-			if (aborted || stopped) return { status: "stopped", error: "its work was stopped" };
-			next = settled();
-			const done = await serial(async () => {
-				await give(inbox());
-				// pi goes on by itself with what was queued meanwhile: the work is done once nothing is.
-				const now = (await request({ type: "get_state" })).data as {
-					isStreaming?: boolean;
-					pendingMessageCount?: number;
-				};
-				if (now.isStreaming || now.pendingMessageCount || waiting.length > 0) return false;
-				// What landed before the seal is the run's to take: it goes on with it.
-				const late = sealRunInbox(runDir, spec.generation).filter(({ id }) => !given.has(id));
-				if (late.length === 0) return true;
-				if (stopped) return false;
-				unsealRunInbox(runDir, spec.generation);
-				await give(late);
-				// pi refused them all, so nothing settles again: they stay untaken, and the work is done.
-				if (waiting.length > 0) return false;
-				sealRunInbox(runDir, spec.generation);
-				return true;
-			});
-			if (done) break;
-		}
-		if (last.stopReason === "error") return { status: "failed", error: last.errorMessage ?? "its model failed" };
-		if (last.stopReason === "aborted") return { status: "stopped", error: "its work was stopped" };
-		return { status: "completed" };
-	};
-
-	const outcome = await Promise.race([
-		work().catch(
-			(error: unknown): RunRuntimeOutcome => ({
-				status: "failed",
-				error: error instanceof Error ? error.message : String(error),
-			}),
-		),
-		exited.then(
-			(exit): RunRuntimeOutcome =>
-				stopped
-					? { status: "stopped", error: "its work was stopped" }
-					: {
-							status: "failed",
-							error: `its pi exited first (${exit.signal ?? `code ${exit.code}`}): ${stderrTail(runDir)}`,
-						},
-		),
-	]);
+	// Its Report is stored before its pi is let go: its work is on disk whatever happens next.
+	await stored;
 	clearInterval(watching);
 	withdrawApprovals();
-	// Whatever it was sent and never took, stopped or failed first, stays in the sealed inbox, and the Report says so.
-	const untaken = sealRunInbox(runDir, spec.generation).filter(({ id }) => !taken.has(id)).length;
-	// Stored before its pi is let go: its work is on disk whatever happens next.
-	state.outcome = outcome;
-	state.reportSeq = storeRunReport(runDir, {
-		text: last.text,
-		outcome,
-		sessionId: state.sessionId,
-		generation: spec.generation,
-		...(untaken ? { untaken } : {}),
-	});
-	save();
 	child.stdin?.end();
 	state.exit = await exited;
 	save();
@@ -659,15 +537,6 @@ async function paneHost(
 		);
 	} catch {
 		// Its orchestrator's pane is gone, or tmux did not answer: tmux shows another session once this one ends.
-	}
-}
-
-function sameFile(path: string | undefined, expected: string): boolean {
-	if (!path) return false;
-	try {
-		return realpathSync(path) === realpathSync(expected);
-	} catch {
-		return false;
 	}
 }
 
