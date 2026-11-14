@@ -217,6 +217,16 @@ export function runGroupAlive(pid: number, runDir: string): boolean {
 	return spawnSync("ps", ["-o", "command=", "-p", String(pid)], { encoding: "utf8" }).stdout.includes(runDir);
 }
 
+/**
+ * Whether processes of the run whose host stored `host` may still run: its group has members, or its host lives and
+ * stored no exit. A Generation whose group was not confirmed gone still ends, so a finished run may leave some. A
+ * live host is not asked whether it is the run's, unlike in {@link runGroupAlive}: a `ps` that fails would say not.
+ */
+export function runProcessesRemain(host: RpcHostState): boolean {
+	const leaderRuns = processAlive(host.hostPid);
+	return processGroupAlive(host.hostPid, { leaderRuns }) || (host.exit === undefined && leaderRuns);
+}
+
 /** Asks the host to stop the run: its pi ends its work as on a SIGTERM, and the host stores how it ended. */
 export function stopRpcHost(hostPid: number): void {
 	try {

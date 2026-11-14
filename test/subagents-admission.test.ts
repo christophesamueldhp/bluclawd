@@ -36,6 +36,7 @@ import { SubagentMessageBus } from "../ext/subagents/messages.ts";
 import { createParentScope } from "../ext/subagents/parent-scope.ts";
 import { type AdmittedSubagentHandle, type SubagentRunRecord, SubagentRunScheduler } from "../ext/subagents/runs.ts";
 import { ensureRunStorageDir } from "../ext/subagents/storage.ts";
+import { leaderlessGroup } from "./helpers/leaderless-group.ts";
 
 // Run storage works as usual unless a test makes it fail.
 vi.mock("../ext/subagents/storage.ts", async (importOriginal) => {
@@ -636,6 +637,22 @@ describe("Run admission of a run's own directory, and of its Resume", () => {
 		);
 		expect(existsSync(join(storageDir, completed.runId, "generations"))).toBe(false);
 		expect(handleOf(await resume(completed, () => "Go on.").result).record.generation).toBe(1);
+	});
+
+	it("refuses a Resume while processes of its earlier Generation still run, its host ended", async () => {
+		const { agentDir, cwd, launch, resume, storageDir } = await setup({ firstGenerationCompletes: true });
+		const completed = await handleOf(await launch({ agent: "explorer", task: "x" })).completion;
+		saveConversation(agentDir, cwd);
+		const hostPid = await leaderlessGroup();
+		writeFileSync(
+			join(storageDir, completed.runId, "rpc-host.json"),
+			JSON.stringify({ hostPid, exit: { code: 0, signal: null } }),
+		);
+
+		expect(errorOf(await resume(completed, () => "Go on.").result)).toMatch(
+			/^Cannot resume .*: its pi from before is still running\.$/,
+		);
+		expect(existsSync(join(storageDir, completed.runId, "generations"))).toBe(false);
 	});
 
 	it("lets one of two instances of the orchestrator's session resume a run, never both", async () => {
