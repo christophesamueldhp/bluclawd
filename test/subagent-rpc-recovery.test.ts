@@ -1,28 +1,17 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { relayedRunOutbox } from "../ext/subagents/run-mailbox.ts";
 import { readinessMs } from "./helpers/heartbeats.ts";
 import { conversation, FAUX, type FauxRequest, hasTmux, type RealPi, startRealPi } from "./helpers/real-pi.ts";
+import { hostedGenerations, hostState, reportOf, runDirOf, runNamed, storedHost } from "./helpers/run-files.ts";
 import { waitFor } from "./helpers/wait-for.ts";
 
-/** A run's directory, as its orchestrator stored it, by the run's name. */
-function runDir(agentDir: string, name: string): string {
-	const root = join(agentDir, "bluclawd", "subagents");
-	for (const session of existsSync(root) ? readdirSync(root) : []) {
-		for (const run of readdirSync(join(root, session))) {
-			const record = join(root, session, run, "record.json");
-			if (existsSync(record) && JSON.parse(readFileSync(record, "utf8")).name === name)
-				return join(root, session, run);
-		}
-	}
-	throw new Error(`no run named ${name}`);
-}
-
 const readJson = (path: string) => JSON.parse(readFileSync(path, "utf8"));
-const recordOf = (real: RealPi, name: string) => readJson(join(runDir(real.agentDir, name), "record.json"));
-const hostOf = (real: RealPi, name: string) => readJson(join(runDir(real.agentDir, name), "rpc-host.json"));
+const recordOf = (real: RealPi, name: string) => runNamed(real.agentDir, name).record;
+const hostOf = (real: RealPi, name: string) => storedHost(runDirOf(real.agentDir, name));
 
 /** Merges `added` into the settings every pi of the test reads, as they are read next. */
 function addSettings(real: RealPi, added: Record<string, unknown>): void {
@@ -46,7 +35,8 @@ const RPC_HOST = fileURLToPath(new URL("../ext/subagents/rpc-host.ts", import.me
 const RESOLVE_HOOK = fileURLToPath(new URL("../daemon/pi-resolve-hook.mjs", import.meta.url));
 const LINGERER = fileURLToPath(new URL("./fixtures/real-pi/lingerer.ts", import.meta.url));
 
-const alive = (pid: number) => {
+const alive = (pid: number | undefined) => {
+	if (pid === undefined) return false;
 	try {
 		process.kill(pid, 0);
 		return true;
@@ -144,11 +134,11 @@ describe.skipIf(!hasTmux)("recovering RPC runs", () => {
 			await real.waitForRequests("main", 2);
 			const sessionFile = await sessionFileOf(real, pane);
 			// Its host launched again, as after a lost reply, leaves the generation to the one that took it.
-			const dir = runDir(real.agentDir, "worker");
-			const state = readFileSync(join(dir, "rpc-host.json"), "utf8");
+			const dir = runDirOf(real.agentDir, "worker");
+			const state = storedHost(dir);
 			const again = spawnSync(process.execPath, ["--import", RESOLVE_HOOK, RPC_HOST, dir], { timeout: readinessMs });
 			expect(again.status).toBe(0);
-			expect(readFileSync(join(dir, "rpc-host.json"), "utf8")).toBe(state);
+			expect(storedHost(dir)).toEqual(state);
 
 			crash(real, pane);
 			// Another session, not the run's orchestrator's, is told nothing of it and takes nothing over.
@@ -156,7 +146,7 @@ describe.skipIf(!hasTmux)("recovering RPC runs", () => {
 			// Its orchestrator gone, the run goes on with its admitted work, and stores its Report.
 			writeFileSync(gate, "");
 			await waitFor(() => expect(hostOf(real, "worker").exit).toBeDefined());
-			expect(readJson(join(dir, "reports", "1.json")).outcome).toEqual({ status: "completed" });
+			expect(reportOf(dir, 1)?.outcome).toEqual({ status: "completed" });
 			await sleep(2000);
 			expect(real.requests("main")).toHaveLength(2);
 			expect(recordOf(real, "worker").status).toBe("running");
@@ -202,8 +192,7 @@ describe.skipIf(!hasTmux)("recovering RPC runs", () => {
 			const requests = await real.waitForRequests("main", 3);
 			expect(countHolding(requests[2], "Which directory holds HERON?")).toBe(1);
 			// Its session holds it now, so the relay goes on past it: a later takeover relays it no more.
-			const relayed = join(runDir(real.agentDir, "look"), "outbox", "0.relayed");
-			await waitFor(() => expect(existsSync(relayed) && readFileSync(relayed, "utf8")).toBe("1"));
+			await waitFor(() => expect(relayedRunOutbox(runDirOf(real.agentDir, "look"), 0)).toBe(1));
 			writeFileSync(gate, "");
 			const reported = await real.waitForRequests("main", 4);
 			expect(countHolding(reported[3], "Done without HERON.")).toBe(1);
@@ -242,7 +231,7 @@ describe.skipIf(!hasTmux)("recovering RPC runs", () => {
 			expect(record.errorMessage).toMatch(/uncertain.*not started again/s);
 			await sleep(2000);
 			expect(real.requests("worker")).toHaveLength(1);
-			expect(readdirSync(join(runDir(real.agentDir, "worker"), "hosts"))).toEqual(["0"]);
+			expect(hostedGenerations(runDirOf(real.agentDir, "worker"))).toEqual([0]);
 		},
 		4 * readinessMs,
 	);
@@ -275,7 +264,7 @@ describe.skipIf(!hasTmux)("recovering RPC runs", () => {
 		// Its slot is free, and no orchestrator is there to revalidate it: the queued member waits.
 		await sleep(3000);
 		expect(real.requests(queued)).toHaveLength(0);
-		expect(existsSync(join(runDir(real.agentDir, queued), "rpc-host.json"))).toBe(false);
+		expect(hostState(runDirOf(real.agentDir, queued))).toBeUndefined();
 		return { sessionFile, working, queued };
 	}
 
@@ -316,7 +305,7 @@ describe.skipIf(!hasTmux)("recovering RPC runs", () => {
 			});
 			await sleep(2000);
 			expect(real.requests(queued)).toHaveLength(0);
-			expect(existsSync(join(runDir(real.agentDir, queued), "rpc-host.json"))).toBe(false);
+			expect(hostState(runDirOf(real.agentDir, queued))).toBeUndefined();
 		},
 		4 * readinessMs,
 	);
@@ -386,7 +375,7 @@ describe.skipIf(!hasTmux)("recovering RPC runs", () => {
 			expect(alive(lingerer)).toBe(false);
 			await sleep(1000);
 			expect(real.requests("work")).toHaveLength(1);
-			expect(readdirSync(join(runDir(real.agentDir, "work"), "hosts"))).toEqual(["0"]);
+			expect(hostedGenerations(runDirOf(real.agentDir, "work"))).toEqual([0]);
 		},
 		4 * readinessMs,
 	);

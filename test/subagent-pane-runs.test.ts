@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -17,6 +17,7 @@ import {
 	systemPrompt,
 	toolNames,
 } from "./helpers/real-pi.ts";
+import { reportOf, runNamed, storedHost } from "./helpers/run-files.ts";
 import { waitFor } from "./helpers/wait-for.ts";
 
 const GATE = fileURLToPath(new URL("./fixtures/real-pi/approval-gate.ts", import.meta.url));
@@ -25,19 +26,8 @@ const ENV_PROBE = fileURLToPath(new URL("./fixtures/real-pi/env-probe.ts", impor
 
 /** A run's record, as its orchestrator stored it, by the run's name. */
 function runRecord(agentDir: string, name: string): { runId: string; dir: string } {
-	const root = join(agentDir, "bluclawd", "subagents");
-	for (const session of readdirSync(root)) {
-		for (const run of readdirSync(join(root, session))) {
-			const dir = join(root, session, run);
-			try {
-				const record = JSON.parse(readFileSync(join(dir, "record.json"), "utf8"));
-				if (record.name === name) return { runId: record.runId, dir };
-			} catch {
-				// Not written yet.
-			}
-		}
-	}
-	throw new Error(`no run named ${name}`);
+	const { record, runDir } = runNamed(agentDir, name);
+	return { runId: record.runId, dir: runDir };
 }
 
 /** Kills the pi in `pane` as a crash does: it never ends its session, and its pane goes with it. */
@@ -111,7 +101,7 @@ describe.skipIf(!hasTmux)("a run in a pane of its own", () => {
 		expect(toolNames(look[0]).sort()).toEqual(["codemode", "read", "subagent_message"]);
 
 		// Its pi is interactive, in a tmux session of agent view's server named after its run and generation.
-		const { runId, dir } = runRecord(real.agentDir, "look");
+		const { runId } = runRecord(real.agentDir, "look");
 		const pane = runPaneSession(runId, 0);
 		expect(real.tmux.hasSession(pane)).toBe(true);
 		await waitFor(() => expect(real.tmux.capture(pane, 200).join("\n")).toContain("Read notes.txt"));
@@ -125,7 +115,7 @@ describe.skipIf(!hasTmux)("a run in a pane of its own", () => {
 		expect(result?.text).toContain("Outcome: completed");
 		expect(result?.text).toContain("Process: exited with code 0");
 		await waitFor(() => expect(real.tmux.hasSession(pane)).toBe(false));
-		expect(JSON.parse(readFileSync(join(dir, "record.json"), "utf8"))).toMatchObject({
+		expect(runNamed(real.agentDir, "look").record).toMatchObject({
 			backend: "rpc",
 			status: "closed",
 		});
@@ -143,12 +133,10 @@ describe.skipIf(!hasTmux)("a run in a pane of its own", () => {
 		real.script("look", [{ tool: "read", args: { path: "secret.gated" } }, { text: "It says OSPREY." }]);
 		real.start(["--", "Delegate the look."]);
 		await real.waitForRequests("look", 1);
-		const { runId, dir } = runRecord(real.agentDir, "look");
+		const { runId } = runRecord(real.agentDir, "look");
 		const pane = runPaneSession(runId, 0);
 		await waitFor(() => expect(real.tmux.capture(pane, 200).join("\n")).toContain("Allow this subagent read"));
-		await waitFor(() =>
-			expect(JSON.parse(readFileSync(join(dir, "record.json"), "utf8")).activity).toBe("awaiting_input"),
-		);
+		await waitFor(() => expect(runNamed(real.agentDir, "look").record.activity).toBe("awaiting_input"));
 
 		// The first choice allows it.
 		real.tmux.sendKeys(pane, ["Enter"]);
@@ -198,7 +186,7 @@ describe.skipIf(!hasTmux)("a run in a pane of its own", () => {
 			const look = await real.waitForRequests("look", 2);
 			expect(conversation(look[1]).at(-1)?.text).toContain("Blocked: read");
 			await waitFor(() => expect(real.tmux.hasSession(pane)).toBe(false));
-			expect(JSON.parse(readFileSync(join(dir, "reports", "1.json"), "utf8")).outcome).toEqual({
+			expect(reportOf(dir, 1)?.outcome).toEqual({
 				status: "completed",
 			});
 		},
@@ -296,8 +284,8 @@ describe.skipIf(!hasTmux)("a run in a pane of its own", () => {
 		real.tmux.sendKeys(orchestrator, ["stop work", "Enter"]);
 		await real.waitForRequests("main", 4);
 		await waitFor(() => expect(real.tmux.hasSession(pane)).toBe(false));
-		expect(JSON.parse(readFileSync(join(dir, "record.json"), "utf8"))).toMatchObject({ status: "cancelled" });
-		expect(JSON.parse(readFileSync(join(dir, "reports", "1.json"), "utf8")).outcome).toMatchObject({
+		expect(runNamed(real.agentDir, "work").record).toMatchObject({ status: "cancelled" });
+		expect(reportOf(dir, 1)?.outcome).toMatchObject({
 			status: "stopped",
 		});
 	});
@@ -338,8 +326,7 @@ describe.skipIf(!hasTmux)("a run in a pane of its own", () => {
 			spawnSync("tmux", ["-S", real.tmux.socket, "set-environment", "-g", "-u", "BC_TEST_SECRET"]);
 			await real.waitForRequests("hold", 1);
 			writeFileSync(lookGo, "");
-			const record = (name: string) =>
-				JSON.parse(readFileSync(join(runRecord(real.agentDir, name).dir, "record.json"), "utf8"));
+			const record = (name: string) => runNamed(real.agentDir, name).record;
 			await waitFor(() => expect(record("look").status).toBe("starting"));
 
 			// Its host waits in its pane until the daemon that launched it is gone and another runs.
@@ -444,8 +431,8 @@ describe.skipIf(!hasTmux)("a run in a pane of its own", () => {
 			const orchestrator = real.start(["--", "delegate"]);
 			real.attach(orchestrator);
 			await real.waitForRequests("main", 2);
-			const { runId, dir } = runRecord(real.agentDir, "kept");
-			await waitFor(() => expect(JSON.parse(readFileSync(join(dir, "record.json"), "utf8")).status).toBe("closed"));
+			const { runId } = runRecord(real.agentDir, "kept");
+			await waitFor(() => expect(runNamed(real.agentDir, "kept").record.status).toBe("closed"));
 			await waitFor(() => expect(real.tmux.hasSession(runPaneSession(runId, 0))).toBe(false));
 
 			const screen = () => real.tmux.capture(orchestrator, 80).join("\n");
@@ -562,8 +549,8 @@ describe.skipIf(!hasTmux)("a run in a pane of its own", () => {
 			real.attach(orchestrator);
 			await real.waitForRequests("busy", 1);
 			await real.waitForRequests("main", 3);
-			const { runId, dir } = runRecord(real.agentDir, "kept");
-			const record = () => JSON.parse(readFileSync(join(dir, "record.json"), "utf8"));
+			const { runId } = runRecord(real.agentDir, "kept");
+			const record = () => runNamed(real.agentDir, "kept").record;
 			await waitFor(() => expect(record().status).toBe("closed"));
 			const before = record();
 			const screen = () => real.tmux.capture(orchestrator, 80).join("\n");
@@ -627,7 +614,7 @@ describe.skipIf(!hasTmux)("a run in a pane of its own", () => {
 			real.attach(orchestrator);
 			await real.waitForRequests("kept", 1);
 			const { runId, dir } = runRecord(real.agentDir, "kept");
-			const record = () => JSON.parse(readFileSync(join(dir, "record.json"), "utf8"));
+			const record = () => runNamed(real.agentDir, "kept").record;
 			await waitFor(() => expect(record().status).toBe("closed"));
 			const screen = () => real.tmux.capture(orchestrator, 80).join("\n");
 			await waitFor(() => expect(screen()).toContain("kept remembered"));
@@ -680,7 +667,7 @@ describe.skipIf(!hasTmux)("a run in a pane of its own", () => {
 		real.tmux.sendKeys(pane, ["Left"]);
 		await waitFor(() => expect(real.shown()).toBe(orchestrator));
 		await waitFor(() => expect(real.tmux.hasSession(pane)).toBe(false));
-		expect(JSON.parse(readFileSync(join(dir, "reports", "1.json"), "utf8")).outcome).toEqual({
+		expect(reportOf(dir, 1)?.outcome).toEqual({
 			status: "stopped",
 			error: "the user stopped its work in its pane",
 		});
@@ -731,13 +718,9 @@ describe.skipIf(!hasTmux)("a run in a pane of its own", () => {
 			await real.waitForRequests("edit", 2);
 			// Queued behind it.
 			writeFileSync(nextGo, "");
-			await waitFor(() =>
-				expect(
-					JSON.parse(readFileSync(join(runRecord(real.agentDir, "next").dir, "record.json"), "utf8")).status,
-				).toBe("starting"),
-			);
+			await waitFor(() => expect(runNamed(real.agentDir, "next").record.status).toBe("starting"));
 			expect(real.requests("next")).toEqual([]);
-			const { runId, dir } = runRecord(real.agentDir, "edit");
+			const { runId } = runRecord(real.agentDir, "edit");
 			const pane = runPaneSession(runId, 0);
 
 			expect(spawnSync("tmux", ["-S", real.tmux.socket, "kill-session", "-t", `=${pane}`]).status).toBe(0);
@@ -752,9 +735,7 @@ describe.skipIf(!hasTmux)("a run in a pane of its own", () => {
 			expect(report).toMatch(/^Changes since its baseline: A new\.txt$/m);
 			const workspace = /^Workspace: (.+?), an isolated Git worktree/m.exec(report)?.[1] ?? "";
 			expect(readFileSync(join(workspace, "new.txt"), "utf8")).toBe("new\n");
-			await waitFor(() =>
-				expect(JSON.parse(readFileSync(join(dir, "record.json"), "utf8"))).toMatchObject({ status: "closed" }),
-			);
+			await waitFor(() => expect(runNamed(real.agentDir, "edit").record).toMatchObject({ status: "closed" }));
 			// Its slot is free.
 			await real.waitForRequests("next", 1);
 		},
@@ -771,7 +752,7 @@ describe.skipIf(!hasTmux)("a run in a pane of its own", () => {
 		real.start(["--", "delegate"]);
 		await real.waitForRequests("look", 1);
 		const { runId, dir } = runRecord(real.agentDir, "look");
-		const child = JSON.parse(readFileSync(join(dir, "rpc-host.json"), "utf8")).childPid;
+		const child = Number(storedHost(dir).childPid);
 		expect(child).toBeGreaterThan(0);
 
 		// Stopped, its pi stores nothing of its own on the hang-up.
@@ -803,7 +784,7 @@ describe.skipIf(!hasTmux)("a run in a pane of its own", () => {
 		real.start(["--", "delegate"]);
 		await real.waitForRequests("kept", 1);
 		const { runId, dir } = runRecord(real.agentDir, "kept");
-		const record = () => JSON.parse(readFileSync(join(dir, "record.json"), "utf8"));
+		const record = () => runNamed(real.agentDir, "kept").record;
 		await waitFor(() => expect(record()).toMatchObject({ status: "closed", generation: 0 }));
 		const pane = runPaneSession(runId, 1);
 		gatedHost(real, pane, dir, hostGo);

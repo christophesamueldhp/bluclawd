@@ -3,6 +3,8 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, writeFi
 import { join } from "node:path";
 import type { JsonObject } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { SubagentRunRecord } from "../ext/subagents/runs.ts";
+import { storedRunReportTextPath } from "../ext/subagents/storage.ts";
 import { readinessMs } from "./helpers/heartbeats.ts";
 import {
 	conversation,
@@ -14,31 +16,12 @@ import {
 	startRealPi,
 	systemPrompt,
 } from "./helpers/real-pi.ts";
+import { hostState, runDirOf, storedRuns } from "./helpers/run-files.ts";
 import { waitFor } from "./helpers/wait-for.ts";
 
 /** Every run the orchestrator stored, as its record. */
-function records(agentDir: string): Array<Record<string, unknown>> {
-	const root = join(agentDir, "bluclawd", "subagents");
-	if (!existsSync(root)) return [];
-	return readdirSync(root).flatMap((session) =>
-		readdirSync(join(root, session)).flatMap((run) => {
-			const record = join(root, session, run, "record.json");
-			return existsSync(record) ? [JSON.parse(readFileSync(record, "utf8"))] : [];
-		}),
-	);
-}
-
-/** A run's directory, by the run's name. */
-function runDir(real: RealPi, name: string): string {
-	const root = join(real.agentDir, "bluclawd", "subagents");
-	for (const session of readdirSync(root)) {
-		for (const run of readdirSync(join(root, session))) {
-			const record = join(root, session, run, "record.json");
-			if (existsSync(record) && JSON.parse(readFileSync(record, "utf8")).name === name)
-				return join(root, session, run);
-		}
-	}
-	throw new Error(`no run named ${name}`);
+function records(agentDir: string): SubagentRunRecord[] {
+	return storedRuns(agentDir).map(({ record }) => record);
 }
 
 /** The manifests of every batch the orchestrator settled, one after another; false while there is none. */
@@ -52,7 +35,7 @@ function batchManifests(real: RealPi): string | false {
 }
 
 /** A run's record, by the run's name. */
-function recordOf(real: RealPi, name: string): Record<string, unknown> & { reportPath?: string; status?: string } {
+function recordOf(real: RealPi, name: string): SubagentRunRecord {
 	const record = records(real.agentDir).find((stored) => stored.name === name);
 	if (!record) throw new Error(`no run named ${name}`);
 	return record;
@@ -266,7 +249,7 @@ describe.skipIf(!hasTmux)("a tasks batch of RPC runs", () => {
 			const listed = readFileSync(manifest, "utf8");
 			for (const [i, name] of ["ta", "tb", "tc"].entries()) {
 				expect(listed).toMatch(new RegExp(`- tasks\\[${i}\\] "${name}" \\(sub_[\\w-]+\\): completed`));
-				expect(listed).toContain(`Report: ${join(runDir(real, name), "reports", "1.md")}`);
+				expect(listed).toContain(`Report: ${storedRunReportTextPath(runDirOf(real.agentDir, name), 1)}`);
 			}
 			expect(recordOf(real, "ta")).toMatchObject({
 				cwd: realpathSync(join(real.cwd, "a")),
@@ -348,7 +331,7 @@ describe.skipIf(!hasTmux)("a tasks batch of RPC runs", () => {
 		await new Promise((resolve) => setTimeout(resolve, 1000));
 		for (const name of queued) {
 			expect(real.requests(name)).toEqual([]);
-			expect(existsSync(join(runDir(real, name), "rpc-host.json"))).toBe(false);
+			expect(hostState(runDirOf(real.agentDir, name))).toBeUndefined();
 		}
 	});
 
@@ -446,7 +429,7 @@ describe.skipIf(!hasTmux)("a tasks batch of RPC runs", () => {
 			);
 			for (const name of [stopped, waiting]) {
 				expect(real.requests(name)).toEqual([]);
-				expect(existsSync(join(runDir(real, name), "rpc-host.json"))).toBe(false);
+				expect(hostState(runDirOf(real.agentDir, name))).toBeUndefined();
 			}
 			// Proves only that nothing else woke the orchestrator within this while.
 			await new Promise((resolve) => setTimeout(resolve, 500));
@@ -479,7 +462,7 @@ describe.skipIf(!hasTmux)("a tasks batch of RPC runs", () => {
 				new RegExp(`### "${name}" \\(sub_[\\w-]+\\): completed\\nChecks: [^\\n]+\\n${name} begins\\.`),
 			);
 			expect(aggregate).not.toContain(`${name} ends.`);
-			const full = join(runDir(real, name), "reports", "1.md");
+			const full = storedRunReportTextPath(runDirOf(real.agentDir, name), 1);
 			expect(aggregate).toContain(`[Cut short; its full Report: ${full}]`);
 			expect(readFileSync(full, "utf8")).toContain(`${name} ends.`);
 		}

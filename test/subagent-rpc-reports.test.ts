@@ -1,7 +1,8 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { storedRunReportTextPath } from "../ext/subagents/storage.ts";
 import { readinessMs } from "./helpers/heartbeats.ts";
 import {
 	conversation,
@@ -13,6 +14,7 @@ import {
 	startRealPi,
 	systemPrompt,
 } from "./helpers/real-pi.ts";
+import { findRun } from "./helpers/run-files.ts";
 import { waitFor } from "./helpers/wait-for.ts";
 
 /** The texts of the tool results the model was given in `request`, in order. */
@@ -20,20 +22,6 @@ const toolResults = (request: FauxRequest) =>
 	conversation(request)
 		.filter((message) => message.role === "toolResult")
 		.map(({ text }) => text);
-
-/** A run's directory, as its orchestrator stored it, by the run's name; undefined before it is admitted. */
-function runDir(agentDir: string, name: string): string | undefined {
-	const root = join(agentDir, "bluclawd", "subagents");
-	if (!existsSync(root)) return undefined;
-	for (const session of readdirSync(root)) {
-		for (const run of readdirSync(join(root, session))) {
-			const record = join(root, session, run, "record.json");
-			if (existsSync(record) && JSON.parse(readFileSync(record, "utf8")).name === name)
-				return join(root, session, run);
-		}
-	}
-	return undefined;
-}
 
 /** Waits until the model of `session` got more than `before` requests: each pi start gets a wait of its own. */
 const started = (real: RealPi, session: string, before = 0) =>
@@ -66,7 +54,7 @@ describe.skipIf(!hasTmux)("an RPC run's Report", () => {
 		await real.waitForRequests("main", 1);
 		await started(real, "look");
 		// Its full Report will be its first: the orchestrator's model reads it once the cut one arrives.
-		const full = join(runDir(real.agentDir, "look") ?? "", "reports", "1.md");
+		const full = storedRunReportTextPath(findRun(real.agentDir, "look")?.runDir ?? "", 1);
 		real.script("main", [
 			{ tool: "subagent", args: { agent: "explorer", name: "look", task: "Look around." } },
 			{ tool: "read", args: { path: full } },
@@ -187,7 +175,7 @@ describe.skipIf(!hasTmux)("an RPC run's Report", () => {
 
 			// Before it settles, the manifest says what each member did: one settled, one working, one queued.
 			const manifest = await waitFor(() => {
-				const dir = join(dirname(runDir(real.agentDir, done) ?? ""), "batches");
+				const dir = join(dirname(findRun(real.agentDir, done)?.runDir ?? ""), "batches");
 				const [file] = readdirSync(dir);
 				const text = readFileSync(join(dir, file), "utf8");
 				expect(text).toMatch(new RegExp(`${entry(done)}: completed`));
@@ -195,7 +183,7 @@ describe.skipIf(!hasTmux)("an RPC run's Report", () => {
 				expect(text).toMatch(new RegExp(`${entry(queued)}: not settled yet: queued`));
 				return join(dir, file);
 			});
-			const doneReport = join(runDir(real.agentDir, done) ?? "", "reports", "1.md");
+			const doneReport = storedRunReportTextPath(findRun(real.agentDir, done)?.runDir ?? "", 1);
 			expect(readFileSync(manifest, "utf8")).toContain(`Report: ${doneReport}`);
 
 			// Cancelled, the call still gives what settled, its Report with it, and where the rest will be.
@@ -255,7 +243,7 @@ describe.skipIf(!hasTmux)("an RPC run's Report", () => {
 			await real.waitForRequests("main", 6);
 
 			// Three generations in one session: what that session's file holds is the run's usage, each token once.
-			const dir = runDir(real.agentDir, "look") ?? "";
+			const dir = findRun(real.agentDir, "look")?.runDir ?? "";
 			const sessions = readdirSync(dir).filter((file) => file.endsWith(".jsonl"));
 			expect(sessions).toHaveLength(1);
 			const tokens = entries(join(dir, sessions[0]))

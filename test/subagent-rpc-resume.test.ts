@@ -1,6 +1,7 @@
-import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { generationDefinition } from "../ext/subagents/generation-state.ts";
 import { readinessMs } from "./helpers/heartbeats.ts";
 import {
 	conversation,
@@ -12,6 +13,7 @@ import {
 	systemPrompt,
 	toolNames,
 } from "./helpers/real-pi.ts";
+import { definitionOf, reportOf, reportSeqs, reportText, runDirOf, runNamed, storedHost } from "./helpers/run-files.ts";
 import { waitFor } from "./helpers/wait-for.ts";
 
 /** The last tool result the model was given. */
@@ -19,19 +21,6 @@ const lastToolResult = (request: FauxRequest) =>
 	conversation(request)
 		.filter((message) => message.role === "toolResult")
 		.at(-1);
-
-/** A run's directory, as its orchestrator stored it, by the run's name. */
-function runDir(agentDir: string, name: string): string {
-	const root = join(agentDir, "bluclawd", "subagents");
-	for (const session of readdirSync(root)) {
-		for (const run of readdirSync(join(root, session))) {
-			const record = join(root, session, run, "record.json");
-			if (existsSync(record) && JSON.parse(readFileSync(record, "utf8")).name === name)
-				return join(root, session, run);
-		}
-	}
-	throw new Error(`no run named ${name}`);
-}
 
 const readJson = (path: string) => JSON.parse(readFileSync(path, "utf8"));
 
@@ -50,7 +39,8 @@ function role(dir: string, name: string, instructions: string, extra: string[]):
 	);
 }
 
-const alive = (pid: number) => {
+const alive = (pid: number | undefined) => {
+	if (pid === undefined) return false;
 	try {
 		process.kill(pid, 0);
 		return true;
@@ -88,8 +78,8 @@ describe.skipIf(!hasTmux)("resuming an RPC run", () => {
 			real.script("look", [{ text: "Remembered." }, { text: "You gave me PELICAN." }]);
 			real.start(["--", "delegate"]);
 			const main = await real.waitForRequests("main", 4);
-			const dir = runDir(real.agentDir, "look");
-			const first = readJson(join(dir, "reports", "1.json"));
+			const dir = runDirOf(real.agentDir, "look");
+			const first = reportOf(dir, 1);
 
 			const receipt = lastToolResult(main[2])?.text;
 			expect(receipt).toMatch(/Resuming "look" \(sub_[^)]+\) in the background/);
@@ -124,20 +114,20 @@ describe.skipIf(!hasTmux)("resuming an RPC run", () => {
 			expect(conversation(main[3]).at(-1)?.text).toContain("You gave me PELICAN.");
 
 			// One session across both generations; each generation's Report kept apart.
-			const host = readJson(join(dir, "rpc-host.json"));
-			expect(readJson(join(dir, "reports", "2.json"))).toMatchObject({
+			const host = storedHost(dir);
+			expect(reportOf(dir, 2)).toMatchObject({
 				generation: 1,
 				outcome: { status: "completed" },
-				sessionId: first.sessionId,
+				sessionId: first?.sessionId,
 			});
 			expect(first).toMatchObject({ generation: 0, text: "Remembered." });
-			expect(readFileSync(join(dir, "reports", "1.md"), "utf8")).toContain("Remembered.");
-			expect(readFileSync(join(dir, "reports", "2.md"), "utf8")).toContain("You gave me PELICAN.");
+			expect(reportText(dir, 1)).toContain("Remembered.");
+			expect(reportText(dir, 2)).toContain("You gave me PELICAN.");
 			expect(readdirSync(dir).filter((file) => file.endsWith(".jsonl"))).toEqual([
-				host.sessionFile.split("/").at(-1),
+				host.sessionFile?.split("/").at(-1),
 			]);
 			await waitFor(() =>
-				expect(readJson(join(dir, "record.json"))).toMatchObject({
+				expect(runNamed(real.agentDir, "look").record).toMatchObject({
 					generation: 1,
 					status: "closed",
 					transcriptPath: host.sessionFile,
@@ -178,9 +168,9 @@ describe.skipIf(!hasTmux)("resuming an RPC run", () => {
 			// Proves only that nothing woke the finished run within this while.
 			await new Promise((resolve) => setTimeout(resolve, 1000));
 			expect(real.requests("look")).toHaveLength(1);
-			const dir = runDir(real.agentDir, "look");
-			expect(readdirSync(join(dir, "reports"))).toEqual(["1.json", "1.md"]);
-			expect(readJson(join(dir, "record.json"))).toMatchObject({ generation: 0, status: "closed" });
+			const dir = runDirOf(real.agentDir, "look");
+			expect(reportSeqs(dir)).toEqual([1]);
+			expect(runNamed(real.agentDir, "look").record).toMatchObject({ generation: 0, status: "closed" });
 			expect(JSON.stringify(real.requests("again"))).not.toContain("PELICAN");
 		},
 	);
@@ -228,9 +218,9 @@ describe.skipIf(!hasTmux)("resuming an RPC run", () => {
 				'Thinking level "low" is not supported by subagent model "faux/faux-1" (supported: off).',
 			);
 			expect(results[2]).toContain("as its generation 2 on faux/faux-2 at thinking high");
-			const dir = runDir(real.agentDir, "tuned");
+			const dir = runDirOf(real.agentDir, "tuned");
 			await waitFor(() =>
-				expect(readJson(join(dir, "record.json"))).toMatchObject({
+				expect(runNamed(real.agentDir, "tuned").record).toMatchObject({
 					generation: 3,
 					status: "closed",
 					modelId: "faux-2",
@@ -238,7 +228,7 @@ describe.skipIf(!hasTmux)("resuming an RPC run", () => {
 				}),
 			);
 			// The launch's admitted pair stays as it was admitted.
-			expect(readJson(join(dir, "definition.json")).admitted).toEqual({
+			expect(definitionOf(dir).admitted).toEqual({
 				provider: "faux",
 				modelId: "faux-3",
 				thinkingLevel: "low",
@@ -281,12 +271,12 @@ describe.skipIf(!hasTmux)("resuming an RPC run", () => {
 			expect(systemPrompt(audit[2])).not.toContain("Audit v2.");
 			expect(toolNames(audit[2])).toEqual(["grep", "read", "subagent_message"]);
 			expect(lastToolResult(audit[3])?.text).toMatch(/Blocked by permission rule/);
-			const dir = runDir(real.agentDir, "audit");
-			expect(readJson(join(dir, "definition.json"))).toMatchObject({
+			const dir = runDirOf(real.agentDir, "audit");
+			expect(definitionOf(dir)).toMatchObject({
 				instructions: "Audit v1.",
 				tools: ["read", "grep"],
 			});
-			expect(JSON.stringify(readJson(join(dir, "generations", "1.json")).deny)).toContain("Read(secret.txt)");
+			expect(JSON.stringify(definitionOf(dir, 1).deny)).toContain("Read(secret.txt)");
 		},
 	);
 
@@ -314,9 +304,9 @@ describe.skipIf(!hasTmux)("resuming an RPC run", () => {
 			),
 		);
 		expect(real.requests("look")).toHaveLength(1);
-		const dir = runDir(real.agentDir, "look");
-		expect(existsSync(join(dir, "generations"))).toBe(false);
-		expect(readJson(join(dir, "record.json"))).toMatchObject({ generation: 0, status: "closed" });
+		const dir = runDirOf(real.agentDir, "look");
+		expect(generationDefinition(dir, 1)).toBeUndefined();
+		expect(runNamed(real.agentDir, "look").record).toMatchObject({ generation: 0, status: "closed" });
 	});
 
 	// Two pis one after another (look, then one pi for both Resumes): a readiness bound for each to start, and one for
@@ -348,8 +338,9 @@ describe.skipIf(!hasTmux)("resuming an RPC run", () => {
 		const look = real.requests("look");
 		expect(look).toHaveLength(2);
 		expect(conversation(look[1]).filter(({ role }) => role === "user")).toHaveLength(2);
-		const dir = runDir(real.agentDir, "look");
-		expect(readdirSync(join(dir, "generations"))).toEqual(["1.json"]);
-		expect(readdirSync(join(dir, "reports"))).toEqual(["1.json", "1.md", "2.json", "2.md"]);
+		const dir = runDirOf(real.agentDir, "look");
+		expect(definitionOf(dir, 1)).toBeDefined();
+		expect(generationDefinition(dir, 2)).toBeUndefined();
+		expect(reportSeqs(dir)).toEqual([1, 2]);
 	});
 });

@@ -7,6 +7,7 @@ import {
 	readPersistedRunRecord,
 	readRunUsageLedger,
 	subagentReportPath,
+	subagentRunDir,
 	writePersistedRunRecord,
 } from "../ext/subagents/storage.ts";
 import { sendRetrying } from "../ext/subagents/tmux-runs.ts";
@@ -262,7 +263,7 @@ describe("Delivering a run's Reports", () => {
 		const { launch, storeReport, agentDir } = setup();
 		const backend = launch("backend", "Build the API.");
 		expect(storeReport(backend, "API built.")).toBe(1);
-		const runDir = join(getSubagentsRootDir(agentDir), backend.record.parentSessionId, backend.runId);
+		const runDir = subagentRunDir(agentDir, backend.record.parentSessionId, backend.runId);
 		writeFileSync(join(runDir, "reports", "1.json"), "{ torn");
 		expect(storeReport(backend, "Pagination added.")).toBe(2);
 	});

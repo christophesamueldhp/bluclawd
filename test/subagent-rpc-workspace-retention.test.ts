@@ -1,9 +1,11 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { runWorkspace } from "../ext/subagents/generation-state.ts";
 import { readinessMs } from "./helpers/heartbeats.ts";
 import { conversation, FAUX, type FauxRequest, hasTmux, type RealPi, startRealPi } from "./helpers/real-pi.ts";
+import { reportText, runDirOf, runNamed } from "./helpers/run-files.ts";
 import { waitFor } from "./helpers/wait-for.ts";
 
 /** The last tool result the model was given. */
@@ -56,23 +58,14 @@ function leftInRepository(repo: string): { refs: string[]; worktrees: string[] }
 
 const readJson = (path: string) => JSON.parse(readFileSync(path, "utf8"));
 
-/** A run's directory, as its orchestrator stored it, by the run's name. */
-function runDir(agentDir: string, name: string): string {
-	const root = join(agentDir, "bluclawd", "subagents");
-	for (const session of readdirSync(root)) {
-		for (const run of readdirSync(join(root, session))) {
-			const record = join(root, session, run, "record.json");
-			if (existsSync(record) && readJson(record).name === name) return join(root, session, run);
-		}
-	}
-	throw new Error(`no run named ${name}`);
-}
-
-const recordOf = (real: RealPi, name: string) => readJson(join(runDir(real.agentDir, name), "record.json"));
+const recordOf = (real: RealPi, name: string) => runNamed(real.agentDir, name).record;
 
 /** The worktree a run's Admission recorded for it. */
-const worktreeOf = (real: RealPi, name: string): string =>
-	readJson(join(runDir(real.agentDir, name), "definition.json")).workspace.root;
+function worktreeOf(real: RealPi, name: string): string {
+	const workspace = runWorkspace(runDirOf(real.agentDir, name));
+	if (!workspace) throw new Error(`no worktree was recorded for ${name}`);
+	return workspace.root;
+}
 
 /** Merges `added` into the settings every pi of the test reads, as they are read next. */
 function addSettings(real: RealPi, added: Record<string, unknown>): void {
@@ -299,7 +292,7 @@ describe.skipIf(!hasTmux)("the workspace of an RPC run that edits", () => {
 		writeFileSync(gate, "");
 		await real.waitForRequests("main", 3);
 		const { runId, transcriptPath } = recordOf(real, "w");
-		const dir = runDir(real.agentDir, "w");
+		const dir = runDirOf(real.agentDir, "w");
 		real.tmux.sendKeys(pane, ["/clean-workspace w", "Enter"]);
 		await waitFor(() => expect(screen()).toContain('with its changes (A new.txt); "w"'));
 		expect(screen()).toMatch(/can no longer be resumed\. Its transcript and Reports are kept\./);
@@ -315,8 +308,8 @@ describe.skipIf(!hasTmux)("the workspace of an RPC run that edits", () => {
 		expect(refusal).toContain(join(dir, "report.md"));
 		expect(real.requests("w")).toHaveLength(2);
 		expect(existsSync(root)).toBe(false);
-		expect(readFileSync(transcriptPath, "utf8")).toContain("Wrote.");
-		expect(readFileSync(join(dir, "reports", "1.md"), "utf8")).toContain("Wrote.");
+		expect(readFileSync(String(transcriptPath), "utf8")).toContain("Wrote.");
+		expect(reportText(dir, 1)).toContain("Wrote.");
 		expect(existsSync(join(repo, "new.txt"))).toBe(false);
 	});
 });

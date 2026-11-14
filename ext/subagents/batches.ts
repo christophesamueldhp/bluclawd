@@ -15,10 +15,11 @@ import {
 	nameTaken,
 	type RunAdmission,
 } from "./admission.ts";
+import { generationDefinition } from "./generation-state.ts";
 import type { LaunchParams } from "./invocation.ts";
 import { GROUP_PROGRESS, NOT_APPROVAL, NOTHING_TO_CLOSE, whileRunning } from "./messages.ts";
 import { sanitizeReportText, truncateUtf8Safe } from "./results.ts";
-import { readRunDefinition, runDefinitionPath, sessionFileEntries } from "./rpc-runs.ts";
+import { sessionFileEntries } from "./rpc-runs.ts";
 import { checksSummary, commandsRun } from "./run-evidence.ts";
 import { describeWorkspace } from "./run-worktree.ts";
 import {
@@ -395,7 +396,7 @@ export async function settledMember(agentDir: string, record: Readonly<SubagentR
 	const report = readRunReports(runDir, 0)
 		.filter(({ generation }) => generation === record.generation)
 		.at(-1);
-	const definition = readRunDefinition(runDefinitionPath(runDir, record.generation));
+	const definition = generationDefinition(runDir, record.generation);
 	const isolated = definition?.workspace;
 	const workspace = isolated && { root: isolated.root, lines: await describeWorkspace(isolated, runDir) };
 	// What its transcript shows of this generation, which started when the scheduler started it.

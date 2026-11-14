@@ -4,30 +4,20 @@
  * `memory` prints the resident memory of a pane run and an RPC run of the same role, interleaved.
  */
 import { spawnSync } from "node:child_process";
-import { readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { writeFileSync } from "node:fs";
 import { loadavg } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { runPaneSession } from "../daemon/run-queue.ts";
 import { conversation, FAUX, hasTmux, type RealPi, startRealPi } from "./helpers/real-pi.ts";
+import { runNamed, storedHost } from "./helpers/run-files.ts";
 import { waitFor } from "./helpers/wait-for.ts";
 
 const probe = process.env.BLUCLAWD_PANE_PROBE;
 
 function runDir(agentDir: string, name: string): { runId: string; dir: string } {
-	const root = join(agentDir, "bluclawd", "subagents");
-	for (const session of readdirSync(root)) {
-		for (const run of readdirSync(join(root, session))) {
-			const dir = join(root, session, run);
-			try {
-				const record = JSON.parse(readFileSync(join(dir, "record.json"), "utf8"));
-				if (record.name === name) return { runId: record.runId, dir };
-			} catch {
-				// Not written yet.
-			}
-		}
-	}
-	throw new Error(`no run named ${name}`);
+	const { record, runDir } = runNamed(agentDir, name);
+	return { runId: record.runId, dir: runDir };
 }
 
 const tmuxOut = (real: RealPi, args: string[]) =>
@@ -181,10 +171,10 @@ describe.runIf(hasTmux && probe === "memory")("pane runs: resident memory", () =
 				const { runId, dir } = runDir(real.agentDir, "look");
 				expect(real.tmux.hasSession(runPaneSession(runId, 0))).toBe(kind === "pane");
 				await new Promise((resolve) => setTimeout(resolve, settleMs));
-				const state = JSON.parse(readFileSync(join(dir, "rpc-host.json"), "utf8"));
+				const state = storedHost(dir);
 				const procs = tree(state.hostPid);
 				const host = procs.get(state.hostPid)?.rss ?? 0;
-				const child = procs.get(state.childPid)?.rss ?? 0;
+				const child = procs.get(Number(state.childPid))?.rss ?? 0;
 				const total = [...procs.values()].reduce((sum, p) => sum + p.rss, 0);
 				results[kind].host.push(host);
 				results[kind].pi.push(child);

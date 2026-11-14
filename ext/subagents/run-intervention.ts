@@ -8,8 +8,8 @@
 import { readFileSync } from "node:fs";
 import { parseSessionEntries } from "@earendil-works/pi-coding-agent";
 import type { AdmissionContext, RunAdmission, RunExecutionContext } from "./admission.ts";
+import { generationState } from "./generation-state.ts";
 import { textOf } from "./results.ts";
-import { readRpcHostState } from "./rpc-host.ts";
 import { postToRun, whenGiven } from "./run-mailbox.ts";
 import { rpcRunMessageText } from "./run-messages.ts";
 import { formatRunLabel, isTerminalSubagentStatus, type SubagentRunRecord, type SubagentRunScheduler } from "./runs.ts";
@@ -74,8 +74,10 @@ export function createRunIntervention(deps: RunInterventionDeps) {
 		subagentRunDir(deps.agentDir(), run.parentSessionId, run.runId);
 
 	/** The run's session file: its host's while it works, else the one its last generation ended with. */
-	const sessionFile = (run: Readonly<SubagentRunRecord>) =>
-		readRpcHostState(runDirOf(run))?.sessionFile ?? run.transcriptPath;
+	const sessionFile = (run: Readonly<SubagentRunRecord>) => {
+		const state = generationState(runDirOf(run), run.generation);
+		return ("sessionFile" in state ? state.sessionFile : undefined) ?? run.transcriptPath;
+	};
 
 	const noteFor = (run: Readonly<SubagentRunRecord>, text: string) => deps.note(userInstructionNote(run, text));
 

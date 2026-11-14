@@ -20,23 +20,26 @@ import {
 } from "./definitions.ts";
 import { sanitizeDiagnosticText } from "./diagnostics.ts";
 import type { RunDirectory } from "./directory.ts";
+import {
+	admitGeneration,
+	generationDefinition,
+	generationState,
+	narrowGeneration,
+	runProcessesLeft,
+} from "./generation-state.ts";
 import type { LaunchParams } from "./invocation.ts";
 import { PARENT_MESSAGE_ADDRESS } from "./messages.ts";
 import { resolveChildModelAndRuntime } from "./models.ts";
 import type { ParentScope, ParentScopeChecks } from "./parent-scope.ts";
-import { readRpcHostSpec, readRpcHostState, runProcessesRemain } from "./rpc-host.ts";
 import {
-	claimRunGeneration,
 	narrowRunDefinition,
 	type RpcLaunch,
 	type RunDefinition,
-	readRunDefinition,
 	rpcDenyRules,
 	rpcGrantableTools,
 	rpcRunMayShell,
 	rpcRunProviderRefusal,
 	rpcRunTools,
-	runDefinitionPath,
 	WORKTREE_TOOLS,
 } from "./rpc-runs.ts";
 import { captureWorkspaceSnapshot, resolveRunWorkspace, within } from "./run-workspace.ts";
@@ -57,7 +60,7 @@ import {
 	type SubagentRunRecord,
 	type SubagentRunScheduler,
 } from "./runs.ts";
-import { ensureRunStorageDir, writeAtomicPrivateFile } from "./storage.ts";
+import { ensureRunStorageDir } from "./storage.ts";
 import { legacyRunRefusal, type RunLaunch } from "./tmux-runs.ts";
 
 export const MAX_TASK_INPUT_BYTES = 32 * 1024;
@@ -336,14 +339,11 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 		const storage = ensureRunStorageDir(agentDir, current.parentSessionId, current.runId);
 		if (!storage.ok) return cannot(`storage is unavailable (${storage.error}).`);
 		const { runDir } = storage;
-		const admitted = readRunDefinition(runDefinitionPath(runDir, 0));
+		const admitted = generationDefinition(runDir, 0);
 		if (!admitted) return cannot("the role it was admitted with is not stored.");
 		const sessionFile = current.transcriptPath;
 		if (!sessionFile || !holdsConversation(sessionFile)) return cannot("it has no saved conversation to go on with.");
-		const host = readRpcHostState(runDir);
-		if (host && runProcessesRemain(host)) {
-			return cannot("its pi from before is still running.");
-		}
+		if (runProcessesLeft(runDir)) return cannot("its pi from before is still running.");
 		// A run that edits resumes in its own worktree exactly, made again if it was removed holding only its baseline.
 		if (admitted.workspace) {
 			const lost = await restoreWorktree(admitted.workspace, { agentDir, runId: current.runId, runDir });
@@ -377,8 +377,7 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 			const agentDir = deps.agentDir();
 			const denied = delegationDenied(run.agentName, parent.cwd, agentDir, parent.trusted);
 			if (denied) return denied;
-			const path = runDefinitionPath(runDir, generation);
-			const definition = readRunDefinition(path);
+			const definition = generationDefinition(runDir, generation);
 			if (!definition) return "the definition it was admitted with is not stored";
 			const deny = rpcDenyRules(agentDir, [parent, { cwd: definition.cwd, trusted: definition.projectTrusted }]);
 			if (!deny.ok) return deny.error;
@@ -389,7 +388,7 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 			);
 			if (JSON.stringify(narrowed) === JSON.stringify(definition)) return undefined;
 			try {
-				writeAtomicPrivateFile(path, JSON.stringify(narrowed, null, 2));
+				narrowGeneration(runDir, generation, narrowed);
 			} catch (error) {
 				return `storage is unavailable (${error instanceof Error ? error.message : String(error)})`;
 			}
@@ -524,9 +523,7 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 		let inherited = false;
 		if (entry.kind === "resume") {
 			const { changes } = entry;
-			const prior =
-				readRunDefinition(runDefinitionPath(entry.runDir, entry.run.generation))?.admitted ??
-				entry.admitted.admitted;
+			const prior = generationDefinition(entry.runDir, entry.run.generation)?.admitted ?? entry.admitted.admitted;
 			thinkingLevel =
 				changes.thinkingLevel === "inherit"
 					? deps.parentThinkingLevel()
@@ -632,7 +629,7 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 			}
 			const generation = current.generation + 1;
 			try {
-				if (!claimRunGeneration(runDir, generation, held)) {
+				if (!admitGeneration(runDir, generation, held)) {
 					return cannot(`another Resume of it already started its generation ${generation}.`);
 				}
 			} catch (error) {
@@ -724,7 +721,7 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 			...(tools.includes("bash") ? { shell: { runId, runDir: storage.runDir } } : {}),
 		};
 		try {
-			writeAtomicPrivateFile(join(storage.runDir, "definition.json"), JSON.stringify(held, null, 2));
+			admitGeneration(storage.runDir, 0, held);
 		} catch (error) {
 			return refuseIsolated(
 				`Cannot launch subagent: storage is unavailable (${error instanceof Error ? error.message : String(error)}).`,
@@ -832,9 +829,10 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 			if (!scope || !storage.ok) return false;
 			const { runDir } = storage;
 			// As admitted, frozen before it queued: its role, grants and model, and what its host starts.
-			const definition = readRunDefinition(runDefinitionPath(runDir, run.generation));
-			const spec = readRpcHostSpec(runDir);
-			if (!definition || spec?.generation !== run.generation) return false;
+			const definition = generationDefinition(runDir, run.generation);
+			const state = generationState(runDir, run.generation);
+			const spec = state.at === "unadmitted" ? undefined : state.launch;
+			if (!definition || !spec) return false;
 			const { workspace } = definition;
 			// A run in a pane follows its orchestrator to the pane its session runs in now (ADR-0008): its spec says which.
 			const pane = spec.pane && { ...spec.pane, parent: deps.pane() ?? spec.pane.parent };

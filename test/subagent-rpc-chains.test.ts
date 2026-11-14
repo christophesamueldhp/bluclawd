@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 
 import { join } from "node:path";
 import type { JsonObject } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { SubagentRunRecord } from "../ext/subagents/runs.ts";
 import { readinessMs } from "./helpers/heartbeats.ts";
 import {
 	conversation,
@@ -15,18 +16,12 @@ import {
 	systemPrompt,
 	toolNames,
 } from "./helpers/real-pi.ts";
+import { storedRuns } from "./helpers/run-files.ts";
 import { waitFor } from "./helpers/wait-for.ts";
 
 /** Every run the orchestrator stored, as its record. */
-function records(agentDir: string): Array<Record<string, unknown>> {
-	const root = join(agentDir, "bluclawd", "subagents");
-	if (!existsSync(root)) return [];
-	return readdirSync(root).flatMap((session) =>
-		readdirSync(join(root, session)).flatMap((run) => {
-			const record = join(root, session, run, "record.json");
-			return existsSync(record) ? [JSON.parse(readFileSync(record, "utf8"))] : [];
-		}),
-	);
+function records(agentDir: string): SubagentRunRecord[] {
+	return storedRuns(agentDir).map(({ record }) => record);
 }
 
 type StoredRecord = Record<string, unknown> & {

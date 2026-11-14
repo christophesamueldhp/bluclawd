@@ -2,6 +2,9 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "n
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { RunHostLaunch } from "../daemon/run-queue.ts";
+import { storeLaunch } from "../ext/subagents/generation-state.ts";
+import type { RpcHostSpec } from "../ext/subagents/rpc-host.ts";
+import { subagentRunDir } from "../ext/subagents/storage.ts";
 import { hasTmux, type RealPi, startRealPi } from "./helpers/real-pi.ts";
 import { waitFor } from "./helpers/wait-for.ts";
 
@@ -17,7 +20,7 @@ describe.skipIf(!hasTmux)("the daemon's launch of a run's host", () => {
 
 	/** A granted run of this test's orchestrator, with its directory. */
 	async function grantedRun(real: RealPi, generation = 0) {
-		const runDir = join(real.agentDir, "bluclawd", "subagents", "session", RUN_ID);
+		const runDir = subagentRunDir(real.agentDir, "session", RUN_ID);
 		mkdirSync(runDir, { recursive: true });
 		const run = `${RUN_ID}/${generation}`;
 		expect(await real.client.claimRun(run, "session", new AbortController().signal)).toBe(true);
@@ -54,17 +57,15 @@ describe.skipIf(!hasTmux)("the daemon's launch of a run's host", () => {
 		pi = real;
 		const { run, runDir } = await grantedRun(real);
 		const touched = join(real.cwd, "touched");
-		writeFileSync(
-			join(runDir, "rpc-spec.json"),
-			JSON.stringify({
-				command: ["/bin/sh", "-c", `touch ${touched}`],
-				cwd: real.cwd,
-				agentDir: real.agentDir,
-				prompt: "Hello.",
-				model: { provider: "faux", id: "faux-1", thinkingLevel: "off" },
-				generation: 0,
-			}),
-		);
+		// A spec that names a program of its own, not pi's flags.
+		storeLaunch(runDir, {
+			command: ["/bin/sh", "-c", `touch ${touched}`],
+			cwd: real.cwd,
+			agentDir: real.agentDir,
+			prompt: "Hello.",
+			model: { provider: "faux", id: "faux-1", thinkingLevel: "off" },
+			generation: 0,
+		} as unknown as RpcHostSpec);
 		await real.client.launchRun(run, {
 			runDir,
 			env: { PATH: process.env.PATH ?? "" },

@@ -30,11 +30,11 @@ import {
 	settleBatch,
 	settledMember,
 } from "./batches.ts";
+import { generationDefinition, runWorkspace } from "./generation-state.ts";
 import type { ChainStep } from "./invocation.ts";
 import { GROUP_PROGRESS, NOT_APPROVAL, NOTHING_TO_CLOSE, whileRunning } from "./messages.ts";
 import type { ParentScopeChecks } from "./parent-scope.ts";
 import { sanitizeReportText, truncateUtf8Safe } from "./results.ts";
-import { readRunDefinition, runDefinitionPath } from "./rpc-runs.ts";
 import {
 	describeWorkspace,
 	type IsolatedWorkspace,
@@ -233,7 +233,7 @@ export async function runChain(
 	}
 	const start = admitted.handle.record;
 	const firstDir = subagentRunDir(agentDir, start.parentSessionId, start.runId);
-	const workspace = writer >= 0 ? readRunDefinition(runDefinitionPath(firstDir, 0))?.workspace : undefined;
+	const workspace = writer >= 0 ? runWorkspace(firstDir) : undefined;
 	const manifestPath = chainManifestPath(agentDir, start.parentSessionId, chain);
 	const settled = driveChain(
 		deps,
@@ -523,7 +523,7 @@ export function resumeChains(deps: ChainDeps, parentSessionId: string): void {
 		// The session reclaims it: its steps are held to this instance's scope from now on.
 		const start = { ...first, sessionEpoch: scope.sessionEpoch };
 		const firstDir = subagentRunDir(agentDir, parentSessionId, start.runId);
-		const workspace = plan.writes ? readRunDefinition(runDefinitionPath(firstDir, 0))?.workspace : undefined;
+		const workspace = plan.writes ? runWorkspace(firstDir) : undefined;
 		let at = 0;
 		for (let i = 0; i < plan.ran.length; i++) if (plan.ran[i]) at = i;
 		const results: StepResult[] = plan.steps.map(() => undefined);
@@ -578,7 +578,7 @@ async function completedMember(
 	const member = await settledMember(agentDir, { ...record, status: "closed", generation });
 	if (record.generation === generation || !member.checks) return member;
 	const runDir = subagentRunDir(agentDir, record.parentSessionId, record.runId);
-	if (!readRunDefinition(runDefinitionPath(runDir, generation))?.tools.includes("bash")) return member;
+	if (!generationDefinition(runDir, generation)?.tools.includes("bash")) return member;
 	// Its record's start is a later generation's: its transcript does not show where this one's commands end.
 	return { ...member, checks: "Checks: unknown: its run was resumed since." };
 }

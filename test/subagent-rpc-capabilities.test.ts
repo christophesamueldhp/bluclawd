@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ProjectTrustStore } from "@earendil-works/pi-coding-agent";
@@ -12,6 +12,7 @@ import {
 	startRealPi,
 	toolNames,
 } from "./helpers/real-pi.ts";
+import { storedRuns } from "./helpers/run-files.ts";
 
 const PROBE = fileURLToPath(new URL("./fixtures/real-pi/probe-tools.ts", import.meta.url));
 
@@ -22,14 +23,8 @@ const lastToolResult = (request: FauxRequest) =>
 		.at(-1);
 
 /** The names of every run the orchestrators stored. */
-function runNames(agentDir: string): string[] {
-	const root = join(agentDir, "bluclawd", "subagents");
-	return readdirSync(root).flatMap((session) =>
-		readdirSync(join(root, session))
-			.map((run) => join(root, session, run, "record.json"))
-			.filter((record) => existsSync(record))
-			.map((record) => JSON.parse(readFileSync(record, "utf8")).name),
-	);
+function runNames(agentDir: string): (string | undefined)[] {
+	return storedRuns(agentDir).map(({ record }) => record.name);
 }
 
 /** Merges `added` into the settings every pi of the test reads; before a pane starts, it holds for that pane. */

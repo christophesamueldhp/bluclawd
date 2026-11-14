@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { descendantCommand, leavingBehind, readHeartbeats, readinessMs } from "./helpers/heartbeats.ts";
@@ -12,6 +12,7 @@ import {
 	startRealPi,
 	toolNames,
 } from "./helpers/real-pi.ts";
+import { runDirOf, runNamed, storedHost } from "./helpers/run-files.ts";
 import { waitFor } from "./helpers/wait-for.ts";
 
 /** Shell commands of a run are contained only where a backend can confirm their processes ended. */
@@ -20,19 +21,7 @@ const contained = process.platform === "darwin";
 const quote = (text: string) => `'${text.replace(/'/g, `'\\''`)}'`;
 const readJson = (path: string) => JSON.parse(readFileSync(path, "utf8"));
 
-/** A run's directory, as its orchestrator stored it, by the run's name. */
-function runDir(agentDir: string, name: string): string {
-	const root = join(agentDir, "bluclawd", "subagents");
-	for (const session of readdirSync(root)) {
-		for (const run of readdirSync(join(root, session))) {
-			const record = join(root, session, run, "record.json");
-			if (existsSync(record) && readJson(record).name === name) return join(root, session, run);
-		}
-	}
-	throw new Error(`no run named ${name}`);
-}
-
-const recordOf = (real: RealPi, name: string) => readJson(join(runDir(real.agentDir, name), "record.json"));
+const recordOf = (real: RealPi, name: string) => runNamed(real.agentDir, name).record;
 const worktreeOf = (real: RealPi, name: string) =>
 	join(realpathSync(real.agentDir), "bluclawd", "worktrees", recordOf(real, name).runId);
 
@@ -275,7 +264,7 @@ describe.skipIf(!hasTmux || !contained)("a run's shell on pi's RPC", () => {
 		const beats = join(worktreeOf(real, "gp"), "beats.jsonl");
 		await waitFor(() => expect(readHeartbeats(beats).some((beat) => beat.ppid === 1)).toBe(true));
 
-		process.kill(readJson(join(runDir(real.agentDir, "gp"), "rpc-host.json")).hostPid, "SIGKILL");
+		process.kill(storedHost(runDirOf(real.agentDir, "gp")).hostPid, "SIGKILL");
 		await waitFor(() => expect(recordOf(real, "gp").status).toBe("failed"));
 		expect(recordOf(real, "gp").errorMessage).toMatch(/host ended before its pi did/);
 		expect(await quietAfterBeats(beats)).toEqual({ started: true, quiet: true });
@@ -299,7 +288,7 @@ describe.skipIf(!hasTmux || !contained)("a run's shell on pi's RPC", () => {
 
 		// Nobody but the daemon is left to end them: the orchestrator crashed, the host's group was killed whole.
 		crash(real, orchestrator);
-		const { hostPid } = readJson(join(runDir(real.agentDir, "gp"), "rpc-host.json"));
+		const { hostPid } = storedHost(runDirOf(real.agentDir, "gp"));
 		process.kill(-hostPid, "SIGKILL");
 		await waitFor(() => Date.now() - statSync(beats).mtimeMs > 500);
 		expect(await quietAfterBeats(beats)).toEqual({ started: true, quiet: true });

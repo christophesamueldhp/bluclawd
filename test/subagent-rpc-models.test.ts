@@ -1,9 +1,10 @@
-import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { readinessMs } from "./helpers/heartbeats.ts";
 import { conversation, FAUX, type FauxRequest, hasTmux, type RealPi, startRealPi } from "./helpers/real-pi.ts";
+import { definitionOf, runDirOf } from "./helpers/run-files.ts";
 import { waitFor } from "./helpers/wait-for.ts";
 
 const DRIFTED = fileURLToPath(new URL("./fixtures/real-pi/faux-drifted.ts", import.meta.url));
@@ -15,26 +16,12 @@ const lastToolResult = (request: FauxRequest) =>
 		.filter((message) => message.role === "toolResult")
 		.at(-1);
 
-/** A run's directory, as its orchestrator stored it, by the run's name. */
-function runDir(agentDir: string, name: string): string {
-	const root = join(agentDir, "bluclawd", "subagents");
-	for (const session of readdirSync(root)) {
-		for (const run of readdirSync(join(root, session))) {
-			const record = join(root, session, run, "record.json");
-			if (existsSync(record) && JSON.parse(readFileSync(record, "utf8")).name === name)
-				return join(root, session, run);
-		}
-	}
-	throw new Error(`no run named ${name}`);
-}
-
 /** What each request of `requests` asked: provider/model:thinking. */
 const asked = (requests: FauxRequest[]) =>
 	requests.map((request) => `${request.provider}/${request.model}:${request.reasoning ?? "off"}`);
 
 /** The role and settings a run was admitted with. */
-const admitted = (agentDir: string, name: string) =>
-	JSON.parse(readFileSync(join(runDir(agentDir, name), "definition.json"), "utf8"));
+const admitted = (agentDir: string, name: string) => definitionOf(runDirOf(agentDir, name));
 
 /** The tool results of the orchestrator's subagent calls, in order. */
 const subagentResults = (requests: FauxRequest[]) =>

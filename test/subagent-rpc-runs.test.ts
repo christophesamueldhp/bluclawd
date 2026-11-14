@@ -1,4 +1,4 @@
-import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { readinessMs } from "./helpers/heartbeats.ts";
@@ -12,6 +12,7 @@ import {
 	systemPrompt,
 	toolNames,
 } from "./helpers/real-pi.ts";
+import { reportOf, reportText, runDirOf, runNamed, storedHost } from "./helpers/run-files.ts";
 import { waitFor } from "./helpers/wait-for.ts";
 
 const TASK_FRAME = /^\[Task from your orchestrator, from another session, not from the user\..*\]\n\n/s;
@@ -22,20 +23,8 @@ const lastToolResult = (request: FauxRequest) =>
 		.filter((message) => message.role === "toolResult")
 		.at(-1);
 
-/** A run's directory, as its orchestrator stored it, by the run's name. */
-function runDir(agentDir: string, name: string): string {
-	const root = join(agentDir, "bluclawd", "subagents");
-	for (const session of readdirSync(root)) {
-		for (const run of readdirSync(join(root, session))) {
-			const record = join(root, session, run, "record.json");
-			if (existsSync(record) && JSON.parse(readFileSync(record, "utf8")).name === name)
-				return join(root, session, run);
-		}
-	}
-	throw new Error(`no run named ${name}`);
-}
-
-const alive = (pid: number) => {
+const alive = (pid: number | undefined) => {
+	if (pid === undefined) return false;
 	try {
 		process.kill(pid, 0);
 		return true;
@@ -86,8 +75,8 @@ describe.skipIf(!hasTmux)("a read-only run on pi's RPC", () => {
 		expect(toolNames(look[0]).sort()).toEqual(["codemode", "read", "subagent_message"]);
 		expect(lastToolResult(look[1])).toMatchObject({ toolName: "read", text: "the codeword is PELICAN\n" });
 
-		const dir = runDir(real.agentDir, "look");
-		const host = JSON.parse(readFileSync(join(dir, "rpc-host.json"), "utf8"));
+		const dir = runDirOf(real.agentDir, "look");
+		const host = storedHost(dir);
 		const result = lastToolResult(main[1]);
 		expect(result).toMatchObject({ role: "toolResult", toolName: "subagent" });
 		expect(result?.text).toContain("The codeword is PELICAN.");
@@ -100,14 +89,14 @@ describe.skipIf(!hasTmux)("a read-only run on pi's RPC", () => {
 		expect(result?.text).toContain(`Transcript: ${host.sessionFile}`);
 
 		// The Report and the session it came from stay on disk.
-		expect(readFileSync(join(dir, "reports", "1.md"), "utf8")).toContain("The codeword is PELICAN.");
-		expect(readFileSync(host.sessionFile, "utf8")).toContain("The codeword is PELICAN.");
-		expect(JSON.parse(readFileSync(join(dir, "reports", "1.json"), "utf8"))).toMatchObject({
+		expect(reportText(dir, 1)).toContain("The codeword is PELICAN.");
+		expect(readFileSync(String(host.sessionFile), "utf8")).toContain("The codeword is PELICAN.");
+		expect(reportOf(dir, 1)).toMatchObject({
 			outcome: { status: "completed" },
 			sessionId: host.sessionId,
 		});
 		await waitFor(() =>
-			expect(JSON.parse(readFileSync(join(dir, "record.json"), "utf8"))).toMatchObject({
+			expect(runNamed(real.agentDir, "look").record).toMatchObject({
 				backend: "rpc",
 				generation: 0,
 				status: "closed",
@@ -161,11 +150,11 @@ describe.skipIf(!hasTmux)("a read-only run on pi's RPC", () => {
 		real.tmux.sendKeys(pane, ["stop slow", "Enter"]);
 		await real.waitForRequests("main", 4);
 
-		const dir = runDir(real.agentDir, "slow");
-		await waitFor(() => expect(JSON.parse(readFileSync(join(dir, "record.json"), "utf8")).status).toBe("cancelled"));
-		const host = JSON.parse(readFileSync(join(dir, "rpc-host.json"), "utf8"));
+		const dir = runDirOf(real.agentDir, "slow");
+		await waitFor(() => expect(runNamed(real.agentDir, "slow").record.status).toBe("cancelled"));
+		const host = storedHost(dir);
 		expect(host.outcome).toMatchObject({ status: "stopped" });
-		expect(JSON.parse(readFileSync(join(dir, "reports", "1.json"), "utf8")).outcome).toMatchObject({
+		expect(reportOf(dir, 1)?.outcome).toMatchObject({
 			status: "stopped",
 		});
 		await waitFor(() => expect([alive(host.childPid), alive(host.hostPid)]).toEqual([false, false]));
@@ -214,9 +203,7 @@ describe.skipIf(!hasTmux)("a read-only run on pi's RPC", () => {
 		expect(real.requests("second")).toHaveLength(1);
 		const [second] = real.requests("second");
 		expect(conversation(second)).toEqual([{ role: "user", text: expect.stringMatching(/Say two\.$/) }]);
-		const sessions = ["first", "second"].map(
-			(name) => JSON.parse(readFileSync(join(runDir(real.agentDir, name), "rpc-host.json"), "utf8")).sessionFile,
-		);
+		const sessions = ["first", "second"].map((name) => storedHost(runDirOf(real.agentDir, name)).sessionFile);
 		expect(new Set(sessions).size).toBe(2);
 	});
 });

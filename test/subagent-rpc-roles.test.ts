@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { JsonObject } from "@earendil-works/pi-ai";
 import { ProjectTrustStore } from "@earendil-works/pi-coding-agent";
@@ -15,25 +15,13 @@ import {
 	systemPrompt,
 	toolNames,
 } from "./helpers/real-pi.ts";
+import { definitionOf, runDirOf, runNamed } from "./helpers/run-files.ts";
 
 /** The last tool result the model was given: the active-run reminder may follow it. */
 const lastToolResult = (request: FauxRequest) =>
 	conversation(request)
 		.filter((message) => message.role === "toolResult")
 		.at(-1);
-
-/** A run's directory, as its orchestrator stored it, by the run's name. */
-function runDir(agentDir: string, name: string): string {
-	const root = join(agentDir, "bluclawd", "subagents");
-	for (const session of readdirSync(root)) {
-		for (const run of readdirSync(join(root, session))) {
-			const record = join(root, session, run, "record.json");
-			if (existsSync(record) && JSON.parse(readFileSync(record, "utf8")).name === name)
-				return join(root, session, run);
-		}
-	}
-	throw new Error(`no run named ${name}`);
-}
 
 /** A saved role `name` whose instructions are `body`, in `dir`'s project roles or, with `sub`, under `dir/sub`. */
 function role(dir: string, name: string, body: string, sub = join(".pi", "agents"), extra: string[] = []): void {
@@ -74,9 +62,7 @@ describe.skipIf(!hasTmux)("an RPC run's directory and role", () => {
 		const look = real.requests("look");
 		expect(systemPrompt(look[0])).toContain(realpathSync(pkg));
 		expect(lastToolResult(look[1])).toMatchObject({ toolName: "read", text: "inside pkg\n" });
-		expect(JSON.parse(readFileSync(join(runDir(real.agentDir, "look"), "record.json"), "utf8")).cwd).toBe(
-			realpathSync(pkg),
-		);
+		expect(runNamed(real.agentDir, "look").record.cwd).toBe(realpathSync(pkg));
 	});
 
 	// Five runs in a row, each a new pi: a readiness bound for each to start, and one for the rest.
@@ -185,7 +171,7 @@ describe.skipIf(!hasTmux)("an RPC run's directory and role", () => {
 		real.script("first", [{ text: "Audited." }]);
 		const pane = real.start(["--", "delegate"]);
 		await real.waitForRequests("main", 2);
-		const snapshotFile = join(runDir(real.agentDir, "first"), "definition.json");
+		const firstDir = runDirOf(real.agentDir, "first");
 		const admitted = {
 			name: "auditor",
 			source: "project",
@@ -197,7 +183,7 @@ describe.skipIf(!hasTmux)("an RPC run's directory and role", () => {
 			cwd: realpathSync(real.cwd),
 			projectTrusted: true,
 		};
-		expect(JSON.parse(readFileSync(snapshotFile, "utf8"))).toMatchObject(admitted);
+		expect(definitionOf(firstDir)).toMatchObject(admitted);
 		expect(systemPrompt(real.requests("first")[0])).toContain("Audit v1.");
 
 		role(real.cwd, "auditor", "Audit v2.", undefined, ["tools: [read, bash]"]);
@@ -210,7 +196,7 @@ describe.skipIf(!hasTmux)("an RPC run's directory and role", () => {
 		const main = await real.waitForRequests("main", 4);
 		expect(lastToolResult(main[3])?.text).toMatch(/isolated Git worktree, and none can be made|gets no shell here/);
 		expect(real.requests("second")).toHaveLength(0);
-		expect(JSON.parse(readFileSync(snapshotFile, "utf8"))).toMatchObject(admitted);
+		expect(definitionOf(firstDir)).toMatchObject(admitted);
 	});
 
 	// Three pis one after another (boss, review, then compose): a readiness bound for each to start, and one for the

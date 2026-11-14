@@ -4,13 +4,15 @@ import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { RunDirectory } from "../ext/subagents/directory.ts";
+import { admitGeneration } from "../ext/subagents/generation-state.ts";
 import type { ParentScope } from "../ext/subagents/parent-scope.ts";
-import { runDefinitionPath } from "../ext/subagents/rpc-runs.ts";
+import type { RunDefinition } from "../ext/subagents/rpc-runs.ts";
 import { captureRunBaseline, gitSync, materializeWorktree, worktreePath } from "../ext/subagents/run-worktree.ts";
 import type { SubagentRunRecord } from "../ext/subagents/runs.ts";
 import { subagentRunDir } from "../ext/subagents/storage.ts";
 import { registerWorkspaceCleanup } from "../ext/subagents/workspace-cleanup.ts";
 import { leaderlessGroup } from "./helpers/leaderless-group.ts";
+import { hostEnded } from "./helpers/run-files.ts";
 
 describe("workspace cleanup", () => {
 	let dir: string;
@@ -41,9 +43,8 @@ describe("workspace cleanup", () => {
 		mkdirSync(runDir, { recursive: true });
 		const admitted = { provider: "faux", modelId: "faux", thinkingLevel: "off" };
 		const definition = { tools: [], deny: [], cwd: repo, instructions: "", admitted, workspace };
-		writeFileSync(runDefinitionPath(runDir, 0), JSON.stringify(definition));
-		const hostPid = await leaderlessGroup();
-		writeFileSync(join(runDir, "rpc-host.json"), JSON.stringify({ hostPid, exit: { code: 0, signal: null } }));
+		admitGeneration(runDir, 0, definition as unknown as RunDefinition);
+		hostEnded(runDir, await leaderlessGroup());
 
 		let handler: ((args: string, ctx: unknown) => Promise<void>) | undefined;
 		const pi = {

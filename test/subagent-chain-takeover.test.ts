@@ -5,9 +5,10 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { AdmissionContext } from "../ext/subagents/admission.ts";
 import { type ChainDeps, resumeChains } from "../ext/subagents/chains.ts";
+import { admitGeneration } from "../ext/subagents/generation-state.ts";
 import type { ChainStep } from "../ext/subagents/invocation.ts";
 import type { ParentScope } from "../ext/subagents/parent-scope.ts";
-import { runDefinitionPath } from "../ext/subagents/rpc-runs.ts";
+import type { RunDefinition } from "../ext/subagents/rpc-runs.ts";
 import {
 	captureRunBaseline,
 	type IsolatedWorkspace,
@@ -108,20 +109,17 @@ function storeRun(
 	const header = { type: "session", version: 3, id: "a", timestamp: new Date(at(0)).toISOString(), cwd: record.cwd };
 	writeFileSync(transcriptPath, `${[header, ...transcript].map((entry) => JSON.stringify(entry)).join("\n")}\n`);
 	generations.forEach(({ tools, report }, generation) => {
-		writeAtomicPrivateFile(
-			runDefinitionPath(runDir, generation),
-			JSON.stringify({
-				name: "writer",
-				description: "Edits files.",
-				instructions: "Make the change asked.",
-				tools,
-				deny: [],
-				cwd: workspace.root,
-				projectTrusted: false,
-				admitted: { provider: "faux", modelId: "faux-1", thinkingLevel: "off" },
-				workspace,
-			}),
-		);
+		admitGeneration(runDir, generation, {
+			name: "writer",
+			description: "Edits files.",
+			instructions: "Make the change asked.",
+			tools,
+			deny: [],
+			cwd: workspace.root,
+			projectTrusted: false,
+			admitted: { provider: "faux", modelId: "faux-1", thinkingLevel: "off" },
+			workspace,
+		} as unknown as RunDefinition);
 		storeRunReport(runDir, { text: report, outcome: { status: "completed" }, generation });
 	});
 }
