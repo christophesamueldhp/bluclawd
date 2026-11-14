@@ -12,7 +12,8 @@
 // exists Gamma's status answers 5 s late, so a prompt can be sent before its report is in. While
 // `<dir>/silent` exists Gamma's row is silent (its pi stopped beating, tmux still has it): listed
 // alive, refusing prompts (409 `session_silent`) and answering no status; seen on the next list.
-// Creating `<dir>/reply` makes Alpha stream a reply that runs a tool (see streamReply). While
+// Creating `<dir>/reply` makes Alpha stream a reply that runs a tool (see streamReply), listed
+// working until it ends, as a pane mid-turn is. While
 // `<dir>/held` exists Gamma's heartbeat takes nothing, and creating `<dir>/restart` then starts
 // prompt delivery afresh, as a daemon restart does: the app, asking about the prompts it still
 // waits on, is answered lost (daemon_restarted).
@@ -64,7 +65,10 @@ const panes = [
 	pane("pi-beta", "Beta", "session-beta"),
 	pane("pi-gamma", "Gamma", "session-gamma"),
 ];
+const alpha = panes[0]!;
 const gamma = panes[2]!;
+/** Alpha streams a reply (see streamReply). */
+let replying = false;
 const busy = () => existsSync(join(dir, "busy"));
 /** The ids of the prompts Gamma's pi queued. */
 const queued: string[] = [];
@@ -118,7 +122,9 @@ server = await startRemoteServer(
 		store,
 		webDir: join(import.meta.dirname, "../daemon/remote/web"),
 		listInstances: () => {
-			const listed = panes.map((p) => (p === gamma ? listedGamma() : p));
+			const listed = panes.map((p) =>
+				p === gamma ? listedGamma() : p === alpha && replying ? { ...p, activity: "working" as const } : p,
+			);
 			return existsSync(join(dir, "moved"))
 				? listed.map((p) => (p.id === "pi-alpha" ? { ...p, id: "pi-alpha-2", pane: "pi-alpha-2" } : p))
 				: listed;
@@ -186,7 +192,8 @@ console.log(`http://127.0.0.1:${server.port}/  pairing code ${code}  QR link /#p
  * text is seen held until the transcript has it; then the tool's result, and the turn's bare end.
  */
 async function streamReply(): Promise<void> {
-	const path = panes[0]!.sessionFile!;
+	const path = alpha.sessionFile!;
+	replying = true;
 	const text = "Let me look at the files in this directory first.";
 	const call = { id: `call-${entries}`, name: "bash", summary: "ls" };
 	const words = text.split(" ");
@@ -209,6 +216,7 @@ async function streamReply(): Promise<void> {
 	await sleep(1500);
 	appendFileSync(path, entry(path, { role: "toolResult", toolCallId: call.id, toolName: "bash", content: "a.ts" }));
 	server?.live("pi-alpha", null);
+	replying = false;
 }
 
 setInterval(() => {

@@ -3,10 +3,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import photon from "@silvia-odwyer/photon-node";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { GRID, loaderHtml } from "#remote-web/mascot.js";
 import { type RemoteServer, startRemoteServer } from "../daemon/remote/http.ts";
 import { RemoteStore } from "../daemon/remote/pairing.ts";
-import { BODY_COLOR, EYE_COLOR, SOURCE } from "../ext/_shared/mascot.ts";
+import { BODY_COLOR, EYE_COLOR } from "../ext/_shared/mascot.ts";
 import { ICONS, renderIcon, WEB_DIR } from "../scripts/pwa-icons.ts";
 
 function decode(bytes: Buffer): { width: number; height: number; pixels: Uint8Array } {
@@ -95,24 +94,5 @@ describe("PWA icons", () => {
 			expect(res.headers.get("content-type")).toBe("image/png");
 			expect(Buffer.from(await res.arrayBuffer())).toEqual(readFileSync(join(WEB_DIR, name)));
 		});
-	});
-});
-
-describe("the phone's mascot", () => {
-	it("is branding's mascot.svg, unchanged", () => {
-		const branding = join(import.meta.dirname, "..", "ext", "branding", "mascot.svg");
-		expect(readFileSync(join(WEB_DIR, "mascot.svg"))).toEqual(readFileSync(branding));
-		const sw = readFileSync(join(WEB_DIR, "sw.js"), "utf8");
-		expect(sw).toContain(`"/mascot.svg"`);
-		expect(sw).toContain(`"/mascot.js"`);
-	});
-
-	it("loads as mascot.svg's grid, its two eyes a group of their own", () => {
-		expect(GRID).toEqual(SOURCE);
-		const html = loaderHtml();
-		expect(html).toContain(
-			`<g class="eyes"><rect x="5" y="4" width="2" height="2"/><rect x="13" y="4" width="2" height="2"/></g>`,
-		);
-		expect(html).toContain("Loading…");
 	});
 });

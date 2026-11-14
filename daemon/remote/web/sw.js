@@ -1,7 +1,7 @@
 // Caches the app shell so the app opens, and says the Mac is unreachable, when the Mac is not.
 // The API is never cached.
 /** 0.0.N, one more for every change to the app: a changed sw.js is what makes the phone update. */
-const VERSION = "0.0.58";
+const VERSION = "0.0.59";
 const CACHE = `bluclawd-shell-${VERSION}`;
 const SHELL = [
 	"/",
@@ -24,7 +24,6 @@ const SHELL = [
 	"/statusbar.js",
 	"/turn.js",
 	"/mascot.js",
-	"/mascot.svg",
 	"/icons.js",
 	"/manifest.webmanifest",
 	"/favicon-32.png",

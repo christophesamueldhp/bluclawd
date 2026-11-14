@@ -39,7 +39,7 @@ import {
 } from "./list.js";
 import { refused, shownText } from "./live.js";
 import { markdown } from "./markdown.js";
-import { loaderHtml } from "./mascot.js";
+import { fleetState, loaderHtml, mascotHtml, mascotState } from "./mascot.js";
 import { diffSummary, groupSummary, markerKind, resultSummary } from "./output.js";
 import { pendingStore } from "./pending.js";
 import { closePicker, modelGroups, openPicker } from "./picker.js";
@@ -73,7 +73,7 @@ import { composerAction, duration, STOP_GUARD_MS, turnSince, turnTimes } from ".
 /** @typedef {import("./statusbar.js").Report} Report */
 
 /** This build's version, as sw.js caches it (a test keeps the two the same). */
-const VERSION = "0.0.58";
+const VERSION = "0.0.59";
 const VIEW_MODE_KEY = "bluclawd-view-mode";
 /** Each chat's pending prompts and unsent text, kept for when it opens again. */
 const keptPending = pendingStore(() => localStorage);
@@ -785,7 +785,7 @@ function pairView() {
 		? "On the Mac, run <code>/remote-control</code> and type the 6-digit code shown under the QR code."
 		: "On the Mac, run <code>/remote-control</code> and scan the QR code with your phone's camera. Can't scan? Type the 6-digit code shown under it.";
 	return `<form class="pair" id="pair">
-<img class="logo" src="mascot.svg" alt=""><h1>bluclawd</h1>
+${mascotHtml("wave", "big")}<h1>bluclawd</h1>
 <p class="muted">${how}</p>
 <input id="code" inputmode="numeric" autocomplete="one-time-code" maxlength="7" placeholder="000000" aria-label="Pairing code">
 <button>Pair</button><div class="error" id="pair-error"></div></form>`;
@@ -794,14 +794,14 @@ function pairView() {
 /** Pairing on iOS happens in the Home Screen app, once: it keeps its token, and only it gets notifications. */
 function installView() {
 	return `<div class="pair install">
-<img class="logo" src="mascot.svg" alt=""><h1>bluclawd</h1>
+${mascotHtml("wave", "big")}<h1>bluclawd</h1>
 <ol><li>Tap Share, then <b>Add to Home Screen</b>.</li><li>Open bluclawd from the Home Screen.</li><li>Type the 6-digit code shown on the Mac under the QR code.</li></ol>
 <p class="muted">It stays paired from then on, and can notify you.</p>
 <button type="button" class="link" id="stay">Use in Safari instead</button></div>`;
 }
 
 function listShell() {
-	return `<header class="bar"><h1>Sessions</h1><span class="dot" id="online" role="img"></span>
+	return `<header class="bar"><span class="avatar" id="avatar"></span><h1>Sessions</h1><span class="dot" id="online" role="img"></span>
 <button class="icon-btn" id="notify" aria-label="Turn on notifications" hidden>${ICONS.bell}</button><button class="icon-btn" id="phone-menu" aria-label="This phone" aria-haspopup="dialog">${ICONS.more}</button></header>
 <div id="banner"></div><form class="search" id="search-form" role="search"><span class="field"><input type="search" id="search" placeholder="Search" aria-label="Search sessions" autocapitalize="off" autocomplete="off" autocorrect="off" spellcheck="false" enterkeyhint="search">
 <button type="button" class="clear" id="search-clear" aria-label="Clear search" hidden>×</button></span>
@@ -819,6 +819,22 @@ function listShell() {
 <button class="start" id="start" aria-label="Start">${ICONS.send}</button></div></form>`;
 }
 
+/** A session's state in words, as its row and its Chat's header say it. @param {Session} s */
+function statusWord(s) {
+	return s.silent ? "Not responding" : (STATE_WORDS[/** @type {keyof typeof STATE_WORDS} */ (s.state)] ?? s.state);
+}
+
+/**
+ * A header's mascot, redrawn only when what it acts out changes, so it keeps moving.
+ * @param {import("./mascot.js").MascotState} acting
+ */
+function showAvatar(acting) {
+	const avatar = $("#avatar");
+	if (avatar.dataset.state === acting) return;
+	avatar.dataset.state = acting;
+	avatar.innerHTML = mascotHtml(acting);
+}
+
 /** @param {Session} s */
 function rowHtml(s) {
 	// A pane that stopped answering is not shown working, whatever it last reported.
@@ -828,9 +844,7 @@ function rowHtml(s) {
 			: s.silent
 				? "✻"
 				: statusGlyph(s);
-	const status = s.silent
-		? "Not responding"
-		: (STATE_WORDS[/** @type {keyof typeof STATE_WORDS} */ (s.state)] ?? s.state);
+	const status = statusWord(s);
 	const tone = rowTone(s);
 	// The project's folder, which the search matches too.
 	const where = s.cwd.split("/").filter(Boolean).at(-1);
@@ -854,7 +868,8 @@ function rowHtml(s) {
 
 function rowsHtml() {
 	if (!state.loaded) return loaderHtml();
-	if (state.sessions.length === 0) return `<p class="empty">No sessions. Start one below.</p>`;
+	if (state.sessions.length === 0)
+		return `<div class="empty">${mascotHtml("idle", "mid")}<p>No sessions. Start one below.</p></div>`;
 	const found = filterSessions(state.sessions, state.query);
 	if (found.length === 0) return `<p class="empty">No sessions match “${esc(state.query.trim())}”.</p>`;
 	return sessionGroups(found, state.viewMode)
@@ -863,7 +878,7 @@ function rowsHtml() {
 }
 
 function chatShell() {
-	return `<header class="bar"><a class="back icon-btn" href="#" aria-label="Sessions">${ICONS.back}</a><button class="title" id="title" aria-haspopup="dialog"></button>
+	return `<header class="bar"><a class="back icon-btn" href="#" aria-label="Sessions">${ICONS.back}</a><span class="avatar" id="avatar"></span><button class="title" id="title" aria-haspopup="dialog"><span class="name" id="title-name"></span><small id="title-state"></small></button>
 </header>
 <div class="statusbar" id="statusbar" role="button" tabindex="0" aria-haspopup="dialog" aria-label="Status" hidden></div>
 <section class="scroll" id="scroll"><div class="older" id="older"></div><div class="log" id="log">
@@ -947,17 +962,34 @@ function logParts(session) {
 		.map((l) => liveHtml(l, calls))
 		.join("");
 	const pending = pendingHtml();
-	// The reply in progress replaces the working line once it shows something.
-	const streaming = live !== "" || running.size > 0;
-	const working =
-		session?.state === "working" && !streaming
-			? `<div class="working">✻ ${esc(session.detail || "Working…")}</div>`
-			: "";
+	const working = workingHtml(session);
 	let msgs = transcriptHtml(calls, running, midTurn(session));
 	if (!msgs && !live && !pending && !working) {
-		msgs = state.chat.messagesLoaded ? `<p class="empty">Nothing in this session yet.</p>` : loaderHtml();
+		msgs = state.chat.messagesLoaded
+			? `<div class="empty">${mascotHtml("idle", "mid")}<p>Nothing in this session yet.</p></div>`
+			: loaderHtml();
 	}
 	return { msgs, live, pending, working };
+}
+
+/** What the working line says of each thing the mascot acts out mid-turn; a running tool is named. */
+const WORKING_WORDS = { thinking: "Thinking…", writing: "Writing…", tool: "Running a tool…" };
+
+/**
+ * The working line, at the log's end for as long as the turn runs: the mascot acting out what the
+ * reply in progress does, that in words, and how long the turn has run (its timer ticks in place,
+ * see tickElapsed). Nothing of the reply's text or of the session's detail is in it, so a streamed
+ * chunk or a heartbeat leaves it alone and the mascot keeps moving.
+ * @param {Session | undefined} session
+ */
+function workingHtml(session) {
+	const acting = mascotState(session, state.chat.live, state.online);
+	const words = WORKING_WORDS[/** @type {keyof typeof WORKING_WORDS} */ (acting)];
+	if (!session || !words) return "";
+	const tool = state.chat.live?.tools.find((t) => t.running);
+	const since = turnSince(state.chat.messages, state.chat.pending);
+	const time = since ? `<span class="elapsed" data-since="${esc(since)}"></span>` : "";
+	return `<div class="working">${mascotHtml(acting)}<span class="label">${esc(tool ? `Running ${tool.name}…` : words)}</span>${time}</div>`;
 }
 
 /**
@@ -1254,6 +1286,7 @@ function updateList() {
 	online.setAttribute("aria-label", status);
 	online.title = status;
 	online.classList.toggle("on", live);
+	showAvatar(fleetState(state.sessions, live));
 	$("#notify").hidden = !state.offerPush;
 	const banner = $("#banner");
 	const bannerNow = updateHtml() + bannerHtml(undefined);
@@ -1504,7 +1537,11 @@ function slideThinking(index, send) {
 
 function updateChat() {
 	const session = state.sessions.find((s) => s.id === state.chat.id);
-	$("#title").textContent = session?.label ?? "";
+	$("#title-name").textContent = session?.label ?? "";
+	const word = $("#title-state");
+	word.textContent = !session ? "" : state.online ? statusWord(session) : "Offline";
+	word.className = `session-state ${session && state.online ? rowTone(session) : "off"}`;
+	showAvatar(mascotState(session, state.chat.live, state.online));
 	// Mid-turn, a dialog waiting on an answer included.
 	if (!midTurn(session)) state.chat.stopping = false;
 	const bar = $("#statusbar");
@@ -1544,6 +1581,7 @@ function updateChat() {
 	if (pending) paintPending();
 	const live = updatePart($("#live"), parts.live);
 	const working = updatePart($("#working"), parts.working);
+	if (working) tickElapsed();
 	const float = updateFloat(session);
 	// The banner sits under the log, so the log's end stays in view above it.
 	if ((msgs || pending || live || working || float || bannerChanged) && atBottom && !prepending)
@@ -1578,7 +1616,8 @@ function updateFloat(session) {
 	const chat = state.chat;
 	const items = [];
 	if (!state.online) items.push(`<span class="pill-item off">Reconnecting to the Mac…</span>`);
-	if (session?.state === "working") {
+	// At the log's end the working line says it.
+	if (session?.state === "working" && !stuck) {
 		const since = turnSince(chat.messages, chat.pending);
 		const time = since ? ` for <span class="elapsed" data-since="${esc(since)}"></span>` : "…";
 		items.push(
