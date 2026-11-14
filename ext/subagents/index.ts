@@ -1,6 +1,5 @@
 import {
 	type ExtensionAPI,
-	type ExtensionContext,
 	getAgentDir,
 	type InlineExtension,
 	SettingsManager,
@@ -11,8 +10,7 @@ import { isKeyRelease, matchesKey, type TUI } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import type { SessionMessage } from "../../daemon/ipc/protocol.ts";
 import { OrchestratorClient } from "../../daemon/orchestrator-client.ts";
-import { runPaneSession, runQueueKey, type SlotClaim } from "../../daemon/run-queue.ts";
-import { endPane, runParent, Tmux } from "../../daemon/tmux.ts";
+import { runParent, Tmux } from "../../daemon/tmux.ts";
 import { notifyAgentTasksChanged, publishAgentTasks } from "../_shared/agent-tasks.ts";
 import { commandBlock } from "../_shared/command-block.ts";
 import { focusedComponent, isPromptEditor } from "../_shared/focus.ts";
@@ -36,8 +34,8 @@ import { createGenerations, type ParentNotice } from "./generations.ts";
 import { registerIntegration } from "./integration.ts";
 import { SUBAGENT_TOOL_PARAMETERS, subagentInvocation } from "./invocation.ts";
 import {
-	fromRunText,
 	PARENT_MESSAGE_ADDRESS,
+	parentMessage,
 	RunReports,
 	SUBAGENT_MESSAGE_CUSTOM_TYPE,
 	SUBAGENT_MESSAGE_PARAMETERS,
@@ -45,28 +43,19 @@ import {
 	SubagentMessageBus,
 } from "./messages.ts";
 import { describeSubagentModels } from "./models.ts";
+import { createRunOpening } from "./opening.ts";
 import { createPanel, formatRunElapsed, SUBAGENT_PANEL_WIDGET } from "./panel.ts";
-import { createParentScope, inParentScope, type ParentInboxItem } from "./parent-scope.ts";
+import { createParentScope, type ParentInboxItem } from "./parent-scope.ts";
 import { daemonRunSlots } from "./rpc-runs.ts";
 import { createRunIntervention, RUN_CONVERSATION_ENTRY } from "./run-intervention.ts";
 import { messageAsRun } from "./run-messages.ts";
-import {
-	formatRunLabel,
-	isLegacyRun,
-	isResumableSubagentStatus,
-	isTerminalSubagentStatus,
-	type SubagentRunRecord,
-} from "./runs.ts";
-import { CallsUnderWay, settleRun, whileCalled } from "./settling.ts";
-import {
-	appendSubagentMessageRecord,
-	extractReferencedRunIdsFromBranch,
-	listPersistedRunRecords,
-	readPersistedRunRecord,
-	reconcileInterruptedRuns,
-} from "./storage.ts";
+import { formatRunLabel, isLegacyRun } from "./runs.ts";
+import { CallsUnderWay, settleRun } from "./settling.ts";
+import { stopTarget } from "./stopping.ts";
+import { appendSubagentMessageRecord } from "./storage.ts";
+import { takeOverRuns } from "./takeover.ts";
 import { createAgentTaskSource } from "./task-source.ts";
-import { actAsRun, legacyRunRefusal, paneUp } from "./tmux-runs.ts";
+import { actAsRun } from "./tmux-runs.ts";
 import { createParentScopeViews, runStatus } from "./views.ts";
 import { registerWorkspaceCleanup } from "./workspace-cleanup.ts";
 
@@ -81,8 +70,6 @@ const relaysGiven = sharedRef("subagentRelaysGiven", new Set<string>()).get();
 const ENDED_SHOWN_MS = 30_000;
 /** How many open runs `subagent_status` describes at once. */
 const MAX_STATUS_RUNS = 30;
-/** How long opening a finished run waits for the pane its Resume runs in, in the slot it took. */
-const PANE_OPEN_WAIT_MS = 5000;
 const timedTmux = (): Tmux => new Tmux(undefined, undefined, { timeoutMs: 2000 });
 const SUBAGENT_DESCRIPTION_LEAD = "Delegate a task to a child agent";
 // Selective by design (spec #290 §13): no required role sequence, no quota, no full-history copying.
@@ -254,39 +241,17 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 		};
 
 		const sendToParent = (sent: readonly ParentInboxItem<ParentNotice>[]) => {
-			// A run's message relayed again, after a crash or by the instance a reload started, is given to the model once.
-			const given = (item: ParentInboxItem<ParentNotice>) =>
-				item.kind === "message" &&
-				item.message.id !== undefined &&
-				(relaysGiven.has(item.message.id) || parentScope.holds(item.message.id));
-			const items = sent.filter((item) => !given(item));
-			if (items.length === 0) return;
-			const notices = items.flatMap((item) => (item.kind === "notice" ? [item.notice.details] : []));
-			const messages = items.flatMap((item) => (item.kind === "message" ? [item.message] : []));
-			const texts = items.map((item) =>
-				item.kind === "notice"
-					? item.notice.parentText
-					: fromRunText(
-							"Message",
-							formatRunLabel({ name: item.message.fromName, runId: item.message.from }),
-							item.message.content,
-						),
-			);
-			const combinedText =
-				items.length === 1
-					? texts[0]
-					: [notices.length > 1 ? `[${notices.length} subagent reports]` : undefined, ...texts]
-							.filter((text) => text !== undefined)
-							.join("\n\n---\n\n");
-
+			const message = parentMessage(sent, (id) => relaysGiven.has(id) || parentScope.holds(id));
+			if (!message) return;
+			const { text, reports, details, messages } = message;
 			// One message wakes an idle orchestrator once, or steers a busy one at its next boundary.
 			try {
 				pi.sendMessage(
 					{
-						customType: notices.length > 0 ? SUBAGENT_NOTIFICATION_CUSTOM_TYPE : SUBAGENT_MESSAGE_CUSTOM_TYPE,
-						content: [{ type: "text", text: combinedText }],
+						customType: reports ? SUBAGENT_NOTIFICATION_CUSTOM_TYPE : SUBAGENT_MESSAGE_CUSTOM_TYPE,
+						content: [{ type: "text", text }],
 						display: true,
-						details: items.length === 1 ? (notices[0] ?? messages[0]) : { runs: notices, messages },
+						details,
 					},
 					{
 						deliverAs: "steer",
@@ -393,134 +358,21 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			agentDir: resolveAgentDir,
 		});
 
-		/** Switches this terminal to a run's pane; opened from here, its ← comes back here, not to agent view. */
-		const showRun = (name: string): void => {
-			const tmux = timedTmux();
-			try {
-				tmux.setOpenedFromView(name, false);
-			} catch {
-				// Its ← may then go to agent view.
-			}
-			tmux.switchTo(name);
-		};
-
-		/**
-		 * Opens a run of the current parent scope: one on pi's RPC shows its conversation and takes an instruction; one in
-		 * tmux from before switches this terminal to its pane while it is open (ADR-0006), else shows its conversation
-		 * only. Any other run is refused with a notice.
-		 */
-		const openRun = (runId: string, owner?: string): Promise<void> | undefined => {
-			const ctx = parentScope.context();
-			if (ctx?.mode !== "tui") return undefined;
-			const scope = parentScope.current();
-			const run = scheduler.getRun(runId);
-			if (!run) {
-				ctx.ui.notify(`No run ${runId} is known to this session, so it cannot be opened.`, "warning");
-				return undefined;
-			}
-			if (!scope || !inParentScope(run, scope) || (owner !== undefined && owner !== run.parentSessionId)) {
-				ctx.ui.notify("That run belongs to an earlier session and can no longer be opened.", "warning");
-				return undefined;
-			}
-			if (!isLegacyRun(run)) return runPane() ? openPaneRun(run, ctx) : openRpcRun(run, ctx);
-			// A run in tmux from before runs ran on pi's RPC: its pane while it is open, else its history only.
-			if (!run.pane || isTerminalSubagentStatus(run.status)) {
-				pi.appendEntry(RUN_CONVERSATION_ENTRY, { lines: intervention.conversation(run) });
-				ctx.ui.notify(legacyRunRefusal(run), "info");
-				return Promise.resolve();
-			}
-			try {
-				showRun(run.pane);
-			} catch (error) {
-				ctx.ui.notify(`Could not open ${run.name ?? runId}: ${Tmux.reason(error)}`, "warning");
-			}
-			return Promise.resolve();
-		};
-
-		/**
-		 * Opens a run from an orchestrator in a pane (ADR-0013): its generation's pane while it runs in one. A finished
-		 * run resumes in a pane for the user to type in, when a slot is free for it now; one still queued opens once it
-		 * runs. A generation on pi's RPC, launched from no pane, has none: its conversation shows here instead.
-		 */
-		const openPaneRun = async (run: SubagentRunRecord, ctx: ExtensionContext): Promise<void> => {
-			const label = run.name ?? run.runId;
-			const tmux = timedTmux();
-			const show = async (generation: number) => {
-				const name = runPaneSession(run.runId, generation);
-				if (!(await tmux.hasSessionAsync(name).catch(() => false))) return false;
-				try {
-					showRun(name);
-				} catch (error) {
-					ctx.ui.notify(`Could not open ${label}: ${Tmux.reason(error)}`, "warning");
-				}
-				return true;
-			};
-			if (await show(run.generation)) return;
-			if (!isTerminalSubagentStatus(run.status)) {
-				if (run.status === "starting")
-					ctx.ui.notify(`${label} waits for its turn; open it again once it runs.`, "info");
-				else await openRpcRun(run, ctx);
-				return;
-			}
-			if (!isResumableSubagentStatus(run.status)) return openRpcRun(run, ctx);
-			// No terminal would show a Resume that started later, after a wait in the queue: it takes a slot free now,
-			// or starts nothing (#353).
-			const key = runQueueKey(run.runId, run.generation + 1);
-			let slot: SlotClaim;
-			try {
-				if (!(await slots.ensure())) throw new Error("the daemon that queues runs is not running");
-				slot = await slots.claimNow(key, run.parentSessionId);
-			} catch (error) {
-				ctx.ui.notify(
-					`Could not open ${label}: ${error instanceof Error ? error.message : String(error)}`,
-					"warning",
-				);
-				return;
-			}
-			if (slot.claimed) {
-				ctx.ui.notify(`${label} is opening already: its pane shows once it starts.`, "info");
-				return;
-			}
-			if (!slot.granted) {
-				ctx.ui.notify(
-					`No slot is free for ${label} (${slot.active} of ${slot.capacity} runs active): nothing was started. Open it again once a run ends.`,
-					"info",
-				);
-				return;
-			}
-			const resumed = await admission.resume(run, () => "", ctx, { from: "user", typed: true });
-			if (!resumed.ok) {
-				slots.release(key).catch(() => {});
-				ctx.ui.notify(resumed.error, "warning");
-				// It cannot resume now: its conversation shows here instead, as for a run with no pane.
-				return openRpcRun(run, ctx);
-			}
-			const generation = resumed.handle.record.generation;
-			for (const until = Date.now() + PANE_OPEN_WAIT_MS; Date.now() < until; ) {
-				if (await show(generation)) return;
-				await new Promise((resolve) => setTimeout(resolve, 200));
-			}
-			ctx.ui.notify(`${label} was slow to start, and ends with nothing done; open it again.`, "info");
-		};
-
-		/**
-		 * A run on pi's RPC has no pane: opening it shows the user its conversation here, and asks for an instruction,
-		 * which it takes at its next safe point, or resumes with once finished. Esc only looks.
-		 */
-		const openRpcRun = async (run: SubagentRunRecord, ctx: ExtensionContext): Promise<void> => {
-			pi.appendEntry(RUN_CONVERSATION_ENTRY, { lines: intervention.conversation(run) });
-			const text = (
-				await ctx.ui.input(`Instruct ${run.name ?? run.runId}`, "An instruction for it; Esc only looks")
-			)?.trim();
-			if (!text) return;
-			const result = await intervention.instruct(run, text, ctx);
-			if (result.ok) ctx.ui.notify(result.text, "info");
-			else ctx.ui.notify(result.error, "warning");
-		};
+		const openRun = createRunOpening({
+			scope: parentScope,
+			scheduler,
+			admission,
+			slots,
+			intervention,
+			appendEntry: (customType, data) => pi.appendEntry(customType, data),
+			tmux: timedTmux,
+			agentDir: resolveAgentDir,
+			pane: () => pane,
+			runPane,
+		});
 
 		pi.on("session_start", async (event, ctx) => {
 			parentScope.enter(ctx, `Session replaced (${event.reason})`);
-			const sessionId = ctx.sessionManager.getSessionId();
 			activeTurnIndex = 0;
 
 			const agentDir = resolveAgentDir();
@@ -550,82 +402,20 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 				);
 			}
 
-			const branchEntries = ctx.sessionManager.getBranch();
-			// Its open runs in tmux, from before runs ran on pi's RPC, whose pis still run, after a reload or a crash of
-			// the instance that ran them: this instance takes them over (ADR-0008), and follows each until it ends or is
-			// stopped, never ending one itself. Those this process runs already are left as they are. A run is on the branch
-			// as tree navigation judges it, by the entry it was launched from.
-			if (pane) {
-				for (const run of listPersistedRunRecords(agentDir, sessionId)) {
-					if (
-						run.pane &&
-						!isTerminalSubagentStatus(run.status) &&
-						parentScope.onBranch(run.originEntryId) &&
-						paneUp(timedTmux(), run.pane)
-					)
-						admission.adopt(run);
-				}
-			}
-			// Its open runs on pi's RPC, whose hosts outlive any instance of the session (ADR-0008, ADR-0010): this one
-			// takes each over as its run directory has it, after a reload or a crash. One whose host took it is followed
-			// to its end; one that never started queues again, and starts only if this session may still start it. A
-			// stop requested before stays requested, and a run off the branch is stopped, as tree navigation would.
-			for (const run of listPersistedRunRecords(agentDir, sessionId)) {
-				if (isLegacyRun(run) || isTerminalSubagentStatus(run.status) || scheduler.getRun(run.runId)) continue;
-				if (!admission.recover(run, ctx)) continue;
-				if (run.status === "stopping") {
-					scheduler.cancelRun(run.runId, run.stopSource ?? "user", run.stopReason ?? "Subagent run cancelled");
-				} else if (!parentScope.onBranch(run.originEntryId)) {
-					scheduler.cancelRun(
-						run.runId,
-						"session_invalidated",
-						"Originating branch is no longer active after tree navigation",
-					);
-				}
-			}
-			// Outside tmux, this pi has no pane to take its runs in tmux over to: those still running are left so, never
-			// ended silently, until the session is opened in a pane again.
-			const leftRunning = pane
-				? []
-				: listPersistedRunRecords(agentDir, sessionId).filter(
-						(run) => run.pane && !isTerminalSubagentStatus(run.status) && paneUp(timedTmux(), run.pane),
-					);
-			if (leftRunning.length > 0 && ctx.hasUI) {
-				ctx.ui.notify(
-					`subagents: ${leftRunning.map(formatRunLabel).join(", ")} still run in tmux, from before runs ran on pi's RPC, and this pi has no pane to take them over: they are left running. Open this session in agent view to stop them.`,
-					"warning",
-				);
-			}
-			// The session's runs an earlier instance left open and this one did not take over, on any branch.
-			const liveIds = new Set([
-				...scheduler.listActiveRuns(sessionId).map((r) => r.runId),
-				...leftRunning.map((run) => run.runId),
-			]);
-			for (const run of reconcileInterruptedRuns(agentDir, sessionId, liveIds)) {
-				if (run.status !== "closed" || !run.pane) continue;
-				// Not taken over (its pi is gone, or this one has no pane to take it to): it is closed.
-				endPane(timedTmux(), run.pane);
-			}
-			// Reopening the session lists its closed runs, which can be resumed.
-			const reopened = parentScope.current();
-			if (reopened) {
-				for (const runId of extractReferencedRunIdsFromBranch(branchEntries)) {
-					const run = scheduler.getRun(runId) ?? readPersistedRunRecord(agentDir, sessionId, runId);
-					if (run && isResumableSubagentStatus(run.status)) scheduler.reopen(run, reopened.sessionEpoch);
-				}
-				// Reports its runs stored but could not send while it was gone.
-				pullReports(reopened);
-				// Its chains under way go on, their next steps admitted by this instance.
-				resumeChains(chainDeps, sessionId);
-				// A batch with a member still open never settled: those of its members that ended, their Reports taken by its
-				// waiter, are told of one by one, as the members still open will be.
-				const unsettled = new Set(scheduler.listActiveRuns(sessionId).flatMap((run) => run.batch ?? []));
-				for (const run of listPersistedRunRecords(agentDir, sessionId)) {
-					if (run.batch && unsettled.has(run.batch) && isTerminalSubagentStatus(run.status)) {
-						retellReport({ ...run, sessionEpoch: reopened.sessionEpoch });
-					}
-				}
-			}
+			takeOverRuns(
+				{
+					agentDir: resolveAgentDir,
+					pane,
+					scope: parentScope,
+					admission,
+					scheduler,
+					tmux: timedTmux,
+					pullReports,
+					resumeChains: (sessionId) => resumeChains(chainDeps, sessionId),
+					retellReport,
+				},
+				ctx,
+			);
 
 			unpublish?.();
 			// The panel first: publishing the tasks signals a change, and the tasks pill then reads the panel.
@@ -899,40 +689,6 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			},
 		});
 
-		/**
-		 * Stops a run, queued or working, and waits while the call does until nothing of it runs: a stop asked for is not
-		 * told as done. A run on pi's RPC is cancelled; one in tmux from before has its pi ended.
-		 */
-		const stopRun = async (
-			run: Readonly<SubagentRunRecord>,
-			signal: AbortSignal | undefined,
-			reason = "Stopped by its orchestrator",
-		) => {
-			const label = formatRunLabel(run);
-			scheduler.cancelRun(run.runId, "model", reason);
-			const final = await whileCalled(scheduler.whenFinal(run.runId), signal);
-			if (isLegacyRun(run) && final?.status === "closed") {
-				return { text: `Stopped ${label}: its pi in tmux ended. ${legacyRunRefusal(final)}`, stopped: true };
-			}
-			if (final?.status === "cancelled") {
-				return {
-					text: `Stopped ${label}: its work was cancelled, and none of its processes runs any more. Its session, Reports and files are kept; only subagent_resume continues it.`,
-					stopped: true,
-				};
-			}
-			if (final?.status === "closed") {
-				return {
-					text: `${label} finished its work before it could be stopped; its Report: ${final.reportPath ?? "kept with the run"}.`,
-					stopped: true,
-				};
-			}
-			return {
-				text: final
-					? `Could not confirm ${label} stopped: ${final.errorMessage ?? final.status}.`
-					: `Asked ${label} to stop; it is still stopping, and its processes may still run.`,
-				stopped: false,
-			};
-		};
 		registerOrchestratorTool({
 			name: "subagent_stop",
 			label: "Stop subagent",
@@ -944,45 +700,8 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 				{ agent: Type.String({ description: 'A subagent name or run ID, a batch or chain ID, or "all".' }) },
 				{ additionalProperties: false },
 			),
-			execute: async (_toolCallId, params, signal) => {
-				const target = params.agent.trim();
-				const run = target === "all" ? undefined : views.findOpen(target)?.record;
-				const members =
-					target === "all"
-						? views.open()
-						: run
-							? []
-							: views.open().filter(({ record }) => record.batch === target || record.chain === target);
-				const chain = !run && calls.kind(target) === "chain";
-				if (target === "all" || members.length > 0 || chain) {
-					const kind = target === "all" ? undefined : chain ? "chain" : "batch";
-					// Each member's stop is asked first, for its reason; then a chain starts no further step.
-					const stopping = members.map(({ record }) =>
-						stopRun(record, signal, kind ? `Its ${kind} ${target} was stopped` : undefined),
-					);
-					if (chain) calls.stop(target);
-					const stopped = await Promise.all(stopping);
-					const text = stopped.length
-						? stopped.map((result) => result.text).join("\n")
-						: chain
-							? `Stopped chain ${target}: no further step of it starts.`
-							: "No subagents are running.";
-					return {
-						content: [{ type: "text", text }],
-						details: undefined,
-						isError: stopped.some((result) => !result.stopped),
-					};
-				}
-				if (!run) {
-					return {
-						content: [{ type: "text", text: `No running subagent "${target}".` }],
-						details: undefined,
-						isError: true,
-					};
-				}
-				const { text, stopped } = await stopRun(run, signal);
-				return { content: [{ type: "text", text }], details: undefined, isError: !stopped };
-			},
+			execute: async (_toolCallId, params, signal) =>
+				stopTarget({ scheduler, runs: views, calls }, params.agent.trim(), signal),
 		});
 
 		registerOrchestratorTool({
