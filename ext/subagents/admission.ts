@@ -10,7 +10,6 @@ import {
 	type ToolLoadout,
 } from "@earendil-works/pi-coding-agent";
 import { type Static, Type } from "typebox";
-import { processAlive } from "../../daemon/processes.ts";
 import * as forkSettings from "../_shared/settings.ts";
 import { evaluateSubagentDelegationDeny } from "../permissions/policy.ts";
 import { prepareRunContainment } from "../sandbox/run-containment.ts";
@@ -28,7 +27,7 @@ import type { RunDirectory } from "./directory.ts";
 import { PARENT_MESSAGE_ADDRESS } from "./messages.ts";
 import { resolveChildModelAndRuntime } from "./models.ts";
 import type { ParentScopeChecks } from "./parent-scope.ts";
-import { readRpcHostSpec, readRpcHostState } from "./rpc-host.ts";
+import { readRpcHostSpec, readRpcHostState, runProcessesRemain } from "./rpc-host.ts";
 import {
 	claimRunGeneration,
 	narrowRunDefinition,
@@ -574,7 +573,7 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 		const sessionFile = current.transcriptPath;
 		if (!sessionFile || !holdsConversation(sessionFile)) return cannot("it has no saved conversation to go on with.");
 		const host = readRpcHostState(runDir);
-		if (host && host.exit === undefined && processAlive(host.hostPid)) {
+		if (host && runProcessesRemain(host)) {
 			return cannot("its pi from before is still running.");
 		}
 		// A run that edits resumes in its own worktree exactly, made again if it was removed holding only its baseline.

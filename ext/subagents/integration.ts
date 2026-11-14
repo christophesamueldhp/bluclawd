@@ -25,7 +25,7 @@ import {
 import { dirname, join } from "node:path";
 import { createLocalBashOperations, type ExtensionAPI, SettingsManager } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { processAlive, processGroupAlive } from "../../daemon/processes.ts";
+import { processAlive } from "../../daemon/processes.ts";
 import { runMarker } from "../../daemon/run-members.ts";
 import { withCommandPrefix } from "../_shared/command-prefix.ts";
 import { evaluateToolCallDeny } from "../permissions/policy.ts";
@@ -37,7 +37,7 @@ import type { RunDirectory } from "./directory.ts";
 import type { ParentScope } from "./parent-scope.ts";
 import { sanitizeReportText, truncateUtf8Safe } from "./results.ts";
 import type { RpcDenyRules } from "./rpc-child.ts";
-import { readRpcHostState } from "./rpc-host.ts";
+import { readRpcHostState, runProcessesRemain } from "./rpc-host.ts";
 import { readRunDefinition, rpcDenyRules, runDefinitionPath } from "./rpc-runs.ts";
 import { within } from "./run-workspace.ts";
 import {
@@ -416,9 +416,7 @@ async function unsettled(
 /** Why the run's host may still run: its group not empty, or its end not recorded while it lives. */
 function processesLeft(runDir: string): string | undefined {
 	const host = readRpcHostState(runDir);
-	if (!host) return undefined;
-	const leaderRuns = processAlive(host.hostPid);
-	if (processGroupAlive(host.hostPid, { leaderRuns }) || (host.exit === undefined && leaderRuns)) {
+	if (host && runProcessesRemain(host)) {
 		return `processes of the run in ${runDir} still run (process group ${host.hostPid}).`;
 	}
 	return undefined;
