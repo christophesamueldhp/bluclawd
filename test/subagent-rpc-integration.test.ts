@@ -15,6 +15,7 @@ import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import { readinessMs } from "./helpers/heartbeats.ts";
 import { conversation, FAUX, type FauxRequest, hasTmux, type RealPi, startRealPi } from "./helpers/real-pi.ts";
+import { findRun, reportSeqs } from "./helpers/run-files.ts";
 import { waitFor } from "./helpers/wait-for.ts";
 
 /** The text of every tool result the model was given, in order. */
@@ -81,15 +82,8 @@ async function startOrchestrator(extensions: string[] = []): Promise<RealPi> {
 
 /** The directory and stored record of the run named `name`. */
 function runOf(real: RealPi, name: string): { dir: string; status: string } | undefined {
-	const root = join(real.agentDir, "bluclawd", "subagents");
-	for (const session of existsSync(root) ? readdirSync(root) : []) {
-		for (const run of readdirSync(join(root, session))) {
-			const path = join(root, session, run, "record.json");
-			const record = existsSync(path) ? JSON.parse(read(join(root, session, run), "record.json")) : undefined;
-			if (record?.name === name) return { dir: join(root, session, run), status: record.status };
-		}
-	}
-	return undefined;
+	const run = findRun(real.agentDir, name);
+	return run && { dir: run.runDir, status: run.record.status };
 }
 
 /** The chain IDs the orchestrator's tool results name, in order. */
@@ -294,7 +288,7 @@ describe.skipIf(!hasTmux)("integrating an RPC run's changes", () => {
 		// Its Report is stored, but what its pi started still runs: its work has not settled.
 		await waitFor(() => {
 			const dir = runOf(real, "w1")?.dir;
-			return dir !== undefined && existsSync(join(dir, "reports")) && readdirSync(join(dir, "reports")).length > 0;
+			return dir !== undefined && reportSeqs(dir).length > 0;
 		});
 		expect(runOf(real, "w1")?.status).toBe("running");
 		writeFileSync(reported, "");

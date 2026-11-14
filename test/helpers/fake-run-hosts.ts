@@ -1,14 +1,13 @@
 /**
  * Runs on pi's RPC with fake hosts, for tests of what an orchestrator shows of its runs: the daemon grants every
  * claim at once, and each host it would start is a process that only waits, in a group of its own, named after the
- * run's directory as a host is. The test speaks for the host: it writes the host's state, Report and messages.
+ * run's directory as a host is. The test speaks for the host: it takes the run's generation, and stores the host's
+ * state, Report and messages.
  */
 import { spawn } from "node:child_process";
-import { mkdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
 import { vi } from "vitest";
 import { OrchestratorClient } from "../../daemon/orchestrator-client.ts";
-import { readRpcHostSpec } from "../../ext/subagents/rpc-host.ts";
+import { type HostSeat, hostGeneration } from "../../ext/subagents/generation-state.ts";
 import { writeRunOutbox } from "../../ext/subagents/run-mailbox.ts";
 import { storeRunReport } from "../../ext/subagents/storage.ts";
 
@@ -21,6 +20,8 @@ export interface FakeRun {
 	readonly args: readonly string[];
 	readonly generation: number;
 	readonly hostPid: number;
+	/** The generation its host holds. */
+	readonly seat: HostSeat;
 	/** Whether its host is gone: it reported and exited, or it was stopped. */
 	ended: boolean;
 }
@@ -29,18 +30,11 @@ export function fakeRunHosts() {
 	// The faux provider is the orchestrator's own; no run's pi starts to need it.
 	vi.stubEnv("BLUCLAWD_RPC_PROVIDER_EXTENSIONS", "faux");
 	const runs: FakeRun[] = [];
-	const writeState = (run: FakeRun, state: Record<string, unknown>) =>
-		writeFileSync(
-			join(run.runDir, "rpc-host.json"),
-			JSON.stringify({ hostPid: run.hostPid, generation: run.generation, ...state }),
-		);
 	const spies = [
 		vi.spyOn(OrchestratorClient.prototype, "ensureDaemon").mockResolvedValue(true),
 		vi.spyOn(OrchestratorClient.prototype, "claimRun").mockResolvedValue(true),
 		vi.spyOn(OrchestratorClient.prototype, "releaseRun").mockResolvedValue(undefined),
 		vi.spyOn(OrchestratorClient.prototype, "launchRun").mockImplementation(async (_run, host) => {
-			const spec = readRpcHostSpec(host.runDir);
-			if (!spec) throw new Error(`No host spec in ${host.runDir}`);
 			// Its run directory on its command line: a pid on disk counts as the run's host only then.
 			const waiter = spawn(process.execPath, ["-e", "setInterval(() => {}, 1 << 30)", host.runDir], {
 				detached: true,
@@ -48,21 +42,25 @@ export function fakeRunHosts() {
 			});
 			waiter.unref();
 			const hostPid = waiter.pid ?? 0;
+			// As a host does, it takes its generation, which a reloaded orchestrator then follows.
+			const seat = hostGeneration(host.runDir, hostPid);
+			if (!seat) {
+				waiter.kill();
+				throw new Error(`Another host holds the run in ${host.runDir}`);
+			}
+			const { spec } = seat;
 			const run: FakeRun = {
 				name: spec.args[spec.args.indexOf("--name") + 1],
 				runDir: host.runDir,
 				args: spec.args,
 				generation: spec.generation ?? 0,
 				hostPid,
+				seat,
 				ended: false,
 			};
 			waiter.on("exit", () => {
 				run.ended = true;
 			});
-			// As a host does, it takes its generation, which a reloaded orchestrator then follows.
-			mkdirSync(join(run.runDir, "hosts"), { recursive: true });
-			writeFileSync(join(run.runDir, "hosts", String(run.generation)), String(hostPid));
-			writeState(run, {});
 			runs.push(run);
 			return hostPid;
 		}),
@@ -84,7 +82,7 @@ export function fakeRunHosts() {
 				outcome: { status: "completed" },
 				generation: run.generation,
 			});
-			writeState(run, { reportSeq, outcome: { status: "completed" }, exit: { code: 0, signal: null } });
+			run.seat.save({ reportSeq, outcome: { status: "completed" }, exit: { code: 0, signal: null } });
 			process.kill(-run.hostPid, "SIGKILL");
 		},
 		/** The run tells its orchestrator its progress, with its own subagent_message, as a host relays it. */

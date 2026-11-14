@@ -12,6 +12,7 @@ import type { RpcHostSpec } from "../ext/subagents/rpc-host.ts";
 import { openRunInbox, postToRun, readRunOutbox, sealedRunInbox } from "../ext/subagents/run-mailbox.ts";
 import type { RunRuntimeOutcome } from "../ext/subagents/runs.ts";
 import { readRunReports } from "../ext/subagents/storage.ts";
+import { reportText } from "./helpers/run-files.ts";
 import { waitFor } from "./helpers/wait-for.ts";
 
 const MODEL = { provider: "faux", id: "faux-1", thinkingLevel: "off" };
@@ -110,7 +111,7 @@ describe("a Generation's protocol, on pi in memory", () => {
 		expect(reports()).toEqual([
 			{ seq: 1, text: "Looked.", outcome: { status: "completed" }, sessionId: "session-1", generation: 0 },
 		]);
-		expect(readFileSync(join(runDir, "reports", "1.md"), "utf8")).toBe("Looked.\n");
+		expect(reportText(runDir, 1)).toBe("Looked.\n");
 		expect(records.at(-1)).toMatchObject({ outcome: { status: "completed" }, reportSeq: 1 });
 		expect(endings).toEqual([{ status: "completed" }]);
 		expect(sealed()).toBe(true);

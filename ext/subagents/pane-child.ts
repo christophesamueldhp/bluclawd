@@ -12,9 +12,9 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { PARENT_ENV, RUN_PANE_ENV, Tmux } from "../../daemon/tmux.ts";
 import { BLOCKING_PROMPT_KINDS } from "../agent-view/self-registration.ts";
 import { startGeneration } from "./generation-protocol.ts";
-import { PANE_ENDED, type PaneChildState, paneChildStatePath, paneParent, readRpcHostSpec } from "./rpc-host.ts";
+import { type HostSeat, hostGeneration } from "./generation-state.ts";
+import { PANE_ENDED } from "./rpc-host.ts";
 import { paneApprovalsUnanswerable } from "./run-approvals.ts";
-import { writeAtomicPrivateFile } from "./storage.ts";
 
 /** How often it looks whether a terminal still shows the pane. */
 const SHOWN_CHECK_MS = 500;
@@ -26,13 +26,23 @@ const OPEN_GRACE_MS = 2000;
 /** How long an approval waits once its orchestrator is gone and no one watches its pane: as on pi's RPC. */
 const ORPHAN_BLOCK_MS = 5000;
 
+/** Its generation, which its host, the process that started it, holds; none where no run's spec is. */
+function seatOf(runDir: string): HostSeat | undefined {
+	try {
+		return hostGeneration(runDir, process.ppid);
+	} catch {
+		return undefined;
+	}
+}
+
 export default function paneChild(pi: ExtensionAPI): void {
 	const runDir = process.env[RUN_PANE_ENV];
-	const spec = runDir ? readRpcHostSpec(runDir) : undefined;
-	if (!runDir || !spec?.pane) return;
-	const { generation, pane } = spec;
-	const state: PaneChildState = {};
-	const save = () => writeAtomicPrivateFile(paneChildStatePath(runDir), JSON.stringify(state));
+	const seat = runDir ? seatOf(runDir) : undefined;
+	const pane = seat?.spec.pane;
+	if (!runDir || !seat || !pane) return;
+	const { spec } = seat;
+	/** Whether it waits on a blocking dialog of its own. */
+	let awaiting = false;
 	const socket = process.env.TMUX?.split(",")[0];
 	const tmux = socket ? new Tmux(dirname(socket), undefined, { timeoutMs: 2000 }) : undefined;
 
@@ -65,16 +75,13 @@ export default function paneChild(pi: ExtensionAPI): void {
 			},
 			quiet: async () => ctx?.isIdle() === true && !ctx.hasPendingMessages(),
 		},
-		save: (record) => {
-			Object.assign(state, record);
-			save();
-		},
+		save: seat.saveChild,
 		// Its Report is stored, or that nothing was done: its pi ends.
 		ended: () => {
 			done = true;
 			clearInterval(checks);
-			state.awaiting = false;
-			save();
+			awaiting = false;
+			seat.saveChild({ awaiting });
 			if (!shuttingDown) ctx?.shutdown();
 		},
 	});
@@ -91,7 +98,7 @@ export default function paneChild(pi: ExtensionAPI): void {
 	/** Its orchestrator's pane, which ← goes back to: another once a reopened session took the run over. */
 	let parent = pane.parent;
 	const followParent = () => {
-		parent = paneParent(runDir, generation, pane);
+		parent = seat.paneParent() ?? pane.parent;
 		process.env[PARENT_ENV] = parent;
 	};
 
@@ -104,7 +111,7 @@ export default function paneChild(pi: ExtensionAPI): void {
 	 * and no terminal shows this one for {@link ORPHAN_BLOCK_MS}, it is blocked, as its host would on pi's RPC.
 	 */
 	const checkOrphaned = () => {
-		if (done || !state.awaiting) {
+		if (done || !awaiting) {
 			orphanedSince = undefined;
 			return;
 		}
@@ -187,13 +194,13 @@ export default function paneChild(pi: ExtensionAPI): void {
 
 	pi.on("ui_prompt_start", (event) => {
 		if (!BLOCKING_PROMPT_KINDS.has(event.kind)) return;
-		state.awaiting = true;
-		save();
+		awaiting = true;
+		seat.saveChild({ awaiting });
 	});
 	pi.on("ui_prompt_end", (event) => {
 		if (!BLOCKING_PROMPT_KINDS.has(event.kind)) return;
-		state.awaiting = false;
-		save();
+		awaiting = false;
+		seat.saveChild({ awaiting });
 	});
 
 	// Heard before pi's shutdown on it reaches session_shutdown: pi hears it once its pane is ended from outside.

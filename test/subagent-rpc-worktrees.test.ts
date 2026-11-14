@@ -13,6 +13,7 @@ import {
 	systemPrompt,
 	toolNames,
 } from "./helpers/real-pi.ts";
+import { findRun } from "./helpers/run-files.ts";
 import { waitFor } from "./helpers/wait-for.ts";
 
 /** The last tool result the model was given. */
@@ -79,15 +80,7 @@ function addSettings(real: RealPi, added: Record<string, unknown>): void {
 
 /** The stored record of the run named `name`. */
 function runRecord(agentDir: string, name: string): { runId: string; status: string; cwd: string } | undefined {
-	const root = join(agentDir, "bluclawd", "subagents");
-	for (const session of readdirSync(root)) {
-		for (const run of readdirSync(join(root, session))) {
-			const path = join(root, session, run, "record.json");
-			const record = existsSync(path) ? JSON.parse(readFileSync(path, "utf8")) : undefined;
-			if (record?.name === name) return record;
-		}
-	}
-	return undefined;
+	return findRun(agentDir, name)?.record;
 }
 
 /** An orchestrator pane whose runs are RPC children. */

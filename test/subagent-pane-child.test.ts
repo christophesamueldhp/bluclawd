@@ -3,19 +3,23 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { RUN_PANE_ENV } from "../daemon/tmux.ts";
+import { generationState, hostGeneration, storeLaunch } from "../ext/subagents/generation-state.ts";
 import paneChild from "../ext/subagents/pane-child.ts";
-import { prepareRpcHost, readPaneChildState } from "../ext/subagents/rpc-host.ts";
 
 describe("a run's pi in a pane, waiting on a dialog", () => {
 	let runDir: string;
 	let handlers: Map<string, (event: unknown) => unknown>;
 	const prompt = (type: "ui_prompt_start" | "ui_prompt_end", kind: string) =>
 		handlers.get(type)?.({ type, reason: "ui_prompt", kind });
-	const awaiting = () => readPaneChildState(runDir)?.awaiting;
+	/** Whether its pi waits on a dialog, as its generation, held by its host, says. */
+	const awaiting = () => {
+		const state = generationState(runDir, 0, process.ppid);
+		return state.at === "hosted" && state.awaiting;
+	};
 
 	beforeEach(() => {
 		runDir = mkdtempSync(join(tmpdir(), "bc-pane-child-"));
-		prepareRpcHost(runDir, {
+		storeLaunch(runDir, {
 			args: [],
 			cwd: runDir,
 			agentDir: runDir,
@@ -24,6 +28,8 @@ describe("a run's pi in a pane, waiting on a dialog", () => {
 			generation: 0,
 			pane: { session: "sub_run-0", parent: "pi-orchestrator" },
 		});
+		// Its host, which started it, holds its generation.
+		hostGeneration(runDir, process.ppid);
 		vi.stubEnv(RUN_PANE_ENV, runDir);
 		vi.stubEnv("TMUX", "");
 		handlers = new Map();

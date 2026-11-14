@@ -6,9 +6,8 @@
 import { existsSync } from "node:fs";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { RunDirectory } from "./directory.ts";
+import { runProcessesLeft, runWorkspace } from "./generation-state.ts";
 import type { ParentScope } from "./parent-scope.ts";
-import { readRpcHostState, runProcessesRemain } from "./rpc-host.ts";
-import { readRunDefinition, runDefinitionPath } from "./rpc-runs.ts";
 import { within } from "./run-workspace.ts";
 import { cleanWorktree, listChanges, UNLISTED } from "./run-worktree.ts";
 import { formatRunLabel } from "./runs.ts";
@@ -40,13 +39,12 @@ export function registerWorkspaceCleanup(
 			/** Why the run may not lose its worktree now: it, or a Resume of it, still runs. */
 			const busy = () => {
 				const now = deps.directory.find(scope, record.runId);
-				const host = readRpcHostState(runDir);
-				if (now?.state === "finished" && !(host && runProcessesRemain(host))) return;
+				if (now?.state === "finished" && !runProcessesLeft(runDir)) return;
 				return `${label} is still ${now?.record.status ?? record.status}: stop it, or let it finish, before cleaning up its workspace.`;
 			};
 			const running = busy();
 			if (running) return tell(running, "warning");
-			const workspace = readRunDefinition(runDefinitionPath(runDir, 0))?.workspace;
+			const workspace = runWorkspace(runDir);
 			if (!workspace) {
 				return tell(`${label} has no worktree of its own: it worked in ${record.cwd}, which stays.`, "warning");
 			}

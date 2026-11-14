@@ -1,27 +1,15 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, readdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { readinessMs } from "./helpers/heartbeats.ts";
 import { conversation, FAUX, type FauxRequest, hasTmux, type RealPi, startRealPi } from "./helpers/real-pi.ts";
+import { reportOf, runDirOf, runNamed, storedHost } from "./helpers/run-files.ts";
 import { waitFor } from "./helpers/wait-for.ts";
 
 /** A policy in each run's pi that asks before it reads a `*.gated` file. */
 const GATE = fileURLToPath(new URL("./fixtures/real-pi/approval-gate.ts", import.meta.url));
-
-/** A run's directory, as its orchestrator stored it, by the run's name. */
-function runDir(agentDir: string, name: string): string {
-	const root = join(agentDir, "bluclawd", "subagents");
-	for (const session of readdirSync(root)) {
-		for (const run of readdirSync(join(root, session))) {
-			const record = join(root, session, run, "record.json");
-			if (existsSync(record) && JSON.parse(readFileSync(record, "utf8")).name === name)
-				return join(root, session, run);
-		}
-	}
-	throw new Error(`no run named ${name}`);
-}
 
 const readJson = (path: string) => JSON.parse(readFileSync(path, "utf8"));
 
@@ -64,7 +52,8 @@ function crash(real: RealPi, pane: string): void {
 	process.kill(pid, "SIGKILL");
 }
 
-function alive(pid: number): boolean {
+function alive(pid: number | undefined): boolean {
+	if (pid === undefined) return false;
 	try {
 		process.kill(pid, 0);
 		return true;
@@ -108,7 +97,7 @@ describe.skipIf(!hasTmux)("an approval an RPC run needs", () => {
 			const screen = () => unwrapped(real, orchestrator);
 
 			await real.waitForRequests("first", 1);
-			const { runId } = readJson(join(runDir(real.agentDir, "first"), "record.json"));
+			const { runId } = runNamed(real.agentDir, "first").record;
 			await waitFor(() =>
 				expect(screen()).toContain(squeezed(`Subagent "first" (${runId}), generation 0, asks for approval`)),
 			);
@@ -219,10 +208,10 @@ describe.skipIf(!hasTmux)("an approval an RPC run needs", () => {
 
 			writeFileSync(stop, "");
 			await real.waitForRequests("main", 4);
-			const dir = runDir(real.agentDir, "look");
-			await waitFor(() => expect(readJson(join(dir, "record.json")).status).toBe("cancelled"));
-			expect(readJson(join(dir, "reports", "1.json")).outcome).toMatchObject({ status: "stopped" });
-			const host = readJson(join(dir, "rpc-host.json"));
+			const dir = runDirOf(real.agentDir, "look");
+			await waitFor(() => expect(runNamed(real.agentDir, "look").record.status).toBe("cancelled"));
+			expect(reportOf(dir, 1)?.outcome).toMatchObject({ status: "stopped" });
+			const host = storedHost(dir);
 			await waitFor(() => expect([alive(host.childPid), alive(host.hostPid)]).toEqual([false, false]));
 			await waitFor(() => expect(screen()).not.toContain(squeezed("asks for approval")));
 			expect(real.requests("look")).toHaveLength(1);
@@ -230,7 +219,7 @@ describe.skipIf(!hasTmux)("an approval an RPC run needs", () => {
 
 			// Its next generation's same read is its own request, answered only as such.
 			writeFileSync(resume, "");
-			const { runId } = readJson(join(dir, "record.json"));
+			const { runId } = runNamed(real.agentDir, "look").record;
 			await waitFor(() =>
 				expect(screen()).toContain(squeezed(`Subagent "look" (${runId}), generation 1, asks for approval`)),
 			);

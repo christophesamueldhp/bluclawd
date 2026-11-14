@@ -4,24 +4,13 @@ import { basename, dirname, join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { readinessMs } from "./helpers/heartbeats.ts";
 import { conversation, FAUX, hasTmux, type RealPi, startRealPi, systemPrompt } from "./helpers/real-pi.ts";
+import { hostState, runDirOf, runNamed, storedHost } from "./helpers/run-files.ts";
 import { waitFor } from "./helpers/wait-for.ts";
-
-/** A run's directory, as its orchestrator stored it, by the run's name. */
-function runDir(agentDir: string, name: string): string {
-	const root = join(agentDir, "bluclawd", "subagents");
-	for (const session of readdirSync(root)) {
-		for (const run of readdirSync(join(root, session))) {
-			const record = join(root, session, run, "record.json");
-			if (existsSync(record) && JSON.parse(readFileSync(record, "utf8")).name === name)
-				return join(root, session, run);
-		}
-	}
-	throw new Error(`no run named ${name}`);
-}
 
 const readJson = (path: string) => JSON.parse(readFileSync(path, "utf8"));
 
-const alive = (pid: number) => {
+const alive = (pid: number | undefined) => {
+	if (pid === undefined) return false;
 	try {
 		process.kill(pid, 0);
 		return true;
@@ -123,17 +112,15 @@ describe.skipIf(!hasTmux)("the daemon's queue of RPC runs", () => {
 			expect(started()).toHaveLength(4);
 			expect(processes(real, "rpc-host.ts")).toHaveLength(4);
 			// pi names its process, so its pi is known by the pid its host stored.
-			const children = started().map(
-				(name) => readJson(join(runDir(real.agentDir, name), "rpc-host.json")).childPid,
-			);
+			const children = started().map((name) => storedHost(runDirOf(real.agentDir, name)).childPid);
 			expect(children.filter(alive)).toHaveLength(4);
 			const queued = names.filter((name) => !started().includes(name));
-			for (const name of queued) expect(existsSync(join(runDir(real.agentDir, name), "rpc-host.json"))).toBe(false);
+			for (const name of queued) expect(hostState(runDirOf(real.agentDir, name))).toBeUndefined();
 
 			for (const name of names) writeFileSync(gate(name), "");
 			await waitFor(() => {
 				for (const name of names) {
-					expect(readJson(join(runDir(real.agentDir, name), "record.json"))).toMatchObject({ status: "closed" });
+					expect(runNamed(real.agentDir, name).record).toMatchObject({ status: "closed" });
 				}
 			});
 			expect(names.map((name) => real.requests(name).length)).toEqual(names.map(() => 1));
@@ -199,10 +186,10 @@ describe.skipIf(!hasTmux)("the daemon's queue of RPC runs", () => {
 			for (const name of [...alpha, "kept"]) writeFileSync(gate(name), "");
 			await waitFor(() => {
 				for (const name of [...alpha, "kept"]) {
-					expect(readJson(join(runDir(real.agentDir, name), "record.json"))).toMatchObject({ status: "closed" });
+					expect(runNamed(real.agentDir, name).record).toMatchObject({ status: "closed" });
 				}
 			});
-			expect(readJson(join(runDir(real.agentDir, "kept"), "record.json")).generation).toBe(1);
+			expect(runNamed(real.agentDir, "kept").record.generation).toBe(1);
 		},
 	);
 
@@ -254,15 +241,14 @@ describe.skipIf(!hasTmux)("the daemon's queue of RPC runs", () => {
 			real.start(["--", "delegate"]);
 			await real.waitForRequests("hold", 1);
 			writeFileSync(queue, "");
-			const first = runDir(real.agentDir, "first");
-			await waitFor(() => expect(readJson(join(first, "record.json"))).toMatchObject({ status: "closed" }));
+			await waitFor(() => expect(runNamed(real.agentDir, "first").record).toMatchObject({ status: "closed" }));
 			writeFileSync(resume, "");
 			await waitFor(() =>
 				expect(JSON.stringify(real.requests("main").map(conversation))).toMatch(/Resuming \\"first\\" \(sub_/),
 			);
 			// Queued behind hold, as the Resume is.
 			for (const name of ["later", "denied"]) {
-				expect(readJson(join(runDir(real.agentDir, name), "record.json"))).toMatchObject({ status: "starting" });
+				expect(runNamed(real.agentDir, name).record).toMatchObject({ status: "starting" });
 			}
 
 			// Changed while they wait: the role's file, and what the orchestrator denies.
@@ -279,17 +265,17 @@ describe.skipIf(!hasTmux)("the daemon's queue of RPC runs", () => {
 					.at(-1)?.text,
 			).toMatch(/Blocked by permission rule/);
 
-			const denied = runDir(real.agentDir, "denied");
+			const denied = runDirOf(real.agentDir, "denied");
 			const notStarted = /^It did not start: .*Subagent\(explorer\)/;
 			await waitFor(() =>
-				expect(readJson(join(denied, "record.json"))).toMatchObject({
+				expect(runNamed(real.agentDir, "denied").record).toMatchObject({
 					status: "failed",
 					errorMessage: expect.stringMatching(notStarted),
 				}),
 			);
 			// A Resume that did not start leaves its run as it was, to be resumed again.
 			await waitFor(() =>
-				expect(readJson(join(first, "record.json"))).toMatchObject({
+				expect(runNamed(real.agentDir, "first").record).toMatchObject({
 					status: "closed",
 					generation: 1,
 					errorMessage: expect.stringMatching(notStarted),
@@ -305,7 +291,7 @@ describe.skipIf(!hasTmux)("the daemon's queue of RPC runs", () => {
 			);
 			expect(real.requests("denied")).toEqual([]);
 			expect(real.requests("first")).toHaveLength(1);
-			expect(existsSync(join(denied, "rpc-host.json"))).toBe(false);
+			expect(hostState(denied)).toBeUndefined();
 		},
 	);
 });

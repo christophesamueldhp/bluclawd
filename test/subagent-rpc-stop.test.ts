@@ -1,4 +1,4 @@
-import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -13,24 +13,12 @@ import {
 	startRealPi,
 	toolNames,
 } from "./helpers/real-pi.ts";
+import { hostState, reportOf, runDirOf, runNamed, storedHost } from "./helpers/run-files.ts";
 import { waitFor } from "./helpers/wait-for.ts";
 
-/** A run's directory, as its orchestrator stored it, by the run's name. */
-function runDir(agentDir: string, name: string): string {
-	const root = join(agentDir, "bluclawd", "subagents");
-	for (const session of readdirSync(root)) {
-		for (const run of readdirSync(join(root, session))) {
-			const record = join(root, session, run, "record.json");
-			if (existsSync(record) && JSON.parse(readFileSync(record, "utf8")).name === name)
-				return join(root, session, run);
-		}
-	}
-	throw new Error(`no run named ${name}`);
-}
-
 const readJson = (path: string) => JSON.parse(readFileSync(path, "utf8"));
-const recordOf = (real: RealPi, name: string) => readJson(join(runDir(real.agentDir, name), "record.json"));
-const hostOf = (real: RealPi, name: string) => readJson(join(runDir(real.agentDir, name), "rpc-host.json"));
+const recordOf = (real: RealPi, name: string) => runNamed(real.agentDir, name).record;
+const hostOf = (real: RealPi, name: string) => storedHost(runDirOf(real.agentDir, name));
 
 /** Merges `added` into the settings every pi of the test reads, as they are read next. */
 function addSettings(real: RealPi, added: Record<string, unknown>): void {
@@ -56,7 +44,8 @@ const groupAlive = (pid: number) => {
 
 const LINGERER = fileURLToPath(new URL("./fixtures/real-pi/lingerer.ts", import.meta.url));
 
-const alive = (pid: number) => {
+const alive = (pid: number | undefined) => {
+	if (pid === undefined) return false;
 	try {
 		process.kill(pid, 0);
 		return true;
@@ -103,7 +92,7 @@ describe.skipIf(!hasTmux)("stopping an RPC run", () => {
 		await waitFor(() => expect(recordOf(real, "fore").status).toBe("cancelled"));
 		// Final only once nothing of it runs: its host, its pi, and whatever they started in its group.
 		expect(groupAlive(hostOf(real, "fore").hostPid)).toBe(false);
-		expect(readJson(join(runDir(real.agentDir, "fore"), "reports", "1.json")).outcome).toMatchObject({
+		expect(reportOf(runDirOf(real.agentDir, "fore"), 1)?.outcome).toMatchObject({
 			status: "stopped",
 		});
 		expect(real.requests("fore")).toHaveLength(1);
@@ -112,7 +101,7 @@ describe.skipIf(!hasTmux)("stopping an RPC run", () => {
 		writeFileSync(gate, "");
 		await real.waitForRequests("main", 2);
 		await waitFor(() => expect(recordOf(real, "back").status).toBe("closed"));
-		expect(readJson(join(runDir(real.agentDir, "back"), "reports", "1.json")).outcome).toEqual({
+		expect(reportOf(runDirOf(real.agentDir, "back"), 1)?.outcome).toEqual({
 			status: "completed",
 		});
 	});
@@ -158,7 +147,7 @@ describe.skipIf(!hasTmux)("stopping an RPC run", () => {
 		await waitFor(() => expect(groupAlive(hostOf(real, working).hostPid)).toBe(false));
 		// Proves only that it does not start within this while, the slot free.
 		await new Promise((resolve) => setTimeout(resolve, 1000));
-		expect(existsSync(join(runDir(real.agentDir, queued), "rpc-host.json"))).toBe(false);
+		expect(hostState(runDirOf(real.agentDir, queued))).toBeUndefined();
 		expect(real.requests(queued)).toHaveLength(0);
 		expect(recordOf(real, queued).status).toBe("cancelled");
 	});
@@ -189,11 +178,11 @@ describe.skipIf(!hasTmux)("stopping an RPC run", () => {
 
 			real.tmux.sendKeys(pane, ["stop work", "Enter"]);
 			await real.waitForRequests("main", 4);
-			const dir = runDir(real.agentDir, "work");
+			const dir = runDirOf(real.agentDir, "work");
 			const stopped = recordOf(real, "work");
 			expect(stopped).toMatchObject({ status: "cancelled", generation: 0 });
-			expect(readFileSync(stopped.transcriptPath, "utf8")).toContain("Look, work.");
-			expect(readJson(join(dir, "reports", "1.json")).outcome).toMatchObject({ status: "stopped" });
+			expect(readFileSync(String(stopped.transcriptPath), "utf8")).toContain("Look, work.");
+			expect(reportOf(dir, 1)?.outcome).toMatchObject({ status: "stopped" });
 
 			real.tmux.sendKeys(pane, ["message work", "Enter"]);
 			const main = await real.waitForRequests("main", 6);

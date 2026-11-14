@@ -3,7 +3,6 @@ import {
 	mkdirSync,
 	mkdtempSync,
 	readdirSync,
-	readFileSync,
 	realpathSync,
 	rmSync,
 	symlinkSync,
@@ -31,13 +30,20 @@ import {
 	type RunExecutionContext,
 } from "../ext/subagents/admission.ts";
 import { createRunDirectory } from "../ext/subagents/directory.ts";
+import {
+	admitGeneration,
+	generationDefinition,
+	runDefinitionPath,
+	storeLaunch,
+} from "../ext/subagents/generation-state.ts";
 import { type LaunchParams, subagentInvocation } from "../ext/subagents/invocation.ts";
 import { SubagentMessageBus } from "../ext/subagents/messages.ts";
 import { createParentScope } from "../ext/subagents/parent-scope.ts";
-import { prepareRpcHost, type RpcHostSpec } from "../ext/subagents/rpc-host.ts";
+import type { RpcHostSpec } from "../ext/subagents/rpc-host.ts";
 import { type AdmittedSubagentHandle, type SubagentRunRecord, SubagentRunScheduler } from "../ext/subagents/runs.ts";
 import { ensureRunStorageDir } from "../ext/subagents/storage.ts";
 import { leaderlessGroup } from "./helpers/leaderless-group.ts";
+import { definitionOf, hostEnded } from "./helpers/run-files.ts";
 
 // Run storage works as usual unless a test makes it fail.
 vi.mock("../ext/subagents/storage.ts", async (importOriginal) => {
@@ -274,7 +280,7 @@ describe("Run admission", () => {
 		const { launch, storageDir } = await setup({ tools: ["read"] });
 		const role = (tools: string[]) => ({ name: "looker", description: "Looks.", instructions: "Look.", tools });
 		const admitted = handleOf(await launch({ agent: role(["read", "grep?"]), task: "x" })).record;
-		const definition = JSON.parse(readFileSync(join(storageDir, admitted.runId, "definition.json"), "utf8"));
+		const definition = definitionOf(join(storageDir, admitted.runId));
 		expect(definition.tools).toEqual(["read"]);
 		expect(errorOf(await launch({ agent: role(["read", "grep"]), task: "x" }))).toBe(
 			'Subagent role "looker" names tools the orchestrator cannot give a child: grep. Available: read.',
@@ -596,7 +602,7 @@ describe("Run admission of a run's own directory, and of its Resume", () => {
 				/Unknown subagent "sneaky".*untrusted project/s,
 			);
 			const run = handleOf(await launch({ agent: "explorer", cwd: "vendor", task: "x" }, trusted));
-			const snapshot = JSON.parse(readFileSync(join(storageDir, run.runId, "definition.json"), "utf8"));
+			const snapshot = definitionOf(join(storageDir, run.runId));
 			expect(snapshot.projectTrusted).toBe(false);
 		};
 		await check();
@@ -644,7 +650,7 @@ describe("Run admission of a run's own directory, and of its Resume", () => {
 		expect(errorOf(await resume(completed, () => "x".repeat(MAX_TASK_INPUT_BYTES + 1)).result)).toMatch(
 			/exceeds the 32768-byte limit/,
 		);
-		expect(existsSync(join(storageDir, completed.runId, "generations"))).toBe(false);
+		expect(generationDefinition(join(storageDir, completed.runId), 1)).toBeUndefined();
 		expect(handleOf(await resume(completed, () => "Go on.").result).record.generation).toBe(1);
 	});
 
@@ -652,16 +658,12 @@ describe("Run admission of a run's own directory, and of its Resume", () => {
 		const { agentDir, cwd, launch, resume, storageDir } = await setup({ firstGenerationCompletes: true });
 		const completed = await handleOf(await launch({ agent: "explorer", task: "x" })).completion;
 		saveConversation(agentDir, cwd);
-		const hostPid = await leaderlessGroup();
-		writeFileSync(
-			join(storageDir, completed.runId, "rpc-host.json"),
-			JSON.stringify({ hostPid, exit: { code: 0, signal: null } }),
-		);
+		hostEnded(join(storageDir, completed.runId), await leaderlessGroup());
 
 		expect(errorOf(await resume(completed, () => "Go on.").result)).toMatch(
 			/^Cannot resume .*: its pi from before is still running\.$/,
 		);
-		expect(existsSync(join(storageDir, completed.runId, "generations"))).toBe(false);
+		expect(generationDefinition(join(storageDir, completed.runId), 1)).toBeUndefined();
 	});
 
 	it("lets one of two instances of the orchestrator's session resume a run, never both", async () => {
@@ -689,8 +691,8 @@ describe("Run admission of a run's own directory, and of its Resume", () => {
 		const completed = await handleOf(await launch({ agent: role, task: "x" })).completion;
 		saveConversation(agentDir, cwd);
 		// As if admitted with a shell, which cannot be contained now, and with deny rules that can no longer be read.
-		const path = join(storageDir, completed.runId, "definition.json");
-		writeFileSync(path, JSON.stringify({ ...JSON.parse(readFileSync(path, "utf8")), tools: ["read", "bash"] }));
+		const runDir = join(storageDir, completed.runId);
+		admitGeneration(runDir, 0, { ...definitionOf(runDir), tools: ["read", "bash"] });
 		vi.mocked(prepareRunContainment).mockResolvedValueOnce({ ok: false, reason: "no sandbox here" });
 		writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ permissions: { deny: 42 } }));
 		expect(errorOf(await resume(completed, () => "Go on.").result)).toMatch(/deny rules.*cannot be read/);
@@ -702,7 +704,7 @@ describe("Run admission of a run an earlier instance of its orchestrator's sessi
 		const first = await setup();
 		const run = handleOf(await first.launch({ agent: "explorer", task: "x" })).record;
 		const runDir = join(first.storageDir, run.runId);
-		const definition = JSON.parse(readFileSync(join(runDir, "definition.json"), "utf8"));
+		const definition = definitionOf(runDir);
 		const spec: RpcHostSpec = {
 			args: ["--mode", "rpc"],
 			cwd: definition.cwd,
@@ -713,7 +715,7 @@ describe("Run admission of a run an earlier instance of its orchestrator's sessi
 			sessionFile: join(runDir, "session.jsonl"),
 			pane: { session: "pi-run", parent: "pi-before" },
 		};
-		prepareRpcHost(runDir, spec);
+		storeLaunch(runDir, spec);
 
 		const second = await setup({ sameSession: first });
 		expect(second.admission.recover(run, second.ctx)).toBe(true);
@@ -757,10 +759,10 @@ describe("Run admission of a run an earlier instance of its orchestrator's sessi
 		});
 
 		expect(second.admission.recover(run, second.ctx)).toBe(false);
-		prepareRpcHost(runDir, spec(1));
+		storeLaunch(runDir, spec(1));
 		expect(second.admission.recover(run, second.ctx)).toBe(false);
-		prepareRpcHost(runDir, spec(0));
-		rmSync(join(runDir, "definition.json"));
+		storeLaunch(runDir, spec(0));
+		rmSync(runDefinitionPath(runDir, 0));
 		expect(second.admission.recover(run, second.ctx)).toBe(false);
 		expect(second.scheduler.getRun(run.runId)).toBeUndefined();
 	});

@@ -34,11 +34,11 @@ import { sandboxStatus, sandboxWraps, wrapExec } from "../sandbox/runtime.ts";
 import { CHAIN_ID_PREFIX } from "./admission.ts";
 import { type ChainResultDetails, chainResultPath } from "./chains.ts";
 import type { RunDirectory } from "./directory.ts";
+import { generationDefinition, runProcessesLeft, runWorkspace } from "./generation-state.ts";
 import type { ParentScope } from "./parent-scope.ts";
 import { sanitizeReportText, truncateUtf8Safe } from "./results.ts";
 import type { RpcDenyRules } from "./rpc-child.ts";
-import { readRpcHostState, runProcessesRemain } from "./rpc-host.ts";
-import { readRunDefinition, rpcDenyRules, runDefinitionPath } from "./rpc-runs.ts";
+import { rpcDenyRules } from "./rpc-runs.ts";
 import { within } from "./run-workspace.ts";
 import {
 	describeWorkspace,
@@ -358,7 +358,7 @@ function resolveTarget(deps: IntegrationDeps, scope: ParentScope, name: string):
 	if (record.chain) {
 		return `${label} is a step of chain ${record.chain}: integrate the chain, "${record.chain}", once it has completed.`;
 	}
-	const workspace = record.backend === "rpc" ? readRunDefinition(runDefinitionPath(runDir, 0))?.workspace : undefined;
+	const workspace = record.backend === "rpc" ? runWorkspace(runDir) : undefined;
 	if (!workspace) return `${label} has no worktree of its own: it worked in ${record.cwd}, where its changes are.`;
 	if (!deps.onBranch(record.originEntryId)) {
 		return `Not integrated: ${label} was launched from another branch of this session.`;
@@ -397,7 +397,7 @@ async function unsettled(
 	}
 	const left = processesLeft(runDir);
 	if (left) return left;
-	const definition = readRunDefinition(runDefinitionPath(runDir, run.generation));
+	const definition = generationDefinition(runDir, run.generation);
 	if (!definition)
 		return `nothing confirms what ${label} could run: the definition of its generation ${run.generation} cannot be read.`;
 	if (definition.shell) {
@@ -415,11 +415,8 @@ async function unsettled(
 
 /** Why the run's host may still run: its group not empty, or its end not recorded while it lives. */
 function processesLeft(runDir: string): string | undefined {
-	const host = readRpcHostState(runDir);
-	if (host && runProcessesRemain(host)) {
-		return `processes of the run in ${runDir} still run (process group ${host.hostPid}).`;
-	}
-	return undefined;
+	const left = runProcessesLeft(runDir);
+	return left && `processes of the run in ${runDir} still run (process group ${left.group}).`;
 }
 
 /** The run of the scope working in the worktree now, if any: a later step of its chain, or a Resume. */
@@ -596,7 +593,7 @@ function pathProblem(source: string, path: string): string | undefined {
 function denyRules(agentDir: string, ctx: IntegrationContext, runDir: string): RpcDenyRules[] {
 	const current = rpcDenyRules(agentDir, [{ cwd: ctx.cwd, trusted: ctx.isProjectTrusted() }]);
 	if (!current.ok) throw new Error(current.error.replace(/^Cannot launch subagent: /, "").replace(/\.$/, ""));
-	return [...current.deny, ...(readRunDefinition(runDefinitionPath(runDir, 0))?.deny ?? [])];
+	return [...current.deny, ...(generationDefinition(runDir, 0)?.deny ?? [])];
 }
 
 function denied(deny: RpcDenyRules[], tool: string, path: string): string | undefined {

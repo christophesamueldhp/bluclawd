@@ -8,15 +8,15 @@
  * host stops the run.
  */
 
-import { type ChildProcess, spawn, spawnSync } from "node:child_process";
-import { appendFileSync, mkdirSync, openSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { type ChildProcess, spawn } from "node:child_process";
+import { appendFileSync, openSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { OrchestratorClient, piPackageRoot } from "../../daemon/orchestrator-client.ts";
-import { processAlive, processGroupAlive } from "../../daemon/processes.ts";
 import type { RunHostLaunch } from "../../daemon/run-queue.ts";
 import { PANE_ENV, PARENT_ENV, RUN_PANE_ENV, Tmux } from "../../daemon/tmux.ts";
 import { type StartedPi, startGeneration } from "./generation-protocol.ts";
+import { type HostSeat, hostGeneration } from "./generation-state.ts";
 import {
 	dialogAnswer,
 	type RunApprovalAnswer,
@@ -28,7 +28,7 @@ import {
 } from "./run-approvals.ts";
 import { sealRunInbox } from "./run-mailbox.ts";
 import type { RunRuntimeOutcome } from "./runs.ts";
-import { storeRunReport, writeAtomicPrivateFile } from "./storage.ts";
+import { storeRunReport } from "./storage.ts";
 
 /** What the host starts: the run's pi and its first prompt. */
 export interface RpcHostSpec {
@@ -47,7 +47,7 @@ export interface RpcHostSpec {
 	/**
 	 * Set for a generation that runs as an interactive pi in a pane of agent view's tmux (ADR-0013): the pane's tmux
 	 * session, which the daemon starts the host in, and its orchestrator's, where a terminal showing it goes back to.
-	 * A session that takes the run over stores its own pane as the orchestrator's ({@link paneParent}).
+	 * A session that takes the run over stores its own pane as the orchestrator's ({@link HostSeat.paneParent}).
 	 */
 	pane?: { session: string; parent: string };
 }
@@ -82,20 +82,6 @@ export type PaneChildState = Pick<RpcHostState, "sessionFile" | "sessionId" | "o
 /** Why a run in a pane stopped once its pane was ended from outside its pi. */
 export const PANE_ENDED = "its pane was ended";
 
-export const paneChildStatePath = (runDir: string) => join(runDir, "pane-child.json");
-
-export function readPaneChildState(runDir: string): PaneChildState | undefined {
-	try {
-		return JSON.parse(readFileSync(paneChildStatePath(runDir), "utf8")) as PaneChildState;
-	} catch {
-		return undefined;
-	}
-}
-
-const specPath = (runDir: string) => join(runDir, "rpc-spec.json");
-const statePath = (runDir: string) => join(runDir, "rpc-host.json");
-/** Holds the pid of the one host that runs the generation: whichever started first, however often it was launched. */
-const hostClaimPath = (runDir: string, generation: number) => join(runDir, "hosts", String(generation));
 /** Child stderr: pi reports a failed start only there. */
 const stderrPath = (runDir: string) => join(runDir, "rpc-child.stderr");
 /** How long a run's host and its pi may take to end, once stopped or done, before what is left of them is killed. */
@@ -109,43 +95,17 @@ const DIALOGS = ["select", "confirm", "input", "editor"];
 const HOST_FILE = fileURLToPath(import.meta.url);
 
 /**
- * Stores the run's spec in `runDir` and returns what the daemon starts its host with once the run's turn comes
+ * What the daemon starts the host of the run in `runDir` with, its spec stored there, once the run's turn comes
  * (daemon/run-queue.ts): detached, so it outlives whoever started it. The daemon's environment is not this pi's, so
  * this pi's goes with it; bluclawd's own variables are left out.
  */
 export function prepareRpcHost(runDir: string, spec: RpcHostSpec): RunHostLaunch {
-	writeAtomicPrivateFile(specPath(runDir), JSON.stringify(spec));
 	const env = Object.fromEntries(
 		Object.entries(process.env).filter(
 			(entry): entry is [string, string] => entry[1] !== undefined && !entry[0].startsWith("BLUCLAWD_"),
 		),
 	);
 	return { runDir, env, ...(spec.pane ? { pane: spec.pane.session } : {}) };
-}
-
-/**
- * Whether `value` is a spec a host runs: the daemon starts a host for any run directory a client names, so what the
- * spec there holds is checked before anything of it starts.
- */
-function isRpcHostSpec(value: unknown): value is RpcHostSpec {
-	const spec = value as Partial<RpcHostSpec> | null;
-	const text = (field: unknown) => typeof field === "string";
-	return (
-		typeof spec === "object" &&
-		spec !== null &&
-		Array.isArray(spec.args) &&
-		spec.args.every(text) &&
-		text(spec.cwd) &&
-		text(spec.agentDir) &&
-		text(spec.prompt) &&
-		text(spec.model?.provider) &&
-		text(spec.model?.id) &&
-		text(spec.model?.thinkingLevel) &&
-		Number.isInteger(spec.generation) &&
-		(spec.generation ?? -1) >= 0 &&
-		(spec.sessionFile === undefined || text(spec.sessionFile)) &&
-		(spec.pane === undefined || (text(spec.pane?.session) && text(spec.pane?.parent)))
-	);
 }
 
 /** The pi of the install this host runs from, which a run's pi is: never one a spec names. */
@@ -157,65 +117,6 @@ function piEntry(): string {
 	const { bin } = JSON.parse(readFileSync(join(root, "package.json"), "utf8")) as { bin?: { pi?: unknown } };
 	if (typeof bin?.pi !== "string") throw new Error(`${root} names no pi to start`);
 	return join(root, bin.pi);
-}
-
-export function readRpcHostState(runDir: string): RpcHostState | undefined {
-	try {
-		return JSON.parse(readFileSync(statePath(runDir), "utf8")) as RpcHostState;
-	} catch {
-		return undefined;
-	}
-}
-
-/**
- * The spec the run's latest generation was launched with, as stored before it queued; a session that took the run
- * over since rewrote its orchestrator's pane.
- */
-export function readRpcHostSpec(runDir: string): RpcHostSpec | undefined {
-	try {
-		return JSON.parse(readFileSync(specPath(runDir), "utf8")) as RpcHostSpec;
-	} catch {
-		return undefined;
-	}
-}
-
-/**
- * The orchestrator pane of a run's generation in `pane` now: a session that took the run over after a crash runs in
- * another pane, which it stores in the run's spec. A spec stored since for another generation is not this one's.
- */
-export function paneParent(runDir: string, generation: number, pane: NonNullable<RpcHostSpec["pane"]>): string {
-	const spec = readRpcHostSpec(runDir);
-	return (spec?.generation === generation && spec.pane?.parent) || pane.parent;
-}
-
-/** The pid of the host that took generation `generation` of the run, once one did. */
-export function generationHost(runDir: string, generation: number): number | undefined {
-	try {
-		const pid = Number(readFileSync(hostClaimPath(runDir, generation), "utf8"));
-		return pid > 0 ? pid : undefined;
-	} catch {
-		return undefined;
-	}
-}
-
-/**
- * Whether anything of the run still runs in the process group its host `pid` led, a pid read from disk: one given to
- * another process since is not the host, whose command names the run's directory. No pid is given out again while a
- * group of that id has members, so once the host is gone, any member left is the run's.
- */
-export function runGroupAlive(pid: number, runDir: string): boolean {
-	if (!processAlive(pid)) return processGroupAlive(pid, { leaderRuns: false });
-	return spawnSync("ps", ["-o", "command=", "-p", String(pid)], { encoding: "utf8" }).stdout.includes(runDir);
-}
-
-/**
- * Whether processes of the run whose host stored `host` may still run: its group has members, or its host lives and
- * stored no exit. A Generation whose group was not confirmed gone still ends, so a finished run may leave some. A
- * live host is not asked whether it is the run's, unlike in {@link runGroupAlive}: a `ps` that fails would say not.
- */
-export function runProcessesRemain(host: RpcHostState): boolean {
-	const leaderRuns = processAlive(host.hostPid);
-	return processGroupAlive(host.hostPid, { leaderRuns }) || (host.exit === undefined && leaderRuns);
 }
 
 /** Asks the host to stop the run: its pi ends its work as on a SIGTERM, and the host stores how it ended. */
@@ -308,20 +209,11 @@ function connect(child: ChildProcess, onEvent: (event: RpcRecord) => void) {
 }
 
 async function host(runDir: string): Promise<void> {
-	const spec: unknown = JSON.parse(readFileSync(specPath(runDir), "utf8"));
-	if (!isRpcHostSpec(spec)) throw new Error(`${specPath(runDir)} is not a run's spec`);
 	// A generation runs once: a host launched for it again, after a lost reply or a recovery, leaves it to the first.
-	mkdirSync(dirname(hostClaimPath(runDir, spec.generation)), { recursive: true, mode: 0o700 });
-	try {
-		writeFileSync(hostClaimPath(runDir, spec.generation), String(process.pid), { flag: "wx", mode: 0o600 });
-	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code === "EEXIST") return;
-		throw error;
-	}
-	const state: RpcHostState = { hostPid: process.pid, generation: spec.generation };
-	const save = () => writeAtomicPrivateFile(statePath(runDir), JSON.stringify(state));
-	save();
-	if (spec.pane) return paneHost(runDir, { ...spec, pane: spec.pane }, state, save);
+	const seat = hostGeneration(runDir);
+	if (!seat) return;
+	const { spec } = seat;
+	if (spec.pane) return paneHost(runDir, seat, spec.pane);
 
 	const child = spawn(process.execPath, [piEntry(), ...spec.args], {
 		cwd: spec.cwd,
@@ -336,8 +228,7 @@ async function host(runDir: string): Promise<void> {
 			resolve({ code: null, signal: null });
 		});
 	});
-	state.childPid = child.pid;
-	save();
+	seat.save({ childPid: child.pid });
 
 	/** Approvals the run's pi waits for, by pi's id for their dialog, with when each was asked. */
 	const approvals = new Map<string, number>();
@@ -392,10 +283,7 @@ async function host(runDir: string): Promise<void> {
 				((await request({ type: "get_available_models" })).data as { models?: { provider: string; id: string }[] })
 					.models ?? [],
 		},
-		save: (record) => {
-			Object.assign(state, record);
-			save();
-		},
+		save: seat.save,
 		ended: () => reported(),
 	});
 
@@ -450,8 +338,7 @@ async function host(runDir: string): Promise<void> {
 	clearInterval(watching);
 	withdrawApprovals();
 	child.stdin?.end();
-	state.exit = await exited;
-	save();
+	seat.save({ exit: await exited });
 }
 
 /**
@@ -460,12 +347,8 @@ async function host(runDir: string): Promise<void> {
  * exited, with what the pi stored of its work. A terminal that shows the pane goes back to the orchestrator once the
  * host exits and the pane with it.
  */
-async function paneHost(
-	runDir: string,
-	spec: RpcHostSpec & { pane: NonNullable<RpcHostSpec["pane"]> },
-	state: RpcHostState,
-	save: () => void,
-): Promise<void> {
+async function paneHost(runDir: string, seat: HostSeat, pane: NonNullable<RpcHostSpec["pane"]>): Promise<void> {
+	const { spec } = seat;
 	// Ctrl+C reaches the pane's process group while its pi does not hold the terminal: it is not the host's to act on.
 	process.on("SIGINT", () => {});
 	// Its pane ended from outside, as by tmux kill-session, hangs its process group up: the host stays to store how its
@@ -478,25 +361,23 @@ async function paneHost(
 		running?.kill("SIGHUP");
 		setTimeout(() => running?.kill("SIGKILL"), STOP_GRACE_MS).unref();
 	});
-	// What an earlier generation's pi stored is not this one's.
-	rmSync(paneChildStatePath(runDir), { force: true });
 	let launched: Record<string, string>;
 	try {
-		launched = await new OrchestratorClient().takeRunEnv(spec.pane.session);
+		launched = await new OrchestratorClient().takeRunEnv(pane.session);
 	} catch (error) {
 		// The daemon holds the environment in memory only: one started since it launched this host has none to give.
-		state.notStarted = `the daemon restarted, or could not be reached, between launching the run's host and that host taking the run's environment (${error instanceof Error ? error.message : String(error)})`;
-		save();
+		seat.save({
+			notStarted: `the daemon restarted, or could not be reached, between launching the run's host and that host taking the run's environment (${error instanceof Error ? error.message : String(error)})`,
+		});
 		return;
 	}
 	if (paneEnded) {
-		state.notStarted = `${PANE_ENDED} before its pi started`;
-		save();
+		seat.save({ notStarted: `${PANE_ENDED} before its pi started` });
 		return;
 	}
 	const child = spawn(process.execPath, [piEntry(), ...spec.args], {
 		cwd: spec.cwd,
-		env: paneChildEnv(launched, process.env, runDir, spec.pane, spec.agentDir),
+		env: paneChildEnv(launched, process.env, runDir, pane, spec.agentDir),
 		stdio: "inherit",
 	});
 	running = child;
@@ -507,8 +388,7 @@ async function paneHost(
 			resolve({ code: null, signal: null });
 		});
 	});
-	state.childPid = child.pid;
-	save();
+	seat.save({ childPid: child.pid });
 	let stopped = false;
 	process.on("SIGTERM", () => {
 		stopped = true;
@@ -516,12 +396,12 @@ async function paneHost(
 		child.kill("SIGTERM");
 	});
 	const exit = await exited;
-	const { sessionFile, sessionId, outcome, reportSeq, idle } = readPaneChildState(runDir) ?? {};
-	Object.assign(state, { sessionFile, sessionId, outcome, reportSeq, idle });
+	const stored = seat.takeChild();
+	let failed: Pick<RpcHostState, "outcome" | "reportSeq"> = {};
 	// Its pi ended before it stored a Report: it crashed, or was killed.
-	if (state.reportSeq === undefined && !state.idle) {
+	if (stored.reportSeq === undefined && !stored.idle) {
 		sealRunInbox(runDir, spec.generation);
-		state.outcome = stopped
+		const outcome: RunRuntimeOutcome = stopped
 			? { status: "stopped", error: "its work was stopped" }
 			: paneEnded
 				? { status: "stopped", error: PANE_ENDED }
@@ -529,21 +409,23 @@ async function paneHost(
 						status: "failed",
 						error: `its pi exited before its work settled (${exit.signal ?? `code ${exit.code}`})`,
 					};
-		state.reportSeq = storeRunReport(runDir, {
-			text: "",
-			outcome: state.outcome,
-			sessionId: state.sessionId,
-			generation: spec.generation,
-		});
+		failed = {
+			outcome,
+			reportSeq: storeRunReport(runDir, {
+				text: "",
+				outcome,
+				sessionId: stored.sessionId,
+				generation: spec.generation,
+			}),
+		};
 	}
-	state.exit = exit;
-	save();
+	seat.save({ ...failed, exit });
 	const socket = process.env.TMUX?.split(",")[0];
 	if (!socket) return;
 	try {
 		new Tmux(dirname(socket), undefined, { timeoutMs: 2000 }).moveClients(
-			spec.pane.session,
-			paneParent(runDir, spec.generation, spec.pane),
+			pane.session,
+			seat.paneParent() ?? pane.parent,
 		);
 	} catch {
 		// Its orchestrator's pane is gone, or tmux did not answer: tmux shows another session once this one ends.

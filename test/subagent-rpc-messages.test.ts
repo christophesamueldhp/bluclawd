@@ -1,4 +1,4 @@
-import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { readinessMs } from "./helpers/heartbeats.ts";
@@ -11,20 +11,8 @@ import {
 	type RealPi,
 	startRealPi,
 } from "./helpers/real-pi.ts";
+import { runNamed } from "./helpers/run-files.ts";
 import { waitFor } from "./helpers/wait-for.ts";
-
-/** A run's directory, as its orchestrator stored it, by the run's name. */
-function runDir(agentDir: string, name: string): string {
-	const root = join(agentDir, "bluclawd", "subagents");
-	for (const session of readdirSync(root)) {
-		for (const run of readdirSync(join(root, session))) {
-			const record = join(root, session, run, "record.json");
-			if (existsSync(record) && JSON.parse(readFileSync(record, "utf8")).name === name)
-				return join(root, session, run);
-		}
-	}
-	throw new Error(`no run named ${name}`);
-}
 
 const readJson = (path: string) => JSON.parse(readFileSync(path, "utf8"));
 
@@ -73,7 +61,7 @@ describe.skipIf(!hasTmux)("the user and an RPC run", () => {
 		writeFileSync(gate, "");
 
 		const [, next] = await real.waitForRequests("look", 2);
-		const { runId, parentSessionId } = readJson(join(runDir(real.agentDir, "look"), "record.json"));
+		const { runId, parentSessionId } = runNamed(real.agentDir, "look").record;
 		expect(conversation(next).at(-1)).toEqual({
 			role: "user",
 			text: `[Instruction from the user to run "look" (${runId}), generation 0, sent directly through Bluclawd, not through your orchestrator (session ${parentSessionId}). It carries the user's authority over your task, within the tools and permissions you already have.]\n\nAlso check HERON.`,
@@ -108,8 +96,7 @@ describe.skipIf(!hasTmux)("the user and an RPC run", () => {
 			real.script("hold", [{ text: "Held.", until: gate }]);
 			const orchestrator = real.start(["--", "delegate"]);
 			await real.waitForRequests("hold", 1);
-			const dir = runDir(real.agentDir, "kept");
-			await waitFor(() => expect(readJson(join(dir, "record.json")).status).toBe("closed"));
+			await waitFor(() => expect(runNamed(real.agentDir, "kept").record.status).toBe("closed"));
 
 			real.tmux.sendKeys(orchestrator, ["/tasks", "Enter"]);
 			const screen = () => real.tmux.capture(orchestrator, 80).join("\n");
@@ -127,7 +114,7 @@ describe.skipIf(!hasTmux)("the user and an RPC run", () => {
 
 			writeFileSync(gate, "");
 			const [, resumed] = await real.waitForRequests("kept", 2);
-			const { runId, parentSessionId } = readJson(join(dir, "record.json"));
+			const { runId, parentSessionId } = runNamed(real.agentDir, "kept").record;
 			expect(conversation(resumed).at(-1)).toEqual({
 				role: "user",
 				text: `[Instruction from the user to run "kept" (${runId}), generation 1, sent directly through Bluclawd, not through your orchestrator (session ${parentSessionId}). It carries the user's authority over your task, within the tools and permissions you already have.]\n\nAlso remember HERON.`,
@@ -167,8 +154,7 @@ describe.skipIf(!hasTmux)("messages with a working RPC run", () => {
 
 		// After its tool call, before its next model call: as a user-role message, framed by the runtime.
 		const look = await real.waitForRequests("look", 2);
-		const dir = runDir(real.agentDir, "look");
-		const { runId, parentSessionId } = readJson(join(dir, "record.json"));
+		const { runId, parentSessionId } = runNamed(real.agentDir, "look").record;
 		const said = conversation(look[1]);
 		expect(said.map(({ role }) => role)).toEqual(["user", "assistant", "toolResult", "user"]);
 		expect(said[3].text).toBe(
@@ -200,9 +186,8 @@ describe.skipIf(!hasTmux)("messages with a working RPC run", () => {
 			toolName: "subagent_message",
 			text: "Sent to your orchestrator as progress (not yet handled). Keep working; do not wait for a reply.",
 		});
-		const dir = runDir(real.agentDir, "look");
-		const { runId } = readJson(join(dir, "record.json"));
-		await waitFor(() => expect(readJson(join(dir, "record.json")).lastProgressText).toBe("Reading c."));
+		const { runId } = runNamed(real.agentDir, "look").record;
+		await waitFor(() => expect(runNamed(real.agentDir, "look").record.lastProgressText).toBe("Reading c."));
 		expect(real.requests("main")).toHaveLength(2);
 		writeFileSync(blocker, "");
 
@@ -238,8 +223,8 @@ describe.skipIf(!hasTmux)("messages with a working RPC run", () => {
 		real.script("b", [{ tool: "read", args: { path: "notes.md" }, until: gate }, { text: "b done" }]);
 		real.start(["--", "delegate"]);
 		await real.waitForRequests("b", 1);
-		const a = readJson(join(runDir(real.agentDir, "a"), "record.json"));
-		const b = readJson(join(runDir(real.agentDir, "b"), "record.json"));
+		const a = runNamed(real.agentDir, "a").record;
+		const b = runNamed(real.agentDir, "b").record;
 		const audit = join(real.agentDir, "bluclawd", "subagents", a.parentSessionId, "messages.jsonl");
 		const records = () =>
 			existsSync(audit)
@@ -292,7 +277,7 @@ describe.skipIf(!hasTmux)("messages with a working RPC run", () => {
 		]);
 		real.start(["--", "delegate"]);
 		await real.waitForRequests("b", 1);
-		const a = readJson(join(runDir(real.agentDir, "a"), "record.json"));
+		const a = runNamed(real.agentDir, "a").record;
 		const audit = join(real.agentDir, "bluclawd", "subagents", a.parentSessionId, "messages.jsonl");
 		await waitFor(() => expect(existsSync(audit) && readFileSync(audit, "utf8")).toContain('"status":"accepted"'));
 		writeFileSync(gate, "");
