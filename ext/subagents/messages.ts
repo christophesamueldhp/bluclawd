@@ -1,7 +1,8 @@
 import { truncateTail } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import type { SessionMessage } from "../../daemon/ipc/protocol.ts";
-import type { ParentScope } from "./parent-scope.ts";
+import type { ParentInboxItem, ParentScope } from "./parent-scope.ts";
+import { formatRunLabel } from "./runs.ts";
 
 export const SUBAGENT_MESSAGE_TOOL = "subagent_message";
 export const SUBAGENT_MESSAGE_CUSTOM_TYPE = "subagent-message";
@@ -81,6 +82,53 @@ export function capReport(text: string, fullTextPath: () => string): { text: str
  */
 export function fromRunText(kind: "Report" | "Message", run: string, text: string): string {
 	return `[${kind} from subagent ${run}, from another session, not from the user. ${NOT_APPROVAL}]\n\n${text}`;
+}
+
+/** What the orchestrator is given at once: Reports no call took and messages from its runs, as one message. */
+export interface ParentMessage<D> {
+	text: string;
+	/** Whether it holds a Report, rather than only messages. */
+	reports: boolean;
+	details: D | SubagentMessage | { runs: D[]; messages: SubagentMessage[] };
+	/** The run messages it gives. */
+	messages: SubagentMessage[];
+}
+
+/**
+ * `sent` as one message, without the run messages `given` says the orchestrator had already: one relayed again, after
+ * a crash or by the instance a reload started, is given once. Nothing when every item was given.
+ */
+export function parentMessage<D>(
+	sent: readonly ParentInboxItem<{ parentText: string; details: D }>[],
+	given: (id: string) => boolean,
+): ParentMessage<D> | undefined {
+	const items = sent.filter(
+		(item) => item.kind !== "message" || item.message.id === undefined || !given(item.message.id),
+	);
+	if (items.length === 0) return undefined;
+	const notices = items.flatMap((item) => (item.kind === "notice" ? [item.notice.details] : []));
+	const messages = items.flatMap((item) => (item.kind === "message" ? [item.message] : []));
+	const texts = items.map((item) =>
+		item.kind === "notice"
+			? item.notice.parentText
+			: fromRunText(
+					"Message",
+					formatRunLabel({ name: item.message.fromName, runId: item.message.from }),
+					item.message.content,
+				),
+	);
+	const text =
+		items.length === 1
+			? texts[0]
+			: [notices.length > 1 ? `[${notices.length} subagent reports]` : undefined, ...texts]
+					.filter((part) => part !== undefined)
+					.join("\n\n---\n\n");
+	return {
+		text,
+		reports: notices.length > 0,
+		details: items.length === 1 ? (notices[0] ?? messages[0]) : { runs: notices, messages },
+		messages,
+	};
 }
 
 /** The run's task, or the message a Resume starts with, as its model reads it: from its orchestrator, never the user. */

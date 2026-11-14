@@ -3,6 +3,7 @@ import {
 	fromRunText,
 	type MessageRecipient,
 	type MessageRecipients,
+	parentMessage,
 	type SubagentMessage,
 	SubagentMessageBus,
 	type SubagentMessageRecord,
@@ -141,5 +142,52 @@ describe("What a run sends its orchestrator, as the orchestrator's model reads i
 		);
 		expect(forged.split("\n")[0]).toMatch(/^\[Message from subagent "frontend"/);
 		expect(forged).toMatch(NOT_APPROVAL);
+	});
+});
+
+describe("What the orchestrator is given of its runs at once", () => {
+	const run = { runId: "sub_a", parentSessionId: "sess_1", sessionEpoch: 1 };
+	const notice = (text: string) => ({ kind: "notice" as const, run, notice: { parentText: text, details: { text } } });
+	const message = (content: string, id?: string) => ({
+		kind: "message" as const,
+		scope,
+		message: { seq: 1, from: "sub_b", fromName: "b", to: "parent", content, ...(id ? { id } : {}) },
+	});
+	const none = () => false;
+
+	it("gives one Report or one message as it is", () => {
+		expect(parentMessage([notice("Report a")], none)).toEqual({
+			text: "Report a",
+			reports: true,
+			details: { text: "Report a" },
+			messages: [],
+		});
+		const given = parentMessage([message("hello")], none);
+		expect(given?.text).toBe(fromRunText("Message", '"b" (sub_b)', "hello"));
+		expect(given).toMatchObject({ reports: false, details: { content: "hello" } });
+	});
+
+	it("combines several into one, counting the Reports", () => {
+		const given = parentMessage([notice("Report a"), notice("Report c"), message("hello")], none);
+		expect(given?.text).toBe(
+			["[2 subagent reports]", "Report a", "Report c", fromRunText("Message", '"b" (sub_b)', "hello")].join(
+				"\n\n---\n\n",
+			),
+		);
+		expect(given?.details).toEqual({
+			runs: [{ text: "Report a" }, { text: "Report c" }],
+			messages: [expect.objectContaining({ content: "hello" })],
+		});
+		expect(parentMessage([notice("Report a"), message("hello")], none)?.text).toBe(
+			["Report a", fromRunText("Message", '"b" (sub_b)', "hello")].join("\n\n---\n\n"),
+		);
+	});
+
+	it("leaves out a relayed message the orchestrator was given already, and gives nothing when that was all", () => {
+		const given = (id: string) => id === "sub_b/0/1";
+		expect(parentMessage([message("again", "sub_b/0/1")], given)).toBeUndefined();
+		expect(
+			parentMessage([message("again", "sub_b/0/1"), message("new", "sub_b/0/2"), message("plain")], given)?.messages,
+		).toEqual([expect.objectContaining({ content: "new" }), expect.objectContaining({ content: "plain" })]);
 	});
 });
