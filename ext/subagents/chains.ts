@@ -23,7 +23,15 @@ import {
 	nameTaken,
 	type RunAdmission,
 } from "./admission.ts";
-import { type BatchMember, capAggregate, fullReportOf, inlineReports, memberOutcome, settleBatch } from "./batches.ts";
+import {
+	type BatchMember,
+	capAggregate,
+	fullReportOf,
+	inlineReports,
+	memberOutcome,
+	settleBatch,
+	settledMember,
+} from "./batches.ts";
 import { GROUP_PROGRESS, NOT_APPROVAL, NOTHING_TO_CLOSE, whileRunning } from "./messages.ts";
 import type { ParentScopeChecks } from "./parent-scope.ts";
 import { sanitizeReportText, truncateUtf8Safe } from "./results.ts";
@@ -38,7 +46,6 @@ import { createRunId, type SubagentRunRecord } from "./runs.ts";
 import {
 	getSubagentsRootDir,
 	readPersistedRunRecord,
-	readRunReports,
 	storedRunReportTextPath,
 	subagentRunDir,
 	writeAtomicPrivateFile,
@@ -340,7 +347,7 @@ interface ChainRun {
 async function driveChain(
 	deps: ChainDeps,
 	run: ChainRun,
-	from: { index: number; results: StepResult[]; next?: AdmissionResult },
+	from: { index: number; results: StepResult[]; earlier?: Promise<unknown>; next?: AdmissionResult },
 ): Promise<{ text: string; details: ChainResultDetails }> {
 	const { plan, planPath, request, background, start, workspace, stop, stopped } = run;
 	const { chain, steps } = plan;
@@ -401,6 +408,8 @@ async function driveChain(
 	const drive = async () => {
 		let next = from.next;
 		for (let i = from.index; i < steps.length; i++) {
+			// A chain taken over settles its earlier steps meanwhile, never delaying the wait for the step working now.
+			if (!next) await from.earlier;
 			if (deps.handOff.aborted) return handedOff();
 			if (!next) {
 				const before = results[i - 1];
@@ -424,6 +433,7 @@ async function driveChain(
 			results[i] = { member };
 			next = undefined;
 		}
+		await from.earlier;
 		if (deps.handOff.aborted) return handedOff();
 		deps.live.delete(chain);
 		return settle();
@@ -519,11 +529,12 @@ export function resumeChains(deps: ChainDeps, parentSessionId: string): void {
 		for (let i = 0; i < plan.ran.length; i++) if (plan.ran[i]) at = i;
 		const results: StepResult[] = plan.steps.map(() => undefined);
 		// The chain went on past each earlier step only once it completed.
-		for (let i = 0; i < at; i++) {
-			const ran = plan.ran[i];
-			const record = ran && recordOf(ran.runId);
-			if (ran && record) results[i] = { member: completedMember(agentDir, record, ran.generation) };
-		}
+		const earlier = Promise.all(
+			plan.ran.slice(0, at).map(async (ran, i) => {
+				const record = ran && recordOf(ran.runId);
+				if (ran && record) results[i] = { member: await completedMember(agentDir, record, ran.generation) };
+			}),
+		);
 		const current = plan.ran[at];
 		const record = current && recordOf(current.runId);
 		const next: AdmissionResult | undefined =
@@ -551,18 +562,26 @@ export function resumeChains(deps: ChainDeps, parentSessionId: string): void {
 				stop,
 				stopped: stop.signal,
 			},
-			{ index: at, results, ...(next ? { next } : {}) },
+			{ index: at, results, earlier, ...(next ? { next } : {}) },
 		).then(({ text, details }) => deps.notify(start, { parentText: text, details }));
 	}
 }
 
-/** An earlier step of a chain taken over, which completed in generation `generation` of its run. */
-function completedMember(agentDir: string, record: Readonly<SubagentRunRecord>, generation: number): BatchMember {
+/**
+ * An earlier step of a chain taken over, which completed in generation `generation` of its run: settled as a step
+ * not taken over is.
+ */
+async function completedMember(
+	agentDir: string,
+	record: Readonly<SubagentRunRecord>,
+	generation: number,
+): Promise<BatchMember> {
+	const member = await settledMember(agentDir, { ...record, status: "closed", generation });
+	if (record.generation === generation || !member.checks) return member;
 	const runDir = subagentRunDir(agentDir, record.parentSessionId, record.runId);
-	const report = readRunReports(runDir, 0)
-		.filter((stored) => stored.generation === generation)
-		.at(-1);
-	return { record: { ...record, status: "closed", generation }, ...(report ? { report } : {}) };
+	if (!readRunDefinition(runDefinitionPath(runDir, generation))?.tools.includes("bash")) return member;
+	// Its record's start is a later generation's: its transcript does not show where this one's commands end.
+	return { ...member, checks: "Checks: unknown: its run was resumed since." };
 }
 
 /** What the step after `before` is told of it: its outcome, where it worked, and its Report, cut to fit in `room`. */
