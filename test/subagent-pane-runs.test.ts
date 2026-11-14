@@ -23,6 +23,7 @@ import { waitFor } from "./helpers/wait-for.ts";
 const GATE = fileURLToPath(new URL("./fixtures/real-pi/approval-gate.ts", import.meta.url));
 const ROOT = fileURLToPath(new URL("../", import.meta.url));
 const ENV_PROBE = fileURLToPath(new URL("./fixtures/real-pi/env-probe.ts", import.meta.url));
+const DRIFTED = fileURLToPath(new URL("./fixtures/real-pi/faux-drifted.ts", import.meta.url));
 
 /** A run's record, as its orchestrator stored it, by the run's name. */
 function runRecord(agentDir: string, name: string): { runId: string; dir: string } {
@@ -288,6 +289,31 @@ describe.skipIf(!hasTmux)("a run in a pane of its own", () => {
 		expect(reportOf(dir, 1)?.outcome).toMatchObject({
 			status: "stopped",
 		});
+	});
+
+	it("fails before it is given its task when its pi cannot use the admitted model, as on RPC (#426)", async () => {
+		// Its pi knows no faux-1, which it takes for a custom id without failing.
+		vi.stubEnv("BLUCLAWD_RPC_PROVIDER_EXTENSIONS", DRIFTED);
+		const real = await startRealPi({ runsInPanes: true });
+		pi = real;
+		real.script("main", [
+			{
+				tool: "subagent",
+				args: { agent: "explorer", name: "invented", task: "Look.", model: "faux/faux-1", thinkingLevel: "off" },
+			},
+			{ text: "it failed" },
+		]);
+		real.start(["--", "delegate"]);
+		const main = await real.waitForRequests("main", 2);
+
+		expect(
+			conversation(main[1])
+				.filter(({ role }) => role === "toolResult")
+				.at(-1)?.text,
+		).toMatch(
+			/Outcome: failed: its pi cannot use faux\/faux-1: the model is unknown to it, or it has no authentication for it\./,
+		);
+		expect(real.requests("invented")).toHaveLength(0);
 	});
 
 	// Two pis one after another (hold, then next): a readiness bound for each to start, and one for the rest.

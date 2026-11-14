@@ -74,6 +74,8 @@ export default function paneChild(pi: ExtensionAPI): void {
 				return true;
 			},
 			quiet: async () => ctx?.isIdle() === true && !ctx.hasPendingMessages(),
+			// What pi's RPC answers get_available_models with: the models it knows and has authentication for.
+			availableModels: async () => ctx?.modelRegistry.getAvailable() ?? [],
 		},
 		save: seat.saveChild,
 		// Its Report is stored, or that nothing was done: its pi ends.
