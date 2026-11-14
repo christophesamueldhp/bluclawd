@@ -37,8 +37,8 @@ export interface PiLink {
 	give(text: string): Promise<true | { refused?: string }>;
 	/** Whether pi is idle with nothing queued. */
 	quiet(): Promise<boolean>;
-	/** The models pi can use. Only pi's RPC is asked so far (#426): in a pane, the admitted model is not checked. */
-	availableModels?(): Promise<{ provider: string; id: string }[]>;
+	/** The models pi can use: those it knows and has authentication for. */
+	availableModels(): Promise<{ provider: string; id: string }[]>;
 }
 
 /** What pi started with. */
@@ -158,14 +158,12 @@ export function startGeneration(options: {
 				error: `its pi runs ${provider ?? "no model"}/${id ?? ""} at thinking ${pi.thinkingLevel}, not ${admitted.provider}/${admitted.id} at thinking ${admitted.thinkingLevel}`,
 			});
 		}
-		if (link.availableModels) {
-			const models = await link.availableModels();
-			if (!models.some((model) => model.provider === admitted.provider && model.id === admitted.id)) {
-				return end({
-					status: "failed",
-					error: `its pi cannot use ${admitted.provider}/${admitted.id}: the model is unknown to it, or it has no authentication for it`,
-				});
-			}
+		const models = await link.availableModels();
+		if (!models.some((model) => model.provider === admitted.provider && model.id === admitted.id)) {
+			return end({
+				status: "failed",
+				error: `its pi cannot use ${admitted.provider}/${admitted.id}: the model is unknown to it, or it has no authentication for it`,
+			});
 		}
 		if (spec.prompt) {
 			const prompted = await link.give(spec.prompt);

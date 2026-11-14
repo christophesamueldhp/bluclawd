@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { RUN_PANE_ENV } from "../daemon/tmux.ts";
 import { generationState, hostGeneration, storeLaunch } from "../ext/subagents/generation-state.ts";
 import paneChild from "../ext/subagents/pane-child.ts";
+import { waitFor } from "./helpers/wait-for.ts";
 
 describe("a run's pi in a pane, waiting on a dialog", () => {
 	let runDir: string;
@@ -58,5 +59,60 @@ describe("a run's pi in a pane, waiting on a dialog", () => {
 		prompt("ui_prompt_start", "custom");
 		prompt("ui_prompt_end", "custom");
 		expect(awaiting()).toBe(true);
+	});
+});
+
+describe("a run's pi in a pane, as it starts", () => {
+	let runDir: string;
+	afterEach(() => {
+		vi.unstubAllEnvs();
+		rmSync(runDir, { recursive: true, force: true });
+	});
+
+	it("fails before its task when its pi cannot use the admitted model, as on pi's RPC (#426)", async () => {
+		runDir = mkdtempSync(join(tmpdir(), "bc-pane-child-"));
+		storeLaunch(runDir, {
+			args: [],
+			cwd: runDir,
+			agentDir: runDir,
+			prompt: "Look.",
+			model: { provider: "faux", id: "faux-1", thinkingLevel: "off" },
+			generation: 0,
+			pane: { session: "sub_run-0", parent: "pi-orchestrator" },
+		});
+		hostGeneration(runDir, process.ppid);
+		vi.stubEnv(RUN_PANE_ENV, runDir);
+		vi.stubEnv("TMUX", "");
+		const handlers = new Map<string, (event: unknown, ctx: unknown) => unknown>();
+		const given: string[] = [];
+		paneChild({
+			on: (event: string, handler: (event: unknown, ctx: unknown) => unknown) => handlers.set(event, handler),
+			sendUserMessage: (text: string) => given.push(text),
+			getThinkingLevel: () => "off",
+		} as never);
+		const shutdown = vi.fn();
+		handlers.get("session_start")?.(
+			{ type: "session_start", reason: "startup" },
+			{
+				sessionManager: { getSessionFile: () => undefined, getSessionId: () => "session-1" },
+				model: { provider: "faux", id: "faux-1" },
+				// pi knows faux-1 without authentication for it, or not at all.
+				modelRegistry: { getAvailable: () => [{ provider: "faux", id: "faux-2" }] },
+				isIdle: () => true,
+				hasPendingMessages: () => false,
+				shutdown,
+			},
+		);
+
+		// It either gives pi its task or ends its pi.
+		await waitFor(() => given.length > 0 || shutdown.mock.calls.length > 0);
+		expect(given).toEqual([]);
+		// What its host takes of its pi's work.
+		expect(hostGeneration(runDir, process.ppid)?.takeChild().outcome).toEqual({
+			status: "failed",
+			error: "its pi cannot use faux/faux-1: the model is unknown to it, or it has no authentication for it",
+		});
+		// Should it have been given its task, its pi shutting down ends it, and its checks.
+		handlers.get("session_shutdown")?.({ type: "session_shutdown" }, undefined);
 	});
 });

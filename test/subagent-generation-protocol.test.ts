@@ -34,7 +34,8 @@ class MemoryPi implements PiLink {
 	refuse?: (text: string) => boolean;
 	/** Runs as the protocol asks whether it is quiet: its last look before the seal. */
 	beforeSeal?: () => void;
-	availableModels?: () => Promise<{ provider: string; id: string }[]>;
+	/** It can use the run's model. */
+	availableModels = async (): Promise<{ provider: string; id: string }[]> => [MODEL];
 	work!: GenerationWork;
 
 	async give(text: string): Promise<true | { refused?: string }> {
@@ -151,7 +152,6 @@ describe("a Generation's protocol, on pi in memory", () => {
 		});
 		expect(thinking.given).toEqual([]);
 
-		// Asked only of a link that can say, as pi's RPC can (#426).
 		const unusable = start({}, (pi) => {
 			pi.availableModels = async () => [{ provider: "faux", id: "other" }];
 		});
@@ -161,11 +161,6 @@ describe("a Generation's protocol, on pi in memory", () => {
 			error: "its pi cannot use faux/faux-1: the model is unknown to it, or it has no authentication for it",
 		});
 		expect(unusable.given).toEqual([]);
-		const usable = start({}, (pi) => {
-			pi.availableModels = async () => [{ provider: "faux", id: "faux-1" }];
-		});
-		await usable.work.started(STARTED);
-		expect(usable.given).toEqual(["Look."]);
 	});
 
 	it("fails when pi refuses its task, with pi's reason when it gives one", async () => {
