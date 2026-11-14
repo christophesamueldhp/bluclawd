@@ -3,8 +3,9 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import type { AdmissionContext, ChainStep } from "../ext/subagents/admission.ts";
+import type { AdmissionContext } from "../ext/subagents/admission.ts";
 import { type ChainDeps, resumeChains } from "../ext/subagents/chains.ts";
+import type { ChainStep } from "../ext/subagents/invocation.ts";
 import type { ParentScope } from "../ext/subagents/parent-scope.ts";
 import { runDefinitionPath } from "../ext/subagents/rpc-runs.ts";
 import {

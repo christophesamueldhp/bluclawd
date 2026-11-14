@@ -20,20 +20,21 @@ import {
 	SessionManager,
 } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { prepareRunContainment } from "../ext/sandbox/run-containment.ts";
 import {
 	type AdmissionContext,
 	type AdmissionResult,
 	type ChainPlacement,
 	createRunAdmission,
-	type LaunchParams,
 	MAX_TASK_INPUT_BYTES,
 	type RunAdmissionDeps,
 	type RunExecutionContext,
-	subagentInvocation,
 } from "../ext/subagents/admission.ts";
 import { createRunDirectory } from "../ext/subagents/directory.ts";
+import { type LaunchParams, subagentInvocation } from "../ext/subagents/invocation.ts";
 import { SubagentMessageBus } from "../ext/subagents/messages.ts";
 import { createParentScope } from "../ext/subagents/parent-scope.ts";
+import { prepareRpcHost, type RpcHostSpec } from "../ext/subagents/rpc-host.ts";
 import { type AdmittedSubagentHandle, type SubagentRunRecord, SubagentRunScheduler } from "../ext/subagents/runs.ts";
 import { ensureRunStorageDir } from "../ext/subagents/storage.ts";
 import { leaderlessGroup } from "./helpers/leaderless-group.ts";
@@ -42,6 +43,12 @@ import { leaderlessGroup } from "./helpers/leaderless-group.ts";
 vi.mock("../ext/subagents/storage.ts", async (importOriginal) => {
 	const actual = await importOriginal<typeof import("../ext/subagents/storage.ts")>();
 	return { ...actual, ensureRunStorageDir: vi.fn(actual.ensureRunStorageDir) };
+});
+
+// A run's shell can be contained as usual unless a test says it cannot.
+vi.mock("../ext/sandbox/run-containment.ts", async (importOriginal) => {
+	const actual = await importOriginal<typeof import("../ext/sandbox/run-containment.ts")>();
+	return { ...actual, prepareRunContainment: vi.fn(actual.prepareRunContainment) };
 });
 
 function handleOf(result: AdmissionResult): AdmittedSubagentHandle {
@@ -171,6 +178,8 @@ async function setup(
 	};
 	const storageDir = join(agentDir, "bluclawd", "subagents", sessionManager.getSessionId());
 	return {
+		admission,
+		ctx,
 		agentDir,
 		cwd,
 		resume,
@@ -669,6 +678,122 @@ describe("Run admission of a run's own directory, and of its Resume", () => {
 		expect(results.filter((result) => !result.ok).map(errorOf)).toEqual([
 			expect.stringMatching(/another Resume of it already started its generation 1/),
 		]);
+	});
+
+	it("refuses a Resume whose deny rules cannot be read before asking whether its shell can be contained, as a launch does", async () => {
+		const { agentDir, cwd, launch, resume, storageDir } = await setup({
+			firstGenerationCompletes: true,
+			tools: ["read", "bash"],
+		});
+		const role = { name: "looker", description: "Looks.", instructions: "Look.", tools: ["read"] };
+		const completed = await handleOf(await launch({ agent: role, task: "x" })).completion;
+		saveConversation(agentDir, cwd);
+		// As if admitted with a shell, which cannot be contained now, and with deny rules that can no longer be read.
+		const path = join(storageDir, completed.runId, "definition.json");
+		writeFileSync(path, JSON.stringify({ ...JSON.parse(readFileSync(path, "utf8")), tools: ["read", "bash"] }));
+		vi.mocked(prepareRunContainment).mockResolvedValueOnce({ ok: false, reason: "no sandbox here" });
+		writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ permissions: { deny: 42 } }));
+		expect(errorOf(await resume(completed, () => "Go on.").result)).toMatch(/deny rules.*cannot be read/);
+	});
+});
+
+describe("Run admission of a run an earlier instance of its orchestrator's session left behind", () => {
+	it("takes over a run on pi's RPC as its definition and spec are stored, in the pane its orchestrator runs in now", async () => {
+		const first = await setup();
+		const run = handleOf(await first.launch({ agent: "explorer", task: "x" })).record;
+		const runDir = join(first.storageDir, run.runId);
+		const definition = JSON.parse(readFileSync(join(runDir, "definition.json"), "utf8"));
+		const spec: RpcHostSpec = {
+			args: ["--mode", "rpc"],
+			cwd: definition.cwd,
+			agentDir: first.agentDir,
+			prompt: "x",
+			model: { provider: "faux-adm", id: "faux-main", thinkingLevel: "low" },
+			generation: 0,
+			sessionFile: join(runDir, "session.jsonl"),
+			pane: { session: "pi-run", parent: "pi-before" },
+		};
+		prepareRpcHost(runDir, spec);
+
+		const second = await setup({ sameSession: first });
+		expect(second.admission.recover(run, second.ctx)).toBe(true);
+		expect(second.scheduler.getRun(run.runId)?.sessionEpoch).toBe(second.scope.current()?.sessionEpoch);
+		const context = second.scheduler.getContext(run.runId);
+		expect(context).toEqual({
+			rpc: {
+				name: run.name,
+				definition,
+				provider: "faux-adm",
+				modelId: "faux-main",
+				thinkingLevel: "low",
+				tools: definition.tools,
+				task: "",
+				cwd: definition.cwd,
+				runDir,
+				agentDir: first.agentDir,
+				projectTrusted: definition.projectTrusted,
+				sessionFile: spec.sessionFile,
+				parentPane: "pi-orchestrator",
+				recovered: { ...spec, pane: { session: "pi-run", parent: "pi-orchestrator" } },
+				recheck: expect.any(Function),
+			},
+		});
+		// Not yet started, it may still start in the session as it is now.
+		expect(context && "rpc" in context ? context.rpc.recheck() : "no run").toBeUndefined();
+	});
+
+	it("leaves a run on pi's RPC whose stored definition or spec does not hold its generation", async () => {
+		const first = await setup();
+		const run = handleOf(await first.launch({ agent: "explorer", task: "x" })).record;
+		const runDir = join(first.storageDir, run.runId);
+		const second = await setup({ sameSession: first });
+		const spec = (generation: number): RpcHostSpec => ({
+			args: [],
+			cwd: first.cwd,
+			agentDir: first.agentDir,
+			prompt: "x",
+			model: { provider: "faux-adm", id: "faux-main", thinkingLevel: "low" },
+			generation,
+		});
+
+		expect(second.admission.recover(run, second.ctx)).toBe(false);
+		prepareRpcHost(runDir, spec(1));
+		expect(second.admission.recover(run, second.ctx)).toBe(false);
+		prepareRpcHost(runDir, spec(0));
+		rmSync(join(runDir, "definition.json"));
+		expect(second.admission.recover(run, second.ctx)).toBe(false);
+		expect(second.scheduler.getRun(run.runId)).toBeUndefined();
+	});
+
+	it("takes over an open run in tmux from before in its pane, only while its orchestrator runs in tmux", async () => {
+		const first = await setup();
+		const open = handleOf(await first.launch({ agent: "explorer", task: "x" })).record;
+		const legacy: SubagentRunRecord = {
+			...open,
+			runId: "sub_legacy",
+			name: "legacy",
+			backend: undefined,
+			pane: "pi-legacy",
+			transcriptPath: "/runs/legacy/session.jsonl",
+		};
+
+		const outsideTmux = await setup({ sameSession: first, pane: null });
+		outsideTmux.admission.adopt(legacy);
+		expect(outsideTmux.scheduler.getRun(legacy.runId)).toBeUndefined();
+
+		const second = await setup({ sameSession: first });
+		second.admission.adopt({ ...legacy, pane: undefined });
+		expect(second.scheduler.getRun(legacy.runId)).toBeUndefined();
+		second.admission.adopt(legacy);
+		expect(second.scheduler.getRun(legacy.runId)?.sessionEpoch).toBe(second.scope.current()?.sessionEpoch);
+		expect(second.scheduler.getContext(legacy.runId)).toEqual({
+			launch: {
+				runDir: join(first.storageDir, legacy.runId),
+				sessionFile: "/runs/legacy/session.jsonl",
+				parent: "pi-orchestrator",
+				pane: "pi-legacy",
+			},
+		});
 	});
 });
 

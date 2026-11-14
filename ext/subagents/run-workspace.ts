@@ -3,10 +3,12 @@
  * its project roles are looked for; and which of those directories the user trusts.
  */
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { accessSync, constants, realpathSync, statSync } from "node:fs";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import { ProjectTrustStore } from "@earendil-works/pi-coding-agent";
 import { evaluateToolCallDeny } from "../permissions/policy.ts";
+import type { WorkspaceSnapshot } from "./runs.ts";
 
 export interface RunWorkspace {
 	/** The run's directory, real. */
@@ -75,4 +77,30 @@ function repositoryRoot(cwd: string): string | undefined {
 	const git = spawnSync("git", ["rev-parse", "--show-toplevel"], { cwd, encoding: "utf8", timeout: 2000 });
 	const top = git.status === 0 ? git.stdout.trim() : "";
 	return top ? realpathSync(top) : undefined;
+}
+
+export function captureWorkspaceSnapshot(cwd: string): WorkspaceSnapshot {
+	try {
+		const headRes = spawnSync("git", ["rev-parse", "--verify", "HEAD"], {
+			cwd,
+			encoding: "utf8",
+			timeout: 2000,
+		});
+		const headCommit = headRes.status === 0 ? headRes.stdout.trim() || null : null;
+
+		const statusRes = spawnSync("git", ["status", "--porcelain=v1", "-uall"], {
+			cwd,
+			encoding: "utf8",
+			timeout: 2000,
+		});
+		if (statusRes.status !== 0) {
+			return { headCommit, dirty: false, statusDigest: "" };
+		}
+		const rawStatus = statusRes.stdout ?? "";
+		const dirty = rawStatus.trim().length > 0;
+		const statusDigest = dirty ? createHash("sha256").update(rawStatus).digest("hex").slice(0, 16) : "";
+		return { headCommit, dirty, statusDigest };
+	} catch {
+		return { headCommit: null, dirty: false, statusDigest: "" };
+	}
 }
