@@ -11,18 +11,22 @@ import {
 	type AdmissionContext,
 	type AdmissionResult,
 	BATCH_ID_PREFIX,
-	formatRunLabel,
-	type LaunchParams,
 	type LaunchRequest,
 	nameTaken,
 	type RunAdmission,
 } from "./admission.ts";
+import type { LaunchParams } from "./invocation.ts";
 import { GROUP_PROGRESS, NOT_APPROVAL, NOTHING_TO_CLOSE, whileRunning } from "./messages.ts";
 import { sanitizeReportText, truncateUtf8Safe } from "./results.ts";
 import { readRunDefinition, runDefinitionPath, sessionFileEntries } from "./rpc-runs.ts";
 import { checksSummary, commandsRun } from "./run-evidence.ts";
 import { describeWorkspace } from "./run-worktree.ts";
-import { type AdmittedSubagentHandle, isTerminalSubagentStatus, type SubagentRunRecord } from "./runs.ts";
+import {
+	type AdmittedSubagentHandle,
+	formatRunLabel,
+	isTerminalSubagentStatus,
+	type SubagentRunRecord,
+} from "./runs.ts";
 import {
 	getSubagentsRootDir,
 	readRunReports,

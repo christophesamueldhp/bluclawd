@@ -15,7 +15,12 @@ import { endPane, PARENT_ENV, RUN_DIR_ENV, RUN_TASK_ENV, Tmux } from "../../daem
 import { ForegroundActivity } from "../agent-view/self-registration.ts";
 import { SUBAGENT_MESSAGE_CUSTOM_TYPE } from "./messages.ts";
 import { fromRun, runTaskText } from "./run-messages.ts";
-import type { SubagentRunExecuteParams, SubagentRunOutcome } from "./runs.ts";
+import {
+	formatRunLabel,
+	type SubagentRunExecuteParams,
+	type SubagentRunOutcome,
+	type SubagentRunRecord,
+} from "./runs.ts";
 import {
 	newestRunSession,
 	readRunReports,
@@ -35,6 +40,16 @@ export interface RunLaunch {
 	parent: string;
 	/** The pane its pi runs in, which its orchestrator takes over. */
 	pane: string;
+}
+
+/**
+ * Why a run in tmux, from before runs ran on pi's RPC, does not go on (ADR-0010): its work continues in a new run,
+ * admitted afresh, pointed at its history.
+ */
+export function legacyRunRefusal(
+	run: Pick<SubagentRunRecord, "name" | "runId" | "reportPath" | "transcriptPath">,
+): string {
+	return `${formatRunLabel(run)} ran in tmux, before runs ran on pi's RPC, and is not resumed. To continue its work, launch a new subagent and point it at its Report (${run.reportPath ?? "none was stored"}) and transcript (${run.transcriptPath ?? "none was stored"}).`;
 }
 
 /** The run's session file: the one a Resume reopened, else the newest pi wrote in its directory. */

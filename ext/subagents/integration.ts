@@ -31,7 +31,7 @@ import { withCommandPrefix } from "../_shared/command-prefix.ts";
 import { evaluateToolCallDeny } from "../permissions/policy.ts";
 import { prepareRunContainment, runProcesses } from "../sandbox/run-containment.ts";
 import { sandboxStatus, sandboxWraps, wrapExec } from "../sandbox/runtime.ts";
-import { CHAIN_ID_PREFIX, formatRunLabel } from "./admission.ts";
+import { CHAIN_ID_PREFIX } from "./admission.ts";
 import { type ChainResultDetails, chainResultPath } from "./chains.ts";
 import type { RunDirectory } from "./directory.ts";
 import type { ParentScope } from "./parent-scope.ts";
@@ -50,7 +50,7 @@ import {
 	withScratchIndex,
 	worktreeInPlace,
 } from "./run-worktree.ts";
-import { isTerminalSubagentStatus, type SubagentRunRecord } from "./runs.ts";
+import { formatRunLabel, isTerminalSubagentStatus, type SubagentRunRecord } from "./runs.ts";
 import { readRunReports, subagentRunDir, writeAtomicPrivateFile } from "./storage.ts";
 
 /** How long a call waits for another Integration into the same repository, its check included, before it gives up. */

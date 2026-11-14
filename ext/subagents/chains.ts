@@ -14,8 +14,6 @@ import {
 	type AdmissionContext,
 	type AdmissionResult,
 	CHAIN_ID_PREFIX,
-	type ChainStep,
-	formatRunLabel,
 	invalidModelChoice,
 	invalidTaskText,
 	type LaunchRequest,
@@ -32,6 +30,7 @@ import {
 	settleBatch,
 	settledMember,
 } from "./batches.ts";
+import type { ChainStep } from "./invocation.ts";
 import { GROUP_PROGRESS, NOT_APPROVAL, NOTHING_TO_CLOSE, whileRunning } from "./messages.ts";
 import type { ParentScopeChecks } from "./parent-scope.ts";
 import { sanitizeReportText, truncateUtf8Safe } from "./results.ts";
@@ -42,7 +41,7 @@ import {
 	type RunBaseline,
 	releaseUnchangedWorktree,
 } from "./run-worktree.ts";
-import { createRunId, type SubagentRunRecord } from "./runs.ts";
+import { createRunId, formatRunLabel, type SubagentRunRecord } from "./runs.ts";
 import {
 	getSubagentsRootDir,
 	readPersistedRunRecord,

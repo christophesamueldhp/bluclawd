@@ -7,12 +7,12 @@
 
 import { readFileSync } from "node:fs";
 import { parseSessionEntries } from "@earendil-works/pi-coding-agent";
-import { type AdmissionContext, formatRunLabel, type RunAdmission, type RunExecutionContext } from "./admission.ts";
+import type { AdmissionContext, RunAdmission, RunExecutionContext } from "./admission.ts";
 import { textOf } from "./results.ts";
 import { readRpcHostState } from "./rpc-host.ts";
 import { postToRun, whenGiven } from "./run-mailbox.ts";
 import { rpcRunMessageText } from "./run-messages.ts";
-import { isTerminalSubagentStatus, type SubagentRunRecord, type SubagentRunScheduler } from "./runs.ts";
+import { formatRunLabel, isTerminalSubagentStatus, type SubagentRunRecord, type SubagentRunScheduler } from "./runs.ts";
 import { subagentRunDir } from "./storage.ts";
 
 /** The custom entry that shows a run's conversation in the orchestrator's session, for the user only. */

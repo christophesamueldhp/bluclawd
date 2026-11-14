@@ -158,6 +158,11 @@ export function createRunId(): string {
 	return `${AGENT_TASK_ID_PREFIX}${randomUUID()}`;
 }
 
+/** How a run is named in replies: its quoted name and run ID, or its quoted run ID when unnamed. */
+export function formatRunLabel(run: Pick<SubagentRunRecord, "name" | "runId">): string {
+	return run.name ? `"${run.name}" (${run.runId})` : `"${run.runId}"`;
+}
+
 const TERMINAL_STATES = new Set<SubagentLifecycleStatus>(["failed", "interrupted", "closed", "cancelled"]);
 
 /** Whether a final run can take a next generation. */

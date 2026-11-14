@@ -5,13 +5,13 @@
  */
 import { existsSync } from "node:fs";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { formatRunLabel } from "./admission.ts";
 import type { RunDirectory } from "./directory.ts";
 import type { ParentScope } from "./parent-scope.ts";
 import { readRpcHostState, runProcessesRemain } from "./rpc-host.ts";
 import { readRunDefinition, runDefinitionPath } from "./rpc-runs.ts";
 import { within } from "./run-workspace.ts";
 import { cleanWorktree, listChanges, UNLISTED } from "./run-worktree.ts";
+import { formatRunLabel } from "./runs.ts";
 import { subagentRunDir } from "./storage.ts";
 
 const USAGE = "/clean-workspace <subagent name or run ID>";

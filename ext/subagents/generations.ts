@@ -3,7 +3,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import type { SessionMessage, SessionUsage } from "../../daemon/ipc/protocol.ts";
 import { hostAllowed } from "../sandbox/runtime.ts";
 import { createRunAddressing } from "./addressing.ts";
-import { formatRunLabel, type RunExecutionContext } from "./admission.ts";
+import type { RunExecutionContext } from "./admission.ts";
 import type { BatchResultDetails } from "./batches.ts";
 import type { ChainResultDetails } from "./chains.ts";
 import { createRunDirectory } from "./directory.ts";
@@ -21,7 +21,7 @@ import { NETWORK_ACCESS, type RunApprovalAnswer, type RunApprovalRequest } from 
 import { userInstructionNote } from "./run-intervention.ts";
 import { postToRun, whenGiven } from "./run-mailbox.ts";
 import { type RpcRunSender, rpcRunMessageText } from "./run-messages.ts";
-import { isTerminalSubagentStatus, type SubagentRunRecord, SubagentRunScheduler } from "./runs.ts";
+import { formatRunLabel, isTerminalSubagentStatus, type SubagentRunRecord, SubagentRunScheduler } from "./runs.ts";
 import {
 	appendParentRunReference,
 	readRunReports,

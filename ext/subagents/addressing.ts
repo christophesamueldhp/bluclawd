@@ -1,10 +1,4 @@
-import {
-	type AdmissionContext,
-	formatRunLabel,
-	legacyRunRefusal,
-	type ResumeChanges,
-	type RunAdmission,
-} from "./admission.ts";
+import type { AdmissionContext, ResumeChanges, RunAdmission } from "./admission.ts";
 import type { RunDirectory } from "./directory.ts";
 import {
 	formatMessageReceipt,
@@ -14,7 +8,8 @@ import {
 	whileRunning,
 } from "./messages.ts";
 import type { ParentScope } from "./parent-scope.ts";
-import { isTerminalSubagentStatus } from "./runs.ts";
+import { formatRunLabel, isTerminalSubagentStatus } from "./runs.ts";
+import { legacyRunRefusal } from "./tmux-runs.ts";
 
 export interface RunAddressingDeps {
 	directory: Pick<RunDirectory, "find">;

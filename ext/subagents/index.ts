@@ -22,14 +22,7 @@ import { runsInPanes } from "../_shared/settings.ts";
 import { STATUS_KEYS } from "../_shared/status-keys.ts";
 import { publishSubagentPanel } from "../_shared/subagent-panel.ts";
 import { timed } from "../_shared/timing.ts";
-import {
-	createRunAdmission,
-	formatRunLabel,
-	legacyRunRefusal,
-	orchestratorTools,
-	SUBAGENT_TOOL_PARAMETERS,
-	subagentInvocation,
-} from "./admission.ts";
+import { createRunAdmission, orchestratorTools } from "./admission.ts";
 import { runTaskBatch } from "./batches.ts";
 import { type ChainDeps, resumeChains, runChain } from "./chains.ts";
 import { collaborateAsParent } from "./collaboration.ts";
@@ -41,6 +34,7 @@ import {
 import type { RunEntry } from "./directory.ts";
 import { createGenerations, type ParentNotice, reportToParent } from "./generations.ts";
 import { registerIntegration } from "./integration.ts";
+import { SUBAGENT_TOOL_PARAMETERS, subagentInvocation } from "./invocation.ts";
 import {
 	fromRunText,
 	NOTHING_TO_CLOSE,
@@ -59,7 +53,7 @@ import type { SubagentResultDetails } from "./results.ts";
 import { daemonRunSlots } from "./rpc-runs.ts";
 import { createRunIntervention, RUN_CONVERSATION_ENTRY } from "./run-intervention.ts";
 import { messageAsRun } from "./run-messages.ts";
-import { isResumableSubagentStatus, isTerminalSubagentStatus, type SubagentRunRecord } from "./runs.ts";
+import { formatRunLabel, isResumableSubagentStatus, isTerminalSubagentStatus, type SubagentRunRecord } from "./runs.ts";
 import {
 	appendSubagentMessageRecord,
 	extractReferencedRunIdsFromBranch,
@@ -68,7 +62,7 @@ import {
 	reconcileInterruptedRuns,
 } from "./storage.ts";
 import { createAgentTaskSource } from "./task-source.ts";
-import { actAsRun, paneUp, RunReports } from "./tmux-runs.ts";
+import { actAsRun, legacyRunRefusal, paneUp, RunReports } from "./tmux-runs.ts";
 import { createParentScopeViews, runStatus } from "./views.ts";
 import { registerWorkspaceCleanup } from "./workspace-cleanup.ts";
 
