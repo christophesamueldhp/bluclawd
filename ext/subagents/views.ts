@@ -1,7 +1,7 @@
 import type { AgentActivity } from "../../daemon/activity.ts";
 import type { RunDirectory, RunEntry } from "./directory.ts";
 import { inParentScope, type ParentScope } from "./parent-scope.ts";
-import { isTerminalSubagentStatus, type SubagentRunRecord, type SubagentRunScheduler } from "./runs.ts";
+import { isLegacyRun, isTerminalSubagentStatus, type SubagentRunRecord, type SubagentRunScheduler } from "./runs.ts";
 import { readPersistedRunRecord } from "./storage.ts";
 
 const ACTIVITY_LABEL: Record<AgentActivity, string> = {
@@ -15,9 +15,9 @@ const ACTIVITY_LABEL: Record<AgentActivity, string> = {
  * pi's RPC that has not started waits for its turn in the daemon's queue.
  */
 export function runStatus(run: Pick<SubagentRunRecord, "pane" | "status" | "activity" | "backend">): string {
-	if (run.backend === "rpc" && run.status === "starting") return "queued";
+	if (!isLegacyRun(run) && run.status === "starting") return "queued";
 	// One in a pane (ADR-0013) asks the user there.
-	if (run.backend === "rpc" && run.status === "running" && run.activity === "awaiting_input") {
+	if (!isLegacyRun(run) && run.status === "running" && run.activity === "awaiting_input") {
 		return ACTIVITY_LABEL.awaiting_input;
 	}
 	return run.pane && run.status === "running" ? ACTIVITY_LABEL[run.activity ?? "working"] : run.status;

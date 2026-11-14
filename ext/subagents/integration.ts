@@ -50,7 +50,7 @@ import {
 	withScratchIndex,
 	worktreeInPlace,
 } from "./run-worktree.ts";
-import { formatRunLabel, isTerminalSubagentStatus, type SubagentRunRecord } from "./runs.ts";
+import { formatRunLabel, isLegacyRun, isTerminalSubagentStatus, type SubagentRunRecord } from "./runs.ts";
 import { readRunReports, subagentRunDir, writeAtomicPrivateFile } from "./storage.ts";
 
 /** How long a call waits for another Integration into the same repository, its check included, before it gives up. */
@@ -358,7 +358,7 @@ function resolveTarget(deps: IntegrationDeps, scope: ParentScope, name: string):
 	if (record.chain) {
 		return `${label} is a step of chain ${record.chain}: integrate the chain, "${record.chain}", once it has completed.`;
 	}
-	const workspace = record.backend === "rpc" ? runWorkspace(runDir) : undefined;
+	const workspace = isLegacyRun(record) ? undefined : runWorkspace(runDir);
 	if (!workspace) return `${label} has no worktree of its own: it worked in ${record.cwd}, where its changes are.`;
 	if (!deps.onBranch(record.originEntryId)) {
 		return `Not integrated: ${label} was launched from another branch of this session.`;

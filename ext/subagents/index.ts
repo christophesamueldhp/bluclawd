@@ -40,6 +40,7 @@ import {
 	NOTHING_TO_CLOSE,
 	PARENT_MESSAGE_ADDRESS,
 	RUN_PROGRESS,
+	RunReports,
 	SUBAGENT_MESSAGE_CUSTOM_TYPE,
 	SUBAGENT_MESSAGE_PARAMETERS,
 	SUBAGENT_MESSAGE_TOOL,
@@ -53,7 +54,13 @@ import type { SubagentResultDetails } from "./results.ts";
 import { daemonRunSlots } from "./rpc-runs.ts";
 import { createRunIntervention, RUN_CONVERSATION_ENTRY } from "./run-intervention.ts";
 import { messageAsRun } from "./run-messages.ts";
-import { formatRunLabel, isResumableSubagentStatus, isTerminalSubagentStatus, type SubagentRunRecord } from "./runs.ts";
+import {
+	formatRunLabel,
+	isLegacyRun,
+	isResumableSubagentStatus,
+	isTerminalSubagentStatus,
+	type SubagentRunRecord,
+} from "./runs.ts";
 import {
 	appendSubagentMessageRecord,
 	extractReferencedRunIdsFromBranch,
@@ -62,7 +69,7 @@ import {
 	reconcileInterruptedRuns,
 } from "./storage.ts";
 import { createAgentTaskSource } from "./task-source.ts";
-import { actAsRun, legacyRunRefusal, paneUp, RunReports } from "./tmux-runs.ts";
+import { actAsRun, legacyRunRefusal, paneUp } from "./tmux-runs.ts";
 import { createParentScopeViews, runStatus } from "./views.ts";
 import { registerWorkspaceCleanup } from "./workspace-cleanup.ts";
 
@@ -418,7 +425,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 				ctx.ui.notify("That run belongs to an earlier session and can no longer be opened.", "warning");
 				return undefined;
 			}
-			if (run.backend === "rpc") return runPane() ? openPaneRun(run, ctx) : openRpcRun(run, ctx);
+			if (!isLegacyRun(run)) return runPane() ? openPaneRun(run, ctx) : openRpcRun(run, ctx);
 			// A run in tmux from before runs ran on pi's RPC: its pane while it is open, else its history only.
 			if (!run.pane || isTerminalSubagentStatus(run.status)) {
 				pi.appendEntry(RUN_CONVERSATION_ENTRY, { lines: intervention.conversation(run) });
@@ -567,7 +574,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			// to its end; one that never started queues again, and starts only if this session may still start it. A
 			// stop requested before stays requested, and a run off the branch is stopped, as tree navigation would.
 			for (const run of listPersistedRunRecords(agentDir, sessionId)) {
-				if (run.backend !== "rpc" || isTerminalSubagentStatus(run.status) || scheduler.getRun(run.runId)) continue;
+				if (isLegacyRun(run) || isTerminalSubagentStatus(run.status) || scheduler.getRun(run.runId)) continue;
 				if (!admission.recover(run, ctx)) continue;
 				if (run.status === "stopping") {
 					scheduler.cancelRun(run.runId, run.stopSource ?? "user", run.stopReason ?? "Subagent run cancelled");
@@ -856,7 +863,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 
 		const describeProgress = ({ record: run }: RunEntry, now: number) =>
 			[
-				`${run.name ?? run.runId} (${run.agentName}, ${run.runId}): ${runStatus(run)}${run.backend === "rpc" ? "" : ", in tmux, from before runs ran on pi's RPC: stop it once its work is done"}`,
+				`${run.name ?? run.runId} (${run.agentName}, ${run.runId}): ${runStatus(run)}${isLegacyRun(run) ? ", in tmux, from before runs ran on pi's RPC: stop it once its work is done" : ""}`,
 				`  task: ${run.taskSummary}`,
 				`  elapsed: ${formatRunElapsed(run, now)}`,
 			].join("\n");
@@ -915,7 +922,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			const label = formatRunLabel(run);
 			scheduler.cancelRun(run.runId, "model", reason);
 			const final = await untilFinal(run.runId, signal);
-			if (run.backend !== "rpc" && final?.status === "closed") {
+			if (isLegacyRun(run) && final?.status === "closed") {
 				return { text: `Stopped ${label}: its pi in tmux ended. ${legacyRunRefusal(final)}`, stopped: true };
 			}
 			if (final?.status === "cancelled") {

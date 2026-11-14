@@ -13,8 +13,8 @@ import { OrchestratorClient } from "../../daemon/orchestrator-client.ts";
 import { textOf } from "../../daemon/session-state.ts";
 import { endPane, PARENT_ENV, RUN_DIR_ENV, RUN_TASK_ENV, Tmux } from "../../daemon/tmux.ts";
 import { ForegroundActivity } from "../agent-view/self-registration.ts";
-import { SUBAGENT_MESSAGE_CUSTOM_TYPE } from "./messages.ts";
-import { fromRun, runTaskText } from "./run-messages.ts";
+import { type RunReport, type RunReports, runTaskText, SUBAGENT_MESSAGE_CUSTOM_TYPE } from "./messages.ts";
+import { fromRun } from "./run-messages.ts";
 import {
 	formatRunLabel,
 	type SubagentRunExecuteParams,
@@ -94,8 +94,6 @@ export function paneUp(tmux: Pick<Tmux, "hasSession">, pane: string): boolean {
 /** How long a send waits for a run's pi to register: past one heartbeat that timed out, and the next. */
 const REGISTER_WAIT_MS = 10_000;
 
-type RunReport = Extract<SessionMessage, { kind: "report" }>;
-
 /** A Report its run stored, as it would have come from its pane. */
 export const storedReport = (pane: string, stored: StoredRunReport): RunReport => ({
 	type: "session_message",
@@ -103,56 +101,6 @@ export const storedReport = (pane: string, stored: StoredRunReport): RunReport =
 	from: pane,
 	...stored,
 });
-
-/** Where the Reports of the orchestrator's runs go: to the foreground launch waiting for one, else to the run. */
-export class RunReports {
-	/** Each open run's message handler, by its tmux session. */
-	private readonly runs = new Map<string, (message: SessionMessage) => void>();
-	/** Foreground launches waiting for a run's next Report, by run ID. */
-	private readonly waiting = new Map<string, (report: RunReport | undefined) => void>();
-
-	/** Hands the messages from `pane` to `onMessage` until the returned function is called. */
-	listen(pane: string, onMessage: (message: SessionMessage) => void): () => void {
-		this.runs.set(pane, onMessage);
-		return () => {
-			if (this.runs.get(pane) === onMessage) this.runs.delete(pane);
-		};
-	}
-
-	/** The run's next Report; undefined once `signal` aborts first. */
-	next(runId: string, signal?: AbortSignal): Promise<RunReport | undefined> {
-		return new Promise((resolve) => {
-			const done = (report: RunReport | undefined) => {
-				this.waiting.delete(runId);
-				signal?.removeEventListener("abort", aborted);
-				resolve(report);
-			};
-			const aborted = () => done(undefined);
-			if (signal?.aborted) return done(undefined);
-			signal?.addEventListener("abort", aborted, { once: true });
-			this.waiting.set(runId, done);
-		});
-	}
-
-	/** Whether a call waits for the run's next Report: it is told of the run's end as well. */
-	awaited(runId: string): boolean {
-		return this.waiting.has(runId);
-	}
-
-	/** Gives a run's Report to the launch waiting for it; false when none waits. */
-	take(runId: string, report: RunReport): boolean {
-		const waiter = this.waiting.get(runId);
-		waiter?.(report);
-		return waiter !== undefined;
-	}
-
-	/** A Report or state from another session; false when it is neither, or from no open run. */
-	receive(message: SessionMessage): boolean {
-		const run = message.kind === "report" || message.kind === "activity" ? this.runs.get(message.from) : undefined;
-		run?.(message);
-		return run !== undefined;
-	}
-}
 
 export interface TmuxRunDeps {
 	tmux: Pick<Tmux, "end" | "hasSession" | "shown">;

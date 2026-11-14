@@ -11,6 +11,9 @@ import {
 	capReport,
 	fromRunText,
 	PARENT_MESSAGE_ADDRESS,
+	type RpcRunSender,
+	type RunReports,
+	rpcRunMessageText,
 	SUBAGENT_MESSAGE_CUSTOM_TYPE,
 	type SubagentMessageBus,
 } from "./messages.ts";
@@ -20,7 +23,6 @@ import { executeRpcRun, type RunSlots } from "./rpc-runs.ts";
 import { NETWORK_ACCESS, type RunApprovalAnswer, type RunApprovalRequest } from "./run-approvals.ts";
 import { userInstructionNote } from "./run-intervention.ts";
 import { postToRun, whenGiven } from "./run-mailbox.ts";
-import { type RpcRunSender, rpcRunMessageText } from "./run-messages.ts";
 import { formatRunLabel, isTerminalSubagentStatus, type SubagentRunRecord, SubagentRunScheduler } from "./runs.ts";
 import {
 	appendParentRunReference,
@@ -32,7 +34,7 @@ import {
 	writeFullSubagentReport,
 	writePersistedRunRecord,
 } from "./storage.ts";
-import { executeTmuxRun, type RunReports, sendToRun, storedReport, type TmuxRunDeps } from "./tmux-runs.ts";
+import { executeTmuxRun, sendToRun, storedReport, type TmuxRunDeps } from "./tmux-runs.ts";
 
 /** How long a message's sender waits for the run's host to give it to its pi; a queued run's waits in its inbox. */
 const GIVE_WAIT_MS = 5000;

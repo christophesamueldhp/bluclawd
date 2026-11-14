@@ -40,6 +40,7 @@ import { type LaunchParams, subagentInvocation } from "../ext/subagents/invocati
 import { SubagentMessageBus } from "../ext/subagents/messages.ts";
 import { createParentScope } from "../ext/subagents/parent-scope.ts";
 import type { RpcHostSpec } from "../ext/subagents/rpc-host.ts";
+import { runKind } from "../ext/subagents/rpc-runs.ts";
 import { type AdmittedSubagentHandle, type SubagentRunRecord, SubagentRunScheduler } from "../ext/subagents/runs.ts";
 import { ensureRunStorageDir } from "../ext/subagents/storage.ts";
 import { leaderlessGroup } from "./helpers/leaderless-group.ts";
@@ -93,6 +94,8 @@ async function setup(
 		sameSession?: { cwd: string; agentDir: string; sessionManager: SessionManager };
 		// The daemon that queues runs on pi's RPC cannot be started.
 		queueDown?: boolean;
+		// The orchestrator's pane while its runs run in panes of their own; none by default, so they run on pi's RPC.
+		runPane?: () => string | undefined;
 	} = {},
 ) {
 	// The faux provider is this session's own; no run's pi starts to need it.
@@ -149,7 +152,7 @@ async function setup(
 		parentThinkingLevel: () => "low",
 		scope,
 		pane: () => (options.pane === null ? undefined : (options.pane ?? "pi-orchestrator")),
-		runPane: () => undefined,
+		runPane: options.runPane ?? (() => undefined),
 		tools: () => options.tools ?? [],
 		registeredTools: () => [],
 		ensureQueue: async () => !options.queueDown,
@@ -208,6 +211,20 @@ function writeRole(agentDir: string, name: string, extra: string[] = []) {
 		["---", `name: ${name}`, `description: Role ${name}.`, ...extra, "---", "Do the assigned work."].join("\n"),
 	);
 }
+
+/** The saved session a completed first generation leaves: one message, which a Resume goes on from. */
+const saveConversation = (agentDir: string, cwd: string) => {
+	const at = new Date().toISOString();
+	writeFileSync(
+		join(agentDir, "transcript.jsonl"),
+		[
+			{ type: "session", version: 3, id: "child", timestamp: at, cwd },
+			{ type: "message", id: "m1", parentId: null, timestamp: at, message: { role: "user", content: "x" } },
+		]
+			.map((entry) => JSON.stringify(entry))
+			.join("\n"),
+	);
+};
 
 describe("Run admission", () => {
 	it("admits a saved role with the inherited model and the parent's thinking level, named after the role", async () => {
@@ -610,20 +627,6 @@ describe("Run admission of a run's own directory, and of its Resume", () => {
 		await check();
 	});
 
-	/** The saved session a completed first generation leaves: one message, which a Resume goes on from. */
-	const saveConversation = (agentDir: string, cwd: string) => {
-		const at = new Date().toISOString();
-		writeFileSync(
-			join(agentDir, "transcript.jsonl"),
-			[
-				{ type: "session", version: 3, id: "child", timestamp: at, cwd },
-				{ type: "message", id: "m1", parentId: null, timestamp: at, message: { role: "user", content: "x" } },
-			]
-				.map((entry) => JSON.stringify(entry))
-				.join("\n"),
-		);
-	};
-
 	it("refuses to resume a run whose originating entry left the branch, or whose session was replaced", async () => {
 		const { agentDir, cwd, launch, resume, sessionManager, invalidateSession } = await setup({
 			firstGenerationCompletes: true,
@@ -796,6 +799,73 @@ describe("Run admission of a run an earlier instance of its orchestrator's sessi
 				pane: "pi-legacy",
 			},
 		});
+	});
+});
+
+describe("A run's kind", () => {
+	/** A spec as a generation of a run on pi's RPC was launched with, stored in `runDir`. */
+	const storeSpec = (runDir: string, pane?: RpcHostSpec["pane"]) =>
+		storeLaunch(runDir, {
+			args: [],
+			cwd: runDir,
+			agentDir: runDir,
+			prompt: "x",
+			model: { provider: "faux-adm", id: "faux-main", thinkingLevel: "low" },
+			generation: 0,
+			...(pane ? { pane } : {}),
+		});
+
+	it("is the kind Admission launched or resumed its latest generation as: a Resume decides it again", async () => {
+		let runPane: string | undefined = "pi-orchestrator";
+		const { agentDir, cwd, launch, resume, storageDir } = await setup({
+			firstGenerationCompletes: true,
+			runPane: () => runPane,
+		});
+		const inPane = await handleOf(await launch({ agent: "explorer", task: "x" })).completion;
+		const paneDir = join(storageDir, inPane.runId);
+		expect(runKind(inPane, paneDir)).toBe("pane");
+		runPane = undefined;
+		const onRpc = await handleOf(await launch({ agent: "explorer", task: "y" })).completion;
+		const rpcDir = join(storageDir, onRpc.runId);
+		expect(runKind(onRpc, rpcDir)).toBe("rpc");
+
+		saveConversation(agentDir, cwd);
+		// The Pane run resumed from no pane is an RPC run, whatever its first generation's spec said.
+		storeSpec(paneDir, { session: "pi-run", parent: "pi-orchestrator" });
+		const toRpc = handleOf(await resume(inPane, () => "Go on.").result).record;
+		expect(toRpc.generation).toBe(1);
+		expect(runKind(toRpc, paneDir)).toBe("rpc");
+		runPane = "pi-orchestrator";
+		const toPane = handleOf(await resume(onRpc, () => "Go on.").result).record;
+		expect(runKind(toPane, rpcDir)).toBe("pane");
+	});
+
+	it("is read from a record stored before Admission wrote it, which is not rewritten", () => {
+		const runDir = makeTempDir("old-run");
+		// A run on pi's RPC with no spec stored, or one that gave it no pane, is an RPC run.
+		expect(runKind({ backend: "rpc", generation: 0 }, runDir)).toBe("rpc");
+		admitGeneration(runDir, 0, {
+			name: "explorer",
+			description: "Reads.",
+			instructions: "Look around.",
+			source: "bundled",
+			model: "inherit",
+			tools: ["read"],
+			deny: [],
+			cwd: runDir,
+			projectTrusted: false,
+			admitted: { provider: "faux-adm", modelId: "faux-main", thinkingLevel: "low" },
+		});
+		expect(runKind({ backend: "rpc", generation: 0 }, runDir)).toBe("rpc");
+		storeSpec(runDir);
+		expect(runKind({ backend: "rpc", generation: 0 }, runDir)).toBe("rpc");
+		// One whose spec gave it a pane is a Pane run.
+		storeSpec(runDir, { session: "pi-run", parent: "pi-orchestrator" });
+		expect(runKind({ backend: "rpc", generation: 0 }, runDir)).toBe("pane");
+		// One with no backend is a Legacy run, in tmux or from before runs were pis of their own, whatever is stored.
+		const inTmux: Pick<SubagentRunRecord, "backend" | "generation" | "pane"> = { pane: "pi-legacy", generation: 0 };
+		expect(runKind(inTmux, runDir)).toBe("legacy");
+		expect(runKind({ generation: 0 }, runDir)).toBe("legacy");
 	});
 });
 

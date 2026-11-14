@@ -32,7 +32,13 @@ import {
 } from "../sandbox/run-containment.ts";
 import type { AgentDefinition } from "./definitions.ts";
 import { type GenerationState, generationState, movePane, runDefinitionPath, storeLaunch } from "./generation-state.ts";
-import { NOTHING_TO_CLOSE, SUBAGENT_MESSAGE_TOOL } from "./messages.ts";
+import {
+	NOTHING_TO_CLOSE,
+	type RunReports,
+	rpcRunMessageText,
+	runTaskText,
+	SUBAGENT_MESSAGE_TOOL,
+} from "./messages.ts";
 import { truncateUtf8Safe } from "./results.ts";
 import { type RpcDenyRules, RUN_DEFINITION_FLAG, WRITE_TOOLS } from "./rpc-child.ts";
 import { prepareRpcHost, type RpcHostSpec, STOP_GRACE_MS, stopRpcHost } from "./rpc-host.ts";
@@ -54,7 +60,6 @@ import {
 	sealedRunInbox,
 	sealRunInbox,
 } from "./run-mailbox.ts";
-import { rpcRunMessageText, runTaskText } from "./run-messages.ts";
 import { runShellTmp } from "./run-shell.ts";
 import {
 	describeWorkspace,
@@ -64,9 +69,15 @@ import {
 	releaseUnchangedWorktree,
 	workspaceInstructions,
 } from "./run-worktree.ts";
-import type { RunRuntimeOutcome, SubagentRunExecuteParams, SubagentRunOutcome } from "./runs.ts";
+import {
+	isLegacyRun,
+	type RunKind,
+	type RunRuntimeOutcome,
+	type SubagentRunExecuteParams,
+	type SubagentRunOutcome,
+	type SubagentRunRecord,
+} from "./runs.ts";
 import { readRunReports, storedRunReportTextPath } from "./storage.ts";
-import type { RunReports } from "./tmux-runs.ts";
 import { sessionUsage } from "./usage.ts";
 
 /**
@@ -151,6 +162,18 @@ export interface RunDefinition extends AgentDefinition {
 	workspace?: IsolatedWorkspace;
 	/** A run given `bash`: what its commands' sandbox is named after and kept out of (run-shell.ts). */
 	shell?: { runId: string; runDir: string };
+}
+
+/**
+ * Which kind run `run`, kept in `runDir`, is: the kind of its latest generation (GLOSSARY). A record from before
+ * Admission wrote the kind is not rewritten: one with no `backend` is a Legacy run, and one on pi's RPC is a Pane run
+ * when the spec its latest generation was launched with gave it a pane, else an RPC run.
+ */
+export function runKind(run: Pick<SubagentRunRecord, "backend" | "kind" | "generation">, runDir: string): RunKind {
+	if (isLegacyRun(run)) return "legacy";
+	if (run.kind) return run.kind;
+	const latest = generationState(runDir, run.generation);
+	return latest.at !== "unadmitted" && latest.launch?.pane ? "pane" : "rpc";
 }
 
 /**

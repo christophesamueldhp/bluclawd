@@ -17,7 +17,7 @@ import {
 } from "./admission.ts";
 import { generationDefinition } from "./generation-state.ts";
 import type { LaunchParams } from "./invocation.ts";
-import { GROUP_PROGRESS, NOT_APPROVAL, NOTHING_TO_CLOSE, whileRunning } from "./messages.ts";
+import { GROUP_PROGRESS, NOT_APPROVAL, NOTHING_TO_CLOSE, type RunReports, whileRunning } from "./messages.ts";
 import { sanitizeReportText, truncateUtf8Safe } from "./results.ts";
 import { sessionFileEntries } from "./rpc-runs.ts";
 import { checksSummary, commandsRun } from "./run-evidence.ts";
@@ -36,7 +36,6 @@ import {
 	subagentRunDir,
 	writeAtomicPrivateFile,
 } from "./storage.ts";
-import type { RunReports } from "./tmux-runs.ts";
 import { runStatus } from "./views.ts";
 
 /** How much of the orchestrator's context a settled batch takes, whatever its size. */
