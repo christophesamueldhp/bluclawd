@@ -489,6 +489,16 @@ describe("Run admission", () => {
 		expect(built).toBe(false);
 	});
 
+	// A chain's later step is admitted at its turn through this same launch, under the rules as they are then.
+	it("refuses to launch a role denied since an earlier launch of it", async () => {
+		const { agentDir, launch } = await setup();
+		expect((await launch({ agent: "explorer", name: "a", task: "Look first." })).ok).toBe(true);
+		writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ permissions: { deny: ["Subagent(explorer)"] } }));
+		expect(errorOf(await launch({ agent: "explorer", name: "b", task: "Look next." }))).toMatch(
+			/Subagent\(explorer\)/,
+		);
+	});
+
 	it("refuses to resume a run whose role is now denied, before taking a message number", async () => {
 		const { agentDir, launch, resume } = await setup({ firstGenerationCompletes: true });
 		const completed = await handleOf(await launch({ agent: "explorer", task: "Build v1." })).completion;

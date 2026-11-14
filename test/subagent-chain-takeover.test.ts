@@ -16,6 +16,7 @@ import {
 	worktreePath,
 } from "../ext/subagents/run-worktree.ts";
 import { createRunId, type SubagentRunRecord } from "../ext/subagents/runs.ts";
+import { CallsUnderWay } from "../ext/subagents/settling.ts";
 import {
 	getSubagentsRootDir,
 	storeRunReport,
@@ -167,7 +168,7 @@ function takeOver(
 				onBranch: () => true,
 			},
 			context: () => ({}) as AdmissionContext,
-			live: new Map(),
+			calls: new CallsUnderWay(),
 			notify: (_first, { parentText }) => resolve({ tasks, aggregate: parentText }),
 		};
 		resumeChains(deps, SESSION);

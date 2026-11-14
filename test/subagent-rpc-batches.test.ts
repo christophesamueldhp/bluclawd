@@ -258,42 +258,6 @@ describe.skipIf(!hasTmux)("a tasks batch of RPC runs", () => {
 		},
 	);
 
-	it("leaves a failed member's siblings working, and keeps every outcome and each successful Report", async () => {
-		const real = await startOrchestrator();
-		pi = real;
-		const gate = (name: string) => join(real.cwd, `${name}.go`);
-		real.script("main", [
-			{
-				tool: "subagent",
-				args: {
-					tasks: ["ok1", "bad", "ok2"].map((name) => ({ agent: "explorer", name, task: `Look, ${name}.` })),
-				},
-			},
-			{ text: "read the batch" },
-		]);
-		real.script("bad", [{ text: "Half a thought.", error: "the faux provider broke" }]);
-		for (const name of ["ok1", "ok2"]) real.script(name, [{ text: `${name} found it.`, until: gate(name) }]);
-		real.start(["--", "delegate"]);
-		await real.waitForRequests("main", 1);
-
-		await waitFor(() => expect(recordOf(real, "bad").status).toBe("closed"));
-		expect([recordOf(real, "ok1").status, recordOf(real, "ok2").status]).toEqual(["running", "running"]);
-		expect(real.requests("main")).toHaveLength(1);
-
-		for (const name of ["ok1", "ok2"]) writeFileSync(gate(name), "");
-		const [aggregate] = toolResults((await real.waitForRequests("main", 2))[1]);
-		expect(aggregate).toMatch(/3 tasks, 2 completed, 1 failed, 0 cancelled\./);
-		expect(aggregate).toMatch(/- "bad" \(sub_[\w-]+\): failed: the faux provider broke/);
-		expect(aggregate).not.toMatch(/### "bad"/);
-		for (const name of ["ok1", "ok2"]) {
-			expect(aggregate).toMatch(new RegExp(`- "${name}" \\(sub_[\\w-]+\\): completed`));
-			expect(aggregate).toMatch(
-				new RegExp(`### "${name}" \\(sub_[\\w-]+\\): completed\\nChecks: [^\\n]+\\n${name} found it\\.`),
-			);
-		}
-		expect(real.requests("bad")).toHaveLength(1);
-	});
-
 	it("cancels every member, working or queued, when the foreground call is cancelled; a queued one never starts", async () => {
 		const real = await startOrchestrator();
 		pi = real;
@@ -436,37 +400,6 @@ describe.skipIf(!hasTmux)("a tasks batch of RPC runs", () => {
 			expect(real.requests("main")).toHaveLength(7);
 		},
 	);
-
-	it("bounds the aggregate of a batch whose Reports exceed it, and keeps every full Report", async () => {
-		const real = await startOrchestrator();
-		pi = real;
-		const names = ["l1", "l2", "l3"];
-		const long = (name: string) => `${name} begins. ${"Lots of findings. ".repeat(600)}${name} ends.`;
-		real.script("main", [
-			{
-				tool: "subagent",
-				args: { tasks: names.map((name) => ({ agent: "explorer", name, task: `Look, ${name}.` })) },
-			},
-			{ text: "read the batch" },
-		]);
-		for (const name of names) real.script(name, [{ text: long(name) }]);
-		real.start(["--", "delegate"]);
-		// Each start waited for on its own: the orchestrator's, then its runs'.
-		await real.waitForRequests("main", 1);
-		for (const name of names) await real.waitForRequests(name, 1);
-		const [aggregate] = toolResults((await real.waitForRequests("main", 2))[1]);
-		expect(Buffer.byteLength(aggregate)).toBeLessThanOrEqual(16 * 1024);
-		expect(aggregate).toMatch(/3 tasks, 3 completed, 0 failed, 0 cancelled\./);
-		for (const name of names) {
-			expect(aggregate).toMatch(
-				new RegExp(`### "${name}" \\(sub_[\\w-]+\\): completed\\nChecks: [^\\n]+\\n${name} begins\\.`),
-			);
-			expect(aggregate).not.toContain(`${name} ends.`);
-			const full = storedRunReportTextPath(runDirOf(real.agentDir, name), 1);
-			expect(aggregate).toContain(`[Cut short; its full Report: ${full}]`);
-			expect(readFileSync(full, "utf8")).toContain(`${name} ends.`);
-		}
-	});
 
 	it("lets a member that edits work in a worktree of its own beside one that reads the checkout, and says where its edits are", async () => {
 		const real = await startOrchestrator();

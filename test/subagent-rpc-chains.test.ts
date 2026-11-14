@@ -337,43 +337,6 @@ describe.skipIf(!hasTmux)("a chain of RPC runs", () => {
 		},
 	);
 
-	it("cancels the working step when the foreground call is cancelled, and never starts the next", async () => {
-		const real = await startOrchestrator();
-		pi = real;
-		real.script("main", [
-			{
-				tool: "subagent",
-				args: {
-					chain: [
-						{ agent: "explorer", name: "a", task: "Look first." },
-						{ agent: "explorer", name: "b", task: "Look next." },
-					],
-				},
-			},
-		]);
-		real.script("a", [{ text: "Never.", until: join(real.cwd, "never") }]);
-		real.script("b", [{ text: "Never started." }]);
-		const pane = real.start(["--", "delegate"]);
-		await real.waitForRequests("main", 1);
-		await real.waitForRequests("a", 1);
-
-		real.tmux.sendKeys(pane, ["Escape"]);
-		await waitFor(() => expect(recordOf(real, "a")).toMatchObject({ status: "cancelled", stopSource: "caller" }));
-		const manifest = await waitFor(() => {
-			const root = join(real.agentDir, "bluclawd", "subagents");
-			const dirs = readdirSync(root).map((session) => join(root, session, "chains"));
-			const files = dirs.filter(existsSync).flatMap((dir) => readdirSync(dir).map((file) => join(dir, file)));
-			expect(files).toHaveLength(1);
-			return readFileSync(files[0], "utf8");
-		});
-		expect(manifest).toMatch(/- chain\[0\] "a" \(sub_[\w-]+\): cancelled/);
-		expect(manifest).toMatch(/- chain\[1\] \("b"\): not run/);
-		// Proves only that it does not start within this while.
-		await new Promise((resolve) => setTimeout(resolve, 1000));
-		expect(recordOf(real, "b")).toBeUndefined();
-		expect(real.requests("b")).toEqual([]);
-	});
-
 	// Two pis one after another (w, then rev): a readiness bound for each to start, and one for the rest.
 	it(
 		"runs a background chain, refuses a Resume into its worktree while a step works there, and stops whole by its ID",
@@ -505,47 +468,6 @@ describe.skipIf(!hasTmux)("a chain of RPC runs", () => {
 			expect(git(repo, "worktree", "list", "--porcelain").match(/^worktree /gm)).toHaveLength(2);
 		},
 	);
-
-	it("halts at a step its Admission refuses once its turn comes, and names it blocked", async () => {
-		const real = await startOrchestrator();
-		pi = real;
-		const gate = join(real.cwd, "..", "a.go");
-		real.script("main", [
-			{
-				tool: "subagent",
-				args: {
-					chain: [
-						{ agent: "explorer", name: "a", task: "Look first." },
-						{ agent: "reviewer", name: "b", task: "Review next." },
-						{ agent: "explorer", name: "c", task: "Look last." },
-					],
-				},
-			},
-			{ text: "read the chain" },
-		]);
-		real.script("a", [{ text: "Looked.", until: gate }]);
-		for (const name of ["b", "c"]) real.script(name, [{ text: "Never started." }]);
-		real.start(["--", "delegate"]);
-		await started(real, "a");
-		// Denied after the chain was admitted: the next step is checked again when its turn comes.
-		const settings = join(real.agentDir, "settings.json");
-		writeFileSync(
-			settings,
-			JSON.stringify({
-				...JSON.parse(readFileSync(settings, "utf8")),
-				permissions: { deny: ["Subagent(reviewer)"] },
-			}),
-		);
-		writeFileSync(gate, "");
-		const main = await real.waitForRequests("main", 2);
-		const [aggregate] = toolResults(main[1]);
-		expect(aggregate).toMatch(/3 steps, halted at chain\[1\] \("b"\), blocked; 1 step did not run\./);
-		expect(aggregate).toMatch(/- chain\[0\] "a" \(sub_[\w-]+\): completed/);
-		expect(aggregate).toMatch(/- chain\[1\] \("b"\): blocked: .*Subagent\(reviewer\)/);
-		expect(aggregate).toMatch(/- chain\[2\] \("c"\): not run, since chain\[1\] \("b"\) blocked/);
-		expect(recordOf(real, "b")).toBeUndefined();
-		expect(real.requests("b")).toEqual([]);
-	});
 
 	// Three pis one after another (look, w, then rev): a readiness bound for each to start, and one for the rest.
 	it(

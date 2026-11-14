@@ -32,25 +32,21 @@ import {
 	formatAgentRoutingDescriptions,
 } from "./definitions.ts";
 import type { RunEntry } from "./directory.ts";
-import { createGenerations, type ParentNotice, reportToParent } from "./generations.ts";
+import { createGenerations, type ParentNotice } from "./generations.ts";
 import { registerIntegration } from "./integration.ts";
 import { SUBAGENT_TOOL_PARAMETERS, subagentInvocation } from "./invocation.ts";
 import {
 	fromRunText,
-	NOTHING_TO_CLOSE,
 	PARENT_MESSAGE_ADDRESS,
-	RUN_PROGRESS,
 	RunReports,
 	SUBAGENT_MESSAGE_CUSTOM_TYPE,
 	SUBAGENT_MESSAGE_PARAMETERS,
 	SUBAGENT_MESSAGE_TOOL,
 	SubagentMessageBus,
-	whileRunning,
 } from "./messages.ts";
 import { describeSubagentModels } from "./models.ts";
 import { createPanel, formatRunElapsed, SUBAGENT_PANEL_WIDGET } from "./panel.ts";
 import { createParentScope, inParentScope, type ParentInboxItem } from "./parent-scope.ts";
-import type { SubagentResultDetails } from "./results.ts";
 import { daemonRunSlots } from "./rpc-runs.ts";
 import { createRunIntervention, RUN_CONVERSATION_ENTRY } from "./run-intervention.ts";
 import { messageAsRun } from "./run-messages.ts";
@@ -61,6 +57,7 @@ import {
 	isTerminalSubagentStatus,
 	type SubagentRunRecord,
 } from "./runs.ts";
+import { CallsUnderWay, settleRun, whileCalled } from "./settling.ts";
 import {
 	appendSubagentMessageRecord,
 	extractReferencedRunIdsFromBranch,
@@ -146,8 +143,8 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			if (pane) messageAsRun(pi, parent, pane, run.closed);
 		}
 		const reports = new RunReports();
-		/** The chains under way, by ID, which subagent_stop stops before their next step. */
-		const chains = new Map<string, AbortController>();
+		/** The batches and chains under way, by ID: subagent_stop stops a chain before its next step. */
+		const calls = new CallsUnderWay();
 		/** Aborted on a reload, which hands this instance's open runs to the next one. */
 		const handOff = new AbortController();
 		// What the daemon held for this session meanwhile may be lost: its runs' Reports are read from disk.
@@ -354,7 +351,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			cancel: (runId, reason) => scheduler.cancelRun(runId, "caller", reason),
 			scope: parentScope,
 			context: () => parentScope.context(),
-			live: chains,
+			calls,
 			notify: (first, notice) => parentScope.notify(first, notice),
 		};
 
@@ -766,7 +763,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 				handOff.abort();
 			} else {
 				// The session ends: no later step of its chains starts, whoever reopens it.
-				for (const stop of chains.values()) stop.abort();
+				calls.stopAll();
 				parentScope.shutdown();
 				await scheduler.waitForSettled();
 			}
@@ -902,14 +899,6 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			},
 		});
 
-		/** Settles with the run's record once it is final; undefined once `signal` aborts first. */
-		const untilFinal = (runId: string, signal: AbortSignal | undefined) =>
-			new Promise<Readonly<SubagentRunRecord> | undefined>((resolve) => {
-				const final = scheduler.whenFinal(runId);
-				if (!final || signal?.aborted) return resolve(undefined);
-				signal?.addEventListener("abort", () => resolve(undefined), { once: true });
-				void final.then(resolve);
-			});
 		/**
 		 * Stops a run, queued or working, and waits while the call does until nothing of it runs: a stop asked for is not
 		 * told as done. A run on pi's RPC is cancelled; one in tmux from before has its pi ended.
@@ -921,7 +910,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 		) => {
 			const label = formatRunLabel(run);
 			scheduler.cancelRun(run.runId, "model", reason);
-			const final = await untilFinal(run.runId, signal);
+			const final = await whileCalled(scheduler.whenFinal(run.runId), signal);
 			if (isLegacyRun(run) && final?.status === "closed") {
 				return { text: `Stopped ${label}: its pi in tmux ended. ${legacyRunRefusal(final)}`, stopped: true };
 			}
@@ -964,14 +953,14 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 						: run
 							? []
 							: views.open().filter(({ record }) => record.batch === target || record.chain === target);
-				const chain = run ? undefined : chains.get(target);
+				const chain = !run && calls.kind(target) === "chain";
 				if (target === "all" || members.length > 0 || chain) {
 					const kind = target === "all" ? undefined : chain ? "chain" : "batch";
 					// Each member's stop is asked first, for its reason; then a chain starts no further step.
 					const stopping = members.map(({ record }) =>
 						stopRun(record, signal, kind ? `Its ${kind} ${target} was stopped` : undefined),
 					);
-					chain?.abort();
+					if (chain) calls.stop(target);
 					const stopped = await Promise.all(stopping);
 					const text = stopped.length
 						? stopped.map((result) => result.text).join("\n")
@@ -1077,6 +1066,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 							reports,
 							getRun: (runId) => scheduler.getRun(runId),
 							notify: (member, notice) => parentScope.notify(member, notice),
+							calls,
 						},
 						invocation.tasks,
 						{ toolCallId, parentTurnId, signal },
@@ -1092,67 +1082,16 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 					};
 				}
 
-				const { handle } = admitRes;
-
-				if (params.background !== true) {
-					const name = handle.record.name ?? handle.runId;
-					// Waits until the run reports, the call is aborted, or the run ends first.
-					const ended = new AbortController();
-					void scheduler.whenFinal(handle.runId)?.then(() => ended.abort());
-					const report = await reports.next(
-						handle.runId,
-						signal ? AbortSignal.any([signal, ended.signal]) : ended.signal,
-					);
-					const run = scheduler.getRun(handle.runId);
-					const details = { runId: handle.runId, name, pane: run?.pane, agentName: handle.record.agentName };
-					if (!report)
-						return {
-							content: [
-								{
-									type: "text",
-									text:
-										run && isTerminalSubagentStatus(run.status)
-											? `${name} ended before it reported: ${run.errorMessage ?? run.stopReason ?? run.status}.`
-											: `Cancelling ${name}: its work was asked to stop, and it is ${run?.status ?? "stopping"}. Its session and Reports are kept; only subagent_resume continues it.`,
-								},
-							],
-							details,
-							isError: true,
-						};
-					const { parentText, truncated } = reportToParent(resolveAgentDir(), handle.record, report);
-					return { content: [{ type: "text", text: parentText }], details: { ...details, truncated } };
-				}
-
-				// Its Report arrives as a notice once it has finished.
-				return {
-					content: [
-						{
-							type: "text",
-							text: [
-								`Background subagent launched: ${handle.record.name} (${handle.runId})`,
-								`Agent: ${handle.record.agentName} (${handle.record.provider}/${handle.record.modelId})`,
-								`Status: ${handle.record.status}`,
-								`Its report arrives here once it has finished; its process then ends by itself: ${NOTHING_TO_CLOSE}`,
-								whileRunning({
-									runs: `${handle.record.name} runs`,
-									waitingFor: handle.record.name,
-									result: "result",
-								}),
-								RUN_PROGRESS,
-							].join("\n"),
-						},
-					],
-					details: {
-						runId: handle.runId,
-						agentName: handle.record.agentName,
-						status: handle.record.status,
-						deliveryMode: "background",
-						provider: handle.record.provider,
-						modelId: handle.record.modelId,
-						thinkingLevel: handle.record.thinkingLevel,
-						truncated: false,
-					} satisfies SubagentResultDetails,
-				};
+				return settleRun(
+					{
+						agentDir: resolveAgentDir,
+						reports,
+						whenFinal: (runId) => scheduler.whenFinal(runId),
+						getRun: (runId) => scheduler.getRun(runId),
+					},
+					admitRes.handle,
+					{ background: params.background === true, signal },
+				);
 			},
 		});
 	};
