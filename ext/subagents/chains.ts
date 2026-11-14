@@ -21,15 +21,6 @@ import {
 	nameTaken,
 	type RunAdmission,
 } from "./admission.ts";
-import {
-	type BatchMember,
-	capAggregate,
-	fullReportOf,
-	inlineReports,
-	memberOutcome,
-	settleBatch,
-	settledMember,
-} from "./batches.ts";
 import { generationDefinition, runWorkspace } from "./generation-state.ts";
 import type { ChainStep } from "./invocation.ts";
 import { GROUP_PROGRESS, NOT_APPROVAL, NOTHING_TO_CLOSE, type RunReports, whileRunning } from "./messages.ts";
@@ -43,6 +34,22 @@ import {
 } from "./run-worktree.ts";
 import { createRunId, formatRunLabel, type SubagentRunRecord } from "./runs.ts";
 import {
+	type BatchMember,
+	type CallResult,
+	type CallsUnderWay,
+	capAggregate,
+	failureReason,
+	fullReportOf,
+	inlineReports,
+	MAX_AGGREGATE_BYTES,
+	memberLines,
+	memberOutcome,
+	settleBatch,
+	settleCall,
+	settledMember,
+	storeManifest,
+} from "./settling.ts";
+import {
 	getSubagentsRootDir,
 	readPersistedRunRecord,
 	storedRunReportTextPath,
@@ -50,12 +57,8 @@ import {
 	writeAtomicPrivateFile,
 } from "./storage.ts";
 
-/** How much of the orchestrator's context a settled chain takes, however long its Reports. */
-const MAX_CHAIN_AGGREGATE_BYTES = 16 * 1024;
 /** How much of a step's Report the next step is given; the rest stays in its file. */
 const MAX_HANDOFF_REPORT_BYTES = 8 * 1024;
-/** How much of a step's failure the aggregate lists: one line, the manifest keeping all of it. */
-const MAX_REASON_BYTES = 300;
 
 const createChainId = (): string => `${CHAIN_ID_PREFIX}${randomUUID().slice(0, 8)}`;
 const bytes = (text: string) => Buffer.byteLength(text, "utf8");
@@ -104,17 +107,13 @@ export interface ChainDeps {
 	scope: Pick<ParentScopeChecks, "current" | "inScope" | "onBranch">;
 	/** The orchestrator's context now, which a later step is admitted with. */
 	context(): AdmissionContext | undefined;
-	/** The chains under way, by ID: aborting one stops it before its next step. */
-	live: Map<string, AbortController>;
+	/** Where a chain is kept while it is under way: stopping it there starts no later step. */
+	calls: CallsUnderWay;
 	/** Tells the orchestrator of a background chain's aggregate, if the chain is still in its scope. */
 	notify(first: Readonly<SubagentRunRecord>, notice: { parentText: string; details: ChainResultDetails }): void;
 }
 
-type ChainToolResult = {
-	content: { type: "text"; text: string }[];
-	details: ChainResultDetails | undefined;
-	isError?: boolean;
-};
+type ChainToolResult = CallResult<ChainResultDetails | undefined>;
 
 /**
  * Runs the steps of a `chain` call. Every step is checked first, and none starts unless all pass. In the foreground
@@ -239,39 +238,37 @@ export async function runChain(
 		{ plan, planPath, request, background, start, workspace, stop, stopped },
 		{ index: 0, results: steps.map(() => undefined), next: admitted },
 	);
-	if (background) {
-		void settled.then(({ text, details }) => deps.notify(start, { parentText: text, details }));
-		return {
-			content: [
-				{
-					type: "text",
-					text: [
-						`Background chain launched: ${chain}, ${steps.length} step${steps.length === 1 ? "" : "s"}, from ${label(0)} ${formatRunLabel(start)}: ${start.agentName} (${start.provider}/${start.modelId}).`,
-						`Each step starts once the one before it completed; their reports arrive together, as one message, once the chain has finished or halted. subagent_stop "${chain}" stops the whole chain.`,
-						whileRunning({ runs: "it runs", waitingFor: "the chain", result: "results" }),
-						`${GROUP_PROGRESS} Its processes end by themselves once it reports: ${NOTHING_TO_CLOSE}`,
-					].join("\n"),
-				},
-			],
-			details: {
-				chain,
-				deliveryMode: "background",
-				manifestPath,
-				runs: steps.map((_, step) => ({ step, status: step === 0 ? "starting" : "not run" })),
-				completed: false,
-				...(workspace ? { workspace: { root: workspace.root, baseline: workspace.baseline } } : {}),
-				truncated: false,
+	const launched = (): CallResult<ChainResultDetails> => ({
+		content: [
+			{
+				type: "text",
+				text: [
+					`Background chain launched: ${chain}, ${steps.length} step${steps.length === 1 ? "" : "s"}, from ${label(0)} ${formatRunLabel(start)}: ${start.agentName} (${start.provider}/${start.modelId}).`,
+					`Each step starts once the one before it completed; their reports arrive together, as one message, once the chain has finished or halted. subagent_stop "${chain}" stops the whole chain.`,
+					whileRunning({ runs: "it runs", waitingFor: "the chain", result: "results" }),
+					`${GROUP_PROGRESS} Its processes end by themselves once it reports: ${NOTHING_TO_CLOSE}`,
+				].join("\n"),
 			},
-		};
-	}
-	const aborted = new Promise<undefined>((resolve) => {
-		if (request.signal?.aborted) resolve(undefined);
-		request.signal?.addEventListener("abort", () => resolve(undefined), { once: true });
+		],
+		details: {
+			chain,
+			deliveryMode: "background",
+			manifestPath,
+			runs: steps.map((_, step) => ({ step, status: step === 0 ? "starting" : "not run" })),
+			completed: false,
+			...(workspace ? { workspace: { root: workspace.root, baseline: workspace.baseline } } : {}),
+			truncated: false,
+		},
 	});
-	const outcome = await Promise.race([settled, aborted]);
-	if (outcome) return { content: [{ type: "text", text: outcome.text }], details: outcome.details };
-	return fail(
-		`Cancelling chain ${chain}: its working step was asked to stop, and no later step starts. Sessions, Reports and its worktree are kept; only subagent_resume continues a step. Once it settles, every step's status is in ${manifestPath}.`,
+	const cancelled = () =>
+		fail(
+			`Cancelling chain ${chain}: its working step was asked to stop, and no later step starts. Sessions, Reports and its worktree are kept; only subagent_resume continues a step. Once it settles, every step's status is in ${manifestPath}.`,
+		);
+	return settleCall(
+		settled,
+		{ background, signal: request.signal, notify: (notice) => deps.notify(start, notice) },
+		launched,
+		cancelled,
 	);
 }
 
@@ -354,7 +351,7 @@ async function driveChain(
 	const firstDir = subagentRunDir(agentDir, start.parentSessionId, start.runId);
 	const manifestPath = chainManifestPath(agentDir, start.parentSessionId, chain);
 	const results = from.results;
-	deps.live.set(chain, stop);
+	deps.calls.add(chain, "chain", stop);
 
 	/** The run of the step working now, which a stop cancels. */
 	let active: string | undefined;
@@ -433,7 +430,7 @@ async function driveChain(
 		}
 		await from.earlier;
 		if (deps.handOff.aborted) return handedOff();
-		deps.live.delete(chain);
+		deps.calls.settled(chain);
 		return settle();
 	};
 
@@ -446,8 +443,7 @@ async function driveChain(
 			(result) => result && "member" in result && memberOutcome(result.member).status === "completed",
 		);
 		const statuses = results.map(statusOf);
-		const unstored = writeManifest(manifestPath, chain, steps, results, label, lines);
-		const manifest = unstored ? `none, it could not be stored (${unstored})` : manifestPath;
+		const manifest = storeManifest(manifestPath, chainManifest(chain, steps, results, label, lines));
 		const { text, truncated } = formatChainAggregate(
 			chain,
 			steps,
@@ -510,7 +506,7 @@ export function resumeChains(deps: ChainDeps, parentSessionId: string): void {
 	for (const file of files) {
 		const planPath = join(dir, file);
 		const plan = readPlan(planPath);
-		if (!plan || plan.settled || deps.live.has(plan.chain)) continue;
+		if (!plan || plan.settled || deps.calls.kind(plan.chain)) continue;
 		const first = plan.ran[0] && recordOf(plan.ran[0].runId);
 		// Its first step was never admitted: it never began.
 		if (!first) {
@@ -633,11 +629,7 @@ function reasonOf(result: StepResult, brief: boolean): string | undefined {
 						const outcome = memberOutcome(result.member);
 						return outcome.status === "completed" ? undefined : outcome.why;
 					})();
-	if (why === undefined) return undefined;
-	const clean = sanitizeReportText(why);
-	if (!brief) return clean;
-	const cut = truncateUtf8Safe(clean.split("\n")[0], MAX_REASON_BYTES).text;
-	return `${cut}${cut === clean ? "" : " […]"}`;
+	return why === undefined ? undefined : failureReason(why, brief);
 }
 
 /**
@@ -654,7 +646,7 @@ function formatChainAggregate(
 	workspaceLines: readonly string[],
 	manifest: string,
 	workspace: IsolatedWorkspace | undefined,
-	budget = MAX_CHAIN_AGGREGATE_BYTES,
+	budget = MAX_AGGREGATE_BYTES,
 ): { text: string; truncated: boolean } {
 	const halt = results.findIndex((result, i) => statuses[i] !== "completed" && result !== undefined);
 	const notRun = statuses.filter((status) => status === "not run").length;
@@ -714,16 +706,15 @@ function formatChainAggregate(
 	return capAggregate(text, inlined.truncated, manifest, budget);
 }
 
-/** Stores the manifest of a settled chain; the aggregate pointing to it says so if it could not be stored. */
-function writeManifest(
-	path: string,
+/** The manifest of a settled chain: where its steps worked, and each step's status, run and Report. */
+function chainManifest(
 	chain: string,
 	steps: readonly ChainStep[],
 	results: readonly StepResult[],
 	label: (i: number) => string,
 	workspaceLines: readonly string[],
-): string | undefined {
-	const text = [
+): string {
+	return [
 		`# Chain ${chain}`,
 		"",
 		...workspaceLines,
@@ -733,21 +724,9 @@ function writeManifest(
 			const why = reasonOf(result, false);
 			const line = `- ${stepLabel(steps, result, i, label)}: ${status}${why ? `: ${why}` : ""}`;
 			if (!result || !("member" in result)) return [line];
-			const { record } = result.member;
-			return [
-				line,
-				`  Role ${record.agentName}, model ${record.provider}/${record.modelId} at thinking ${record.thinkingLevel}, cwd ${record.cwd}`,
-				...(result.member.checks ? [`  ${result.member.checks}`] : []),
-				`  Report: ${(result.member.report && fullReportOf(result.member)) ?? "none stored"}`,
-				`  Transcript: ${record.transcriptPath ?? "none"}`,
-			];
+			// Where the steps worked is said once, above: they share one worktree.
+			return [line, ...memberLines(result.member, { workspace: false })];
 		}),
 		"",
 	].join("\n");
-	try {
-		writeAtomicPrivateFile(path, text);
-		return undefined;
-	} catch (error) {
-		return error instanceof Error ? error.message : String(error);
-	}
 }

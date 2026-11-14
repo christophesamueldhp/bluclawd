@@ -15,37 +15,29 @@ import {
 	nameTaken,
 	type RunAdmission,
 } from "./admission.ts";
-import { generationDefinition } from "./generation-state.ts";
 import type { LaunchParams } from "./invocation.ts";
 import { GROUP_PROGRESS, NOT_APPROVAL, NOTHING_TO_CLOSE, type RunReports, whileRunning } from "./messages.ts";
-import { sanitizeReportText, truncateUtf8Safe } from "./results.ts";
-import { sessionFileEntries } from "./rpc-runs.ts";
-import { checksSummary, commandsRun } from "./run-evidence.ts";
-import { describeWorkspace } from "./run-worktree.ts";
+import { type AdmittedSubagentHandle, formatRunLabel, type SubagentRunRecord } from "./runs.ts";
 import {
-	type AdmittedSubagentHandle,
-	formatRunLabel,
-	isTerminalSubagentStatus,
-	type SubagentRunRecord,
-} from "./runs.ts";
-import {
-	getSubagentsRootDir,
-	readRunReports,
-	type StoredRunReport,
-	storedRunReportTextPath,
-	subagentRunDir,
-	writeAtomicPrivateFile,
-} from "./storage.ts";
-import { runStatus } from "./views.ts";
+	type BatchMember,
+	type CallResult,
+	type CallsUnderWay,
+	capAggregate,
+	failureReason,
+	fullReportOf,
+	inlineReports,
+	MAX_AGGREGATE_BYTES,
+	type MemberOutcome,
+	memberLines,
+	memberOutcome,
+	settleBatch,
+	settleCall,
+	storeManifest,
+} from "./settling.ts";
+import { getSubagentsRootDir } from "./storage.ts";
 
-/** How much of the orchestrator's context a settled batch takes, whatever its size. */
-export const MAX_BATCH_AGGREGATE_BYTES = 16 * 1024;
-/** How much of a member's failure the aggregate lists: one line, the manifest keeping all of it. */
-const MAX_REASON_BYTES = 300;
 /** How many members a background batch's launch lists by name; the manifest lists them all. */
 const MAX_LAUNCH_LINES = 20;
-/** A member's Report gets at least this much of the aggregate, or is only pointed to. */
-const MIN_INLINE_REPORT_BYTES = 512;
 
 export const createBatchId = (): string => `${BATCH_ID_PREFIX}${randomUUID().slice(0, 8)}`;
 
@@ -54,46 +46,11 @@ export function batchManifestPath(agentDir: string, parentSessionId: string, bat
 	return join(getSubagentsRootDir(agentDir), parentSessionId, "batches", `${batch}.md`);
 }
 
-/**
- * How a member's work settled, as the runtime saw it: a Report's claims and a process's exit are not success. A
- * member not final yet, as when its batch's call was cancelled, is unsettled, with what it was doing.
- */
-export type MemberOutcome = { status: "completed" } | { status: "failed" | "cancelled" | "unsettled"; why: string };
-
-/** A member of a batch: its record, final once it settled, and the Report its generation stored, if any. */
-export interface BatchMember {
-	record: Readonly<SubagentRunRecord>;
-	report?: StoredRunReport;
-	/** Where the stored Report's full text is, as the run stored it. */
-	reportFile?: string;
-	/** A member that edits: its worktree, and where it worked and what it changed there, as Git sees it. */
-	workspace?: { root: string; lines: string[] };
-	/** What its transcript shows of the checks it ran in its generation, in one line. */
-	checks?: string;
-}
-
-export function memberOutcome({ record, report }: BatchMember): MemberOutcome {
-	if (!isTerminalSubagentStatus(record.status)) return { status: "unsettled", why: runStatus(record) };
-	if (record.status === "cancelled") return { status: "cancelled", why: record.stopReason ?? "stopped" };
-	if (record.status !== "closed") return { status: "failed", why: record.errorMessage ?? record.status };
-	const outcome = report?.outcome;
-	if (outcome?.status === "completed") return { status: "completed" };
-	return { status: "failed", why: outcome?.error ?? record.errorMessage ?? "no outcome was stored" };
-}
-
-/** Where a member's full Report is: the text its run stored, else the orchestrator's record of it. */
-export const fullReportOf = ({ reportFile, record }: BatchMember): string | undefined =>
-	reportFile ?? record.reportPath;
-
 const bytes = (text: string) => Buffer.byteLength(text, "utf8");
 const describe = (outcome: MemberOutcome, brief = false) => {
 	if (outcome.status === "completed") return "completed";
 	const status = outcome.status === "unsettled" ? "not settled yet" : outcome.status;
-	const why = sanitizeReportText(outcome.why);
-	if (!brief) return `${status}: ${why}`;
-	const line = why.split("\n")[0];
-	const cut = truncateUtf8Safe(line, MAX_REASON_BYTES).text;
-	return `${status}: ${cut}${cut === why ? "" : " […]"}`;
+	return `${status}: ${failureReason(outcome.why, brief)}`;
 };
 
 /** What a batch's tool result or notice carries besides its text. */
@@ -115,7 +72,7 @@ export function formatBatchAggregate(
 	batch: string,
 	members: readonly BatchMember[],
 	manifest: string,
-	budget = MAX_BATCH_AGGREGATE_BYTES,
+	budget = MAX_AGGREGATE_BYTES,
 ): { text: string; truncated: boolean } {
 	const outcomes = members.map(memberOutcome);
 	const count = (status: MemberOutcome["status"]) => outcomes.filter((outcome) => outcome.status === status).length;
@@ -189,61 +146,6 @@ export function formatBatchAggregate(
 	return capAggregate(text, truncated, manifest, budget);
 }
 
-/** A Report an aggregate may inline: its heading, kept whole, then its text, cut if need be. */
-export interface InlinedReport {
-	heading: string;
-	text: string;
-	/** Where its full text is, which a cut one names. */
-	full: string | undefined;
-}
-
-/**
- * Inlines as many `reports`, in order, as each can have at least {@link MIN_INLINE_REPORT_BYTES} of `room`, or its
- * whole text when shorter; the room short ones leave goes to longer ones. Each cut one says where its full text is.
- */
-export function inlineReports(
-	reports: readonly InlinedReport[],
-	room: number,
-): { sections: string[]; truncated: boolean } {
-	// Each section is set apart by a blank line.
-	const parts = reports.map((report) => {
-		const text = sanitizeReportText(report.text).trim();
-		return { ...report, text, need: bytes(report.heading) + bytes(text) + 2 };
-	});
-	let count = 0;
-	for (let least = 0; count < parts.length; count++) {
-		least += Math.min(parts[count].need, MIN_INLINE_REPORT_BYTES);
-		if (least > room) break;
-	}
-	const shares: number[] = [];
-	let left = room;
-	const smallestFirst = [...Array(count).keys()].sort((a, b) => parts[a].need - parts[b].need);
-	smallestFirst.forEach((k, n) => {
-		shares[k] = Math.min(parts[k].need, Math.floor(left / (count - n)));
-		left -= shares[k];
-	});
-	let truncated = count < parts.length;
-	const sections = parts.slice(0, count).map(({ heading, text, full, need }, k) => {
-		if (need <= shares[k]) return `${heading}${text}`;
-		truncated = true;
-		const cut = `\n[Cut short; its full Report: ${full ?? "see the manifest"}]`;
-		return `${heading}${truncateUtf8Safe(text, shares[k] - 2 - bytes(heading) - bytes(cut)).text}${cut}`;
-	});
-	return { sections, truncated };
-}
-
-/** An aggregate held to `budget` bytes whatever it holds, saying so where it is cut. */
-export function capAggregate(
-	text: string,
-	truncated: boolean,
-	manifest: string,
-	budget: number,
-): { text: string; truncated: boolean } {
-	if (bytes(text) <= budget) return { text, truncated };
-	const cut = `\n[Cut short here; the rest is in ${manifest}]`;
-	return { text: `${truncateUtf8Safe(text, budget - bytes(cut)).text}${cut}`, truncated: true };
-}
-
 /**
  * The manifest of a batch: every member, its outcome, and where its full Report and transcript are. Written at the
  * batch's Admission and again as each member settles: one not settled yet shows what it was doing then, and
@@ -258,17 +160,10 @@ function batchManifest(batch: string, members: readonly BatchMember[]): string {
 			? `${unsettled} of ${members.length} members not settled yet, each as it was at ${new Date().toISOString()}; subagent_status shows one as it is now.`
 			: `Settled: all ${members.length} members.`,
 		"",
-		...members.flatMap((member, i) => {
-			const { record } = member;
-			return [
-				`- tasks[${i}] ${formatRunLabel(record)}: ${describe(memberOutcome(member))}`,
-				`  Role ${record.agentName}, model ${record.provider}/${record.modelId} at thinking ${record.thinkingLevel}, cwd ${record.cwd}`,
-				...(member.workspace?.lines.map((text) => `  ${text}`) ?? []),
-				...(member.checks ? [`  ${member.checks}`] : []),
-				`  Report: ${(member.report && fullReportOf(member)) ?? "none stored"}`,
-				`  Transcript: ${record.transcriptPath ?? "none"}`,
-			];
-		}),
+		...members.flatMap((member, i) => [
+			`- tasks[${i}] ${formatRunLabel(member.record)}: ${describe(memberOutcome(member))}`,
+			...memberLines(member, { workspace: true }),
+		]),
 		"",
 	].join("\n");
 }
@@ -366,63 +261,6 @@ export async function admitBatch(
 	return { ok: true, handles };
 }
 
-/**
- * Settles once every member of the batch is final, with each member's outcome. Each member's Report is taken here
- * as it arrives, so it goes out with its batch's aggregate, never on its own; the aggregate reads them from disk,
- * since a stopped member's Report never arrives and a member that never started has none.
- */
-export async function settleBatch(
-	agentDir: string,
-	handles: readonly AdmittedSubagentHandle[],
-	reports: Pick<RunReports, "next">,
-	onSettled?: (index: number, member: BatchMember) => void,
-): Promise<BatchMember[]> {
-	return Promise.all(
-		handles.map(async ({ runId, completion }, i) => {
-			const settled = new AbortController();
-			void reports.next(runId, settled.signal);
-			const record = await completion.finally(() => settled.abort());
-			const member = await settledMember(agentDir, record);
-			onSettled?.(i, member);
-			return member;
-		}),
-	);
-}
-
-/** A final run as a member: its generation's Report, where it worked and what it changed, and the checks it ran. */
-export async function settledMember(agentDir: string, record: Readonly<SubagentRunRecord>): Promise<BatchMember> {
-	const runDir = subagentRunDir(agentDir, record.parentSessionId, record.runId);
-	const report = readRunReports(runDir, 0)
-		.filter(({ generation }) => generation === record.generation)
-		.at(-1);
-	const definition = generationDefinition(runDir, record.generation);
-	const isolated = definition?.workspace;
-	const workspace = isolated && { root: isolated.root, lines: await describeWorkspace(isolated, runDir) };
-	// What its transcript shows of this generation, which started when the scheduler started it.
-	const entries = report && record.transcriptPath ? sessionFileEntries(record.transcriptPath) : undefined;
-	const checks =
-		report &&
-		(entries
-			? checksSummary(definition?.tools ?? [], commandsRun(entries, record.startedAt ?? 0))
-			: "Checks: unknown: its transcript could not be read.");
-	return {
-		record,
-		...(report ? { report, reportFile: storedRunReportTextPath(runDir, report.seq) } : {}),
-		...(workspace ? { workspace } : {}),
-		...(checks ? { checks } : {}),
-	};
-}
-
-/** Stores the manifest of a settled batch; the aggregate pointing to it says so if it could not be stored. */
-export function writeBatchManifest(path: string, batch: string, members: readonly BatchMember[]): string | undefined {
-	try {
-		writeAtomicPrivateFile(path, batchManifest(batch, members));
-		return undefined;
-	} catch (error) {
-		return error instanceof Error ? error.message : String(error);
-	}
-}
-
 export interface TaskBatchDeps extends BatchAdmissionDeps {
 	agentDir(): string;
 	reports: Pick<RunReports, "next">;
@@ -430,13 +268,11 @@ export interface TaskBatchDeps extends BatchAdmissionDeps {
 	getRun(runId: string): Readonly<SubagentRunRecord> | undefined;
 	/** Tells the orchestrator of a background batch's aggregate, if the batch is still in its scope. */
 	notify(member: Readonly<SubagentRunRecord>, notice: { parentText: string; details: BatchResultDetails }): void;
+	/** Where the batch is kept while it is under way. */
+	calls: CallsUnderWay;
 }
 
-type BatchToolResult = {
-	content: { type: "text"; text: string }[];
-	details: BatchResultDetails | undefined;
-	isError?: boolean;
-};
+type BatchToolResult = CallResult<BatchResultDetails | undefined>;
 
 /**
  * Runs the entries of a `tasks` call as one batch. In the foreground the call waits for every member, side by side
@@ -468,9 +304,8 @@ export async function runTaskBatch(
 	const settledMembers: (BatchMember | undefined)[] = handles.map(() => undefined);
 	const members = () =>
 		handles.map(({ runId, record }, i) => settledMembers[i] ?? { record: deps.getRun(runId) ?? record });
-	const resultOf = (current: readonly BatchMember[], budget = MAX_BATCH_AGGREGATE_BYTES) => {
-		const unstored = writeBatchManifest(manifestPath, batch, current);
-		const manifest = unstored ? `none, it could not be stored (${unstored})` : manifestPath;
+	const resultOf = (current: readonly BatchMember[], budget = MAX_AGGREGATE_BYTES) => {
+		const manifest = storeManifest(manifestPath, batchManifest(batch, current));
 		const { text, truncated } = formatBatchAggregate(batch, current, manifest, budget);
 		const outcomes = current.map(memberOutcome);
 		const details: BatchResultDetails = {
@@ -486,14 +321,17 @@ export async function runTaskBatch(
 		return { text, details };
 	};
 	// Every member's status is on disk from the start, kept current as each settles.
-	writeBatchManifest(manifestPath, batch, members());
+	storeManifest(manifestPath, batchManifest(batch, members()));
+	deps.calls.add(batch, "batch");
 	const settled = settleBatch(agentDir, handles, deps.reports, (i, member) => {
 		settledMembers[i] = member;
-		writeBatchManifest(manifestPath, batch, members());
-	}).then((final) => resultOf(final));
+		storeManifest(manifestPath, batchManifest(batch, members()));
+	}).then((final) => {
+		deps.calls.settled(batch);
+		return resultOf(final);
+	});
 
-	if (background) {
-		void settled.then(({ text, details }) => deps.notify(handles[0].record, { parentText: text, details }));
+	const launched = (): CallResult<BatchResultDetails> => {
 		const listed = handles.slice(0, MAX_LAUNCH_LINES);
 		return {
 			content: [
@@ -526,17 +364,21 @@ export async function runTaskBatch(
 				truncated: false,
 			},
 		};
-	}
-
-	const { signal } = request;
-	const aborted = new Promise<undefined>((resolve) => {
-		if (signal?.aborted) resolve(undefined);
-		signal?.addEventListener("abort", () => resolve(undefined), { once: true });
-	});
-	const outcome = await Promise.race([settled, aborted]);
-	if (outcome) return { content: [{ type: "text", text: outcome.text }], details: outcome.details };
+	};
 	// What settled before the call was cancelled, with its Report; the rest as they are, stopping.
-	const note = `Cancelling batch ${batch}: every member was asked to stop. Their sessions and Reports are kept; only subagent_resume continues one. The manifest named below keeps every member's status as each settles.\n\n`;
-	const { text, details } = resultOf(members(), MAX_BATCH_AGGREGATE_BYTES - Buffer.byteLength(note));
-	return { content: [{ type: "text", text: `${note}${text}` }], details, isError: true };
+	const cancelled = (): BatchToolResult => {
+		const note = `Cancelling batch ${batch}: every member was asked to stop. Their sessions and Reports are kept; only subagent_resume continues one. The manifest named below keeps every member's status as each settles.\n\n`;
+		const { text, details } = resultOf(members(), MAX_AGGREGATE_BYTES - bytes(note));
+		return { content: [{ type: "text", text: `${note}${text}` }], details, isError: true };
+	};
+	return settleCall(
+		settled,
+		{
+			background,
+			signal: request.signal,
+			notify: (notice) => deps.notify(handles[0].record, notice),
+		},
+		launched,
+		cancelled,
+	);
 }

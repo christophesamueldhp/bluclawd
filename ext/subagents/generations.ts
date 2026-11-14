@@ -1,4 +1,3 @@
-import { existsSync } from "node:fs";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { SessionMessage, SessionUsage } from "../../daemon/ipc/protocol.ts";
 import { hostAllowed } from "../sandbox/runtime.ts";
@@ -8,8 +7,6 @@ import type { BatchResultDetails } from "./batches.ts";
 import type { ChainResultDetails } from "./chains.ts";
 import { createRunDirectory } from "./directory.ts";
 import {
-	capReport,
-	fromRunText,
 	PARENT_MESSAGE_ADDRESS,
 	type RpcRunSender,
 	type RunReports,
@@ -24,12 +21,11 @@ import { NETWORK_ACCESS, type RunApprovalAnswer, type RunApprovalRequest } from 
 import { userInstructionNote } from "./run-intervention.ts";
 import { postToRun, whenGiven } from "./run-mailbox.ts";
 import { formatRunLabel, isTerminalSubagentStatus, type SubagentRunRecord, SubagentRunScheduler } from "./runs.ts";
+import { reportToParent } from "./settling.ts";
 import {
 	appendParentRunReference,
 	readRunReports,
 	recordRunSessionUsage,
-	storedRunReportTextPath,
-	subagentReportPath,
 	subagentRunDir,
 	writeFullSubagentReport,
 	writePersistedRunRecord,
@@ -66,21 +62,6 @@ export interface GenerationDeps {
 	handOff: AbortSignal;
 	/** The daemon's queue, where runs on pi's RPC take their turn. */
 	slots: RunSlots;
-}
-
-/** A run's Report as the orchestrator's model is given it, capped, as a tool result or a notice. */
-export function reportToParent(
-	agentDir: string,
-	record: Readonly<SubagentRunRecord>,
-	report: { text: string; seq?: number },
-): { parentText: string; truncated: boolean } {
-	const capped = capReport(report.text, () => {
-		const runDir = subagentRunDir(agentDir, record.parentSessionId, record.runId);
-		const stored = report.seq === undefined ? undefined : storedRunReportTextPath(runDir, report.seq);
-		// An older run stored no text file, and keeps only its latest Report in report.md.
-		return stored && existsSync(stored) ? stored : subagentReportPath(agentDir, record.parentSessionId, record.runId);
-	});
-	return { parentText: fromRunText("Report", formatRunLabel(record), capped.text), truncated: capped.truncated };
 }
 
 /** A run's Report as the orchestrator is told of it. */

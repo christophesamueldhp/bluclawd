@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { type BatchMember, formatBatchAggregate } from "../ext/subagents/batches.ts";
+import { formatBatchAggregate } from "../ext/subagents/batches.ts";
 import type { SubagentRunRecord } from "../ext/subagents/runs.ts";
+import type { BatchMember } from "../ext/subagents/settling.ts";
 
 /** A settled member named `name`: completed with a long Report, failed, or cancelled. */
 function member(name: string, status: "completed" | "failed" | "cancelled"): BatchMember {
