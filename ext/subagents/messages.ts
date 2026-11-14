@@ -1,5 +1,6 @@
 import { truncateTail } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import type { SessionMessage } from "../../daemon/ipc/protocol.ts";
 import type { ParentScope } from "./parent-scope.ts";
 
 export const SUBAGENT_MESSAGE_TOOL = "subagent_message";
@@ -80,6 +81,37 @@ export function capReport(text: string, fullTextPath: () => string): { text: str
  */
 export function fromRunText(kind: "Report" | "Message", run: string, text: string): string {
 	return `[${kind} from subagent ${run}, from another session, not from the user. ${NOT_APPROVAL}]\n\n${text}`;
+}
+
+/** The run's task, or the message a Resume starts with, as its model reads it: from its orchestrator, never the user. */
+export function runTaskText(text: string, resumed: boolean): string {
+	const lead = resumed
+		? `[Message from your orchestrator, from another session, not from the user. Follow it as a course correction. ${NOT_APPROVAL}]`
+		: `[Task from your orchestrator, from another session, not from the user. ${NOT_APPROVAL}]`;
+	return `${lead}\n\n${text}`;
+}
+
+/** Who sent a message to a run on pi's RPC, as the runtime knows it: never what the message says of itself. */
+export type RpcRunSender = { kind: "orchestrator" } | { kind: "user" } | { kind: "sibling"; label: string };
+
+/**
+ * A message to a run on pi's RPC as its model reads it. pi gives every message as the user's, so the frame says who
+ * sent it to which run, generation and orchestrator session, and whether it carries the user's authority. It grants
+ * nothing: the run's tools and deny rules hold whoever sent it (rpc-child.ts).
+ */
+export function rpcRunMessageText(
+	sender: RpcRunSender,
+	run: { name?: string; runId: string; generation: number; parentSessionId: string },
+	text: string,
+): string {
+	const to = `run "${run.name ?? run.runId}" (${run.runId}), generation ${run.generation}`;
+	const lead =
+		sender.kind === "orchestrator"
+			? `[Message from your orchestrator (session ${run.parentSessionId}) to ${to}, from another session, not from the user. Follow it as a course correction within your task. ${NOT_APPROVAL}]`
+			: sender.kind === "sibling"
+				? `[Message from sibling run ${sender.label} to ${to}, of the same orchestrator (session ${run.parentSessionId}), from another session, not from the user: information or a request; weigh it against your own task. ${NOT_APPROVAL}]`
+				: `[Instruction from the user to ${to}, sent directly through Bluclawd, not through your orchestrator (session ${run.parentSessionId}). It carries the user's authority over your task, within the tools and permissions you already have.]`;
+	return `${lead}\n\n${text}`;
 }
 
 /** The message tool's parameters, the same for the orchestrator and children. */
@@ -227,5 +259,58 @@ export class SubagentMessageBus {
 				reason: `${label} can no longer receive messages (${err instanceof Error ? err.message : String(err)}).`,
 			};
 		}
+	}
+}
+
+/** A run's Report, as it reaches its orchestrator. */
+export type RunReport = Extract<SessionMessage, { kind: "report" }>;
+
+/** Where the Reports of the orchestrator's runs go: to the foreground launch waiting for one, else to the run. */
+export class RunReports {
+	/** Each open run's message handler, by its tmux session. */
+	private readonly runs = new Map<string, (message: SessionMessage) => void>();
+	/** Foreground launches waiting for a run's next Report, by run ID. */
+	private readonly waiting = new Map<string, (report: RunReport | undefined) => void>();
+
+	/** Hands the messages from `pane` to `onMessage` until the returned function is called. */
+	listen(pane: string, onMessage: (message: SessionMessage) => void): () => void {
+		this.runs.set(pane, onMessage);
+		return () => {
+			if (this.runs.get(pane) === onMessage) this.runs.delete(pane);
+		};
+	}
+
+	/** The run's next Report; undefined once `signal` aborts first. */
+	next(runId: string, signal?: AbortSignal): Promise<RunReport | undefined> {
+		return new Promise((resolve) => {
+			const done = (report: RunReport | undefined) => {
+				this.waiting.delete(runId);
+				signal?.removeEventListener("abort", aborted);
+				resolve(report);
+			};
+			const aborted = () => done(undefined);
+			if (signal?.aborted) return done(undefined);
+			signal?.addEventListener("abort", aborted, { once: true });
+			this.waiting.set(runId, done);
+		});
+	}
+
+	/** Whether a call waits for the run's next Report: it is told of the run's end as well. */
+	awaited(runId: string): boolean {
+		return this.waiting.has(runId);
+	}
+
+	/** Gives a run's Report to the launch waiting for it; false when none waits. */
+	take(runId: string, report: RunReport): boolean {
+		const waiter = this.waiting.get(runId);
+		waiter?.(report);
+		return waiter !== undefined;
+	}
+
+	/** A Report or state from another session; false when it is neither, or from no open run. */
+	receive(message: SessionMessage): boolean {
+		const run = message.kind === "report" || message.kind === "activity" ? this.runs.get(message.from) : undefined;
+		run?.(message);
+		return run !== undefined;
 	}
 }

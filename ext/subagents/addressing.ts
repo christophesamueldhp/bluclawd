@@ -8,7 +8,7 @@ import {
 	whileRunning,
 } from "./messages.ts";
 import type { ParentScope } from "./parent-scope.ts";
-import { formatRunLabel, isTerminalSubagentStatus } from "./runs.ts";
+import { formatRunLabel, isLegacyRun, isTerminalSubagentStatus } from "./runs.ts";
 import { legacyRunRefusal } from "./tmux-runs.ts";
 
 export interface RunAddressingDeps {
@@ -29,7 +29,7 @@ export function createRunAddressing(deps: RunAddressingDeps) {
 	const messageFromParent = async (scope: ParentScope, to: string, content: string) => {
 		const run = deps.directory.find(scope, to)?.record;
 		const finished = run !== undefined && isTerminalSubagentStatus(run.status);
-		if (finished && run.backend !== "rpc") {
+		if (finished && isLegacyRun(run)) {
 			return formatMessageReceipt({
 				status: "unavailable",
 				seq: 0,

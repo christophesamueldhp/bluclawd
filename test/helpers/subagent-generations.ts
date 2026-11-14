@@ -7,12 +7,11 @@ import { ModelRegistry, ModelRuntime, SessionManager } from "@earendil-works/pi-
 import type { SessionMessage, SessionUsage } from "../../daemon/ipc/protocol.ts";
 import { createRunAdmission, type RunExecutionContext } from "../../ext/subagents/admission.ts";
 import { createGenerations, type ParentNotice } from "../../ext/subagents/generations.ts";
-import { SubagentMessageBus } from "../../ext/subagents/messages.ts";
+import { RunReports, SubagentMessageBus } from "../../ext/subagents/messages.ts";
 import { createParentScope, type ParentInboxItem } from "../../ext/subagents/parent-scope.ts";
 import type { AdmitSubagentRunRequest, AdmittedSubagentHandle } from "../../ext/subagents/runs.ts";
 import { ensureRunStorageDir, storeRunReport, subagentRunDir } from "../../ext/subagents/storage.ts";
 import { createAgentTaskSource } from "../../ext/subagents/task-source.ts";
-import { RunReports } from "../../ext/subagents/tmux-runs.ts";
 import { createParentScopeViews } from "../../ext/subagents/views.ts";
 import { waitFor } from "./wait-for.ts";
 

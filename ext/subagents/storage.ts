@@ -15,7 +15,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { SessionUsage } from "../../daemon/ipc/protocol.ts";
 import { sanitizeDiagnosticText } from "./diagnostics.ts";
 import { sanitizeReportText } from "./results.ts";
-import { isTerminalSubagentStatus, type RunRuntimeOutcome, type SubagentRunRecord } from "./runs.ts";
+import { isLegacyRun, isTerminalSubagentStatus, type RunRuntimeOutcome, type SubagentRunRecord } from "./runs.ts";
 import { addSubagentUsage, createEmptySubagentUsage } from "./usage.ts";
 
 export const SUBAGENT_RUN_CUSTOM_ENTRY = "bluclawd.subagent-run";
@@ -311,7 +311,7 @@ function decodeLegacyStatus(record: SubagentRunRecord): void {
 	if (legacy.status === "budget_exceeded") record.stopReason ??= "Stopped by a budget (legacy)";
 	// An in-process run that ended kept its session, as a closed run does: it can be resumed from it. A run on pi's
 	// RPC was cancelled as runs are now.
-	const ended = ["completed", "timed_out", "budget_exceeded", ...(record.backend === "rpc" ? [] : ["cancelled"])];
+	const ended = ["completed", "timed_out", "budget_exceeded", ...(isLegacyRun(record) ? ["cancelled"] : [])];
 	if (ended.includes(legacy.status)) record.status = "closed";
 	// A queued run never started, so reconciliation interrupts it like any other orphan.
 	if (legacy.status === "queued") record.status = "starting";

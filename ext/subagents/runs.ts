@@ -23,6 +23,9 @@ export type SubagentTerminalStatus = "failed" | "interrupted" | "closed" | "canc
 
 export type SubagentStopSource = "caller" | "user" | "model" | "remote" | "session_invalidated";
 
+/** A Pane run, an RPC run or a Legacy run (GLOSSARY): a run is named after its latest generation. */
+export type RunKind = "pane" | "rpc" | "legacy";
+
 export interface WorkspaceSnapshot {
 	readonly headCommit: string | null;
 	readonly dirty: boolean;
@@ -44,6 +47,11 @@ export interface SubagentRunRecord {
 	pane?: string;
 	/** Set on every run since ADR-0010, a pane run as well as an RPC run; absent on a legacy run. */
 	backend?: "rpc";
+	/**
+	 * The kind of the run's latest generation, which Admission writes at each launch and Resume; absent on records from
+	 * before it did. Ask `runKind` (rpc-runs.ts), never this field.
+	 */
+	kind?: Exclude<RunKind, "legacy">;
 	/** What the run's pi is doing, as it last said; absent until it says. */
 	activity?: AgentActivity;
 	transcriptPath?: string;
@@ -121,6 +129,7 @@ export interface AdmitSubagentRunRequest<C = unknown> {
 	originEntryId?: string;
 	name?: string;
 	backend?: "rpc";
+	kind?: SubagentRunRecord["kind"];
 	agentName: string;
 	definitionSource: AgentDefinitionSource;
 	provider: string;
@@ -161,6 +170,14 @@ export function createRunId(): string {
 /** How a run is named in replies: its quoted name and run ID, or its quoted run ID when unnamed. */
 export function formatRunLabel(run: Pick<SubagentRunRecord, "name" | "runId">): string {
 	return run.name ? `"${run.name}" (${run.runId})` : `"${run.runId}"`;
+}
+
+/**
+ * Whether a run is a Legacy run, which its record alone says: it has no `backend`. This is the part of `runKind`
+ * (rpc-runs.ts) that needs no run directory, for code that cannot reach that module or asks nothing more.
+ */
+export function isLegacyRun(run: Pick<SubagentRunRecord, "backend">): boolean {
+	return run.backend !== "rpc";
 }
 
 const TERMINAL_STATES = new Set<SubagentLifecycleStatus>(["failed", "interrupted", "closed", "cancelled"]);
@@ -254,6 +271,7 @@ export class SubagentRunScheduler<C = unknown> {
 			originEntryId: request.originEntryId,
 			name: request.name,
 			...(request.backend ? { backend: request.backend } : {}),
+			...(request.kind ? { kind: request.kind } : {}),
 			generation: 0,
 			agentName: request.agentName,
 			definitionSource: request.definitionSource,
@@ -316,14 +334,14 @@ export class SubagentRunScheduler<C = unknown> {
 
 	/**
 	 * Runs a closed run again under the same identity, in the background. A run this scheduler does not
-	 * know is taken over from `stored`, its record as kept on disk. `model` is the model and level the Resume
-	 * admitted, when they changed.
+	 * know is taken over from `stored`, its record as kept on disk. `admitted` is the model and level the Resume
+	 * admitted, when they changed, and the kind of its generation.
 	 */
 	resume(
 		runId: string,
 		context: C,
 		stored?: Readonly<SubagentRunRecord>,
-		model?: Pick<SubagentRunRecord, "provider" | "modelId" | "thinkingLevel">,
+		admitted?: Pick<SubagentRunRecord, "provider" | "modelId" | "thinkingLevel" | "kind">,
 	): AdmitSubagentRunResult {
 		if (!this.runs.has(runId) && stored?.runId === runId && isResumableSubagentStatus(stored.status)) {
 			this.adopt(stored);
@@ -343,7 +361,7 @@ export class SubagentRunScheduler<C = unknown> {
 		Object.assign(managed, {
 			record: {
 				...managed.record,
-				...model,
+				...admitted,
 				startedAt: undefined,
 				endedAt: undefined,
 				stopReason: undefined,

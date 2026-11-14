@@ -56,6 +56,7 @@ import {
 	type AdmittedSubagentHandle,
 	createRunId,
 	formatRunLabel,
+	isLegacyRun,
 	isResumableSubagentStatus,
 	type SubagentRunRecord,
 	type SubagentRunScheduler,
@@ -361,6 +362,8 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 		const parentPane = deps.runPane();
 		return parentPane ? { parentPane } : {};
 	};
+	/** The kind of a generation launched with `pane`, which its run's record keeps. */
+	const kindOf = (pane: { parentPane?: string }): "pane" | "rpc" => (pane.parentPane ? "pane" : "rpc");
 
 	/**
 	 * Why a run on pi's RPC, admitted with orchestrator `parent`'s directory and trust, may no longer start once its
@@ -628,6 +631,7 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 				return cannot("its worktree was cleaned up meanwhile.");
 			}
 			const generation = current.generation + 1;
+			const pane = paneOf();
 			try {
 				if (!admitGeneration(runDir, generation, held)) {
 					return cannot(`another Resume of it already started its generation ${generation}.`);
@@ -650,14 +654,14 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 							sessionFile: entry.sessionFile,
 							...(changes.from ? { taskFrom: changes.from } : {}),
 							...(changes.chainStep ? { keepWorktree: true } : {}),
-							...paneOf(),
+							...pane,
 							...(typed ? { typed: true as const } : {}),
 						},
 						{ cwd: ctx.cwd, trusted: projectTrusted },
 					),
 				},
 				entry.known ? undefined : { ...current, sessionEpoch: scope.sessionEpoch },
-				model,
+				{ ...model, kind: kindOf(pane) },
 			);
 			if (!resumed.ok) return refuse(resumed.error);
 			return { ok: true, handle: resumed.handle };
@@ -665,6 +669,7 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 
 		const { toolCallId, parentTurnId, params, signal, batch, chain } = entry.launch;
 		const isBackground = params.background === true;
+		const pane = paneOf();
 		const startSnapshot = captureWorkspaceSnapshot(cwd);
 		// Prepared before admission, so a run that cannot store anything is never listed.
 		const runId = chain?.runId ?? createRunId();
@@ -737,6 +742,7 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 			originEntryId: entry.originEntryId,
 			name,
 			backend: "rpc",
+			kind: kindOf(pane),
 			agentName: definition.name,
 			definitionSource: definition.source,
 			provider: childModel.model.provider,
@@ -763,7 +769,7 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 						task: params.task,
 						...(typeof shared === "object" ? { worktreeMade: true } : {}),
 						...(chain ? { keepWorktree: true } : {}),
-						...paneOf(),
+						...pane,
 					},
 					{ cwd: ctx.cwd, trusted: projectTrusted },
 				),
@@ -878,7 +884,7 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 					`Resuming ${label} is not supported in one-shot "${ctx.mode}" mode because a resume runs in the background and the process exits before it completes.`,
 				);
 			}
-			if (run.backend !== "rpc") return unavailable(legacyRunRefusal(run));
+			if (isLegacyRun(run)) return unavailable(legacyRunRefusal(run));
 
 			// A closed run on pi's RPC reopens its saved session in a pi of its own, as its next generation, given an
 			// instruction.

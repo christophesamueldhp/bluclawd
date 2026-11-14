@@ -32,7 +32,7 @@ import {
 } from "./batches.ts";
 import { generationDefinition, runWorkspace } from "./generation-state.ts";
 import type { ChainStep } from "./invocation.ts";
-import { GROUP_PROGRESS, NOT_APPROVAL, NOTHING_TO_CLOSE, whileRunning } from "./messages.ts";
+import { GROUP_PROGRESS, NOT_APPROVAL, NOTHING_TO_CLOSE, type RunReports, whileRunning } from "./messages.ts";
 import type { ParentScopeChecks } from "./parent-scope.ts";
 import { sanitizeReportText, truncateUtf8Safe } from "./results.ts";
 import {
@@ -49,7 +49,6 @@ import {
 	subagentRunDir,
 	writeAtomicPrivateFile,
 } from "./storage.ts";
-import type { RunReports } from "./tmux-runs.ts";
 
 /** How much of the orchestrator's context a settled chain takes, however long its Reports. */
 const MAX_CHAIN_AGGREGATE_BYTES = 16 * 1024;
