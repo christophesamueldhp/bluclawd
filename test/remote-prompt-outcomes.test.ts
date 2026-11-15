@@ -4,7 +4,7 @@ import type { Server } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { handleIpcRequest, listSummaries, setRemoteControl } from "../daemon/handler.ts";
+import { handleIpcRequest, listSummaries } from "../daemon/handler.ts";
 import type { PaneMessage, PromptOutcome, RefusedReason } from "../daemon/ipc/protocol.ts";
 import { startIpcServer } from "../daemon/ipc/server.ts";
 import { OrchestratorClient } from "../daemon/orchestrator-client.ts";
@@ -66,9 +66,8 @@ describe("a prompt's outcome, back to the phone by its id", () => {
 			tmux: { hasSession: (name) => !lost.has(name), end: () => {} },
 			dir,
 		});
-		server = await startIpcServer((request) => handleIpcRequest(supervisor, request));
+		server = await startIpcServer((request) => handleIpcRequest(supervisor, request, { remote: control }));
 		control = remoteControl();
-		setRemoteControl(control);
 		const on = await control.handle({ type: "remote", action: "on", port: 0 });
 		if (on.type !== "remote_result" || !on.code) throw new Error("not listening");
 		base = `http://127.0.0.1:${on.port}`;
@@ -84,7 +83,6 @@ describe("a prompt's outcome, back to the phone by its id", () => {
 		for (const stream of streams.splice(0)) stream.abort();
 		await Promise.all(registrations.splice(0).map((r) => r.stop()));
 		await control.stop();
-		setRemoteControl(undefined);
 		supervisor.settleWaits();
 		await new Promise((resolve) => server.close(resolve));
 		vi.unstubAllEnvs();
@@ -325,7 +323,6 @@ describe("a prompt's outcome, back to the phone by its id", () => {
 		await control.stop();
 		supervisor = new ServerSupervisor({ now: () => clock, tmux: paneUp, dir });
 		control = remoteControl();
-		setRemoteControl(control);
 		const on = await control.handle({ type: "remote", action: "on", port: 0 });
 		if (on.type !== "remote_result") throw new Error("not listening");
 		base = `http://127.0.0.1:${on.port}`;

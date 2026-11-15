@@ -429,7 +429,8 @@ export interface RemoteRequest {
 	launch?: PaneLaunch;
 }
 
-interface RequestMap {
+/** Each request, by its type. */
+export interface RequestMap {
 	list: ListRequest;
 	status: StatusRequest;
 	register: RegisterRequest;
@@ -592,7 +593,8 @@ export interface ErrorResponse extends ResponseMeta {
 	error: string;
 }
 
-interface ResponseMap {
+/** What answers each request, by the request's type: the one declaration the handler and the client are typed from. */
+export interface ResponseMap {
 	list: ListResponse;
 	status: StatusResponse;
 	register: RegisterResponse;
@@ -615,6 +617,33 @@ interface ResponseMap {
 }
 
 export type ServerResponse = ResponseMap[keyof ResponseMap] | ErrorResponse;
+
+/** The response that answers request `R`. */
+export type ResponseTo<R extends ServerRequest> = ResponseMap[R["type"]];
+
+/** The `type` of the response that answers each request: a client tells by it whether the daemon knew its request. */
+export const RESPONSE_TYPE: { [K in keyof RequestMap]: ResponseMap[K]["type"] } = {
+	list: "list_result",
+	status: "status_result",
+	register: "register_result",
+	send: "ack",
+	wait: "wait_result",
+	unregister: "unregister_result",
+	shutdown: "shutdown_result",
+	delete: "ack",
+	rename: "ack",
+	meta: "ack",
+	save: "ack",
+	start: "start_result",
+	start_failed: "ack",
+	remote: "remote_result",
+	remote_live: "ack",
+	remote_report: "ack",
+	wakeups: "ack",
+	run_queue: "run_queue_result",
+	collaboration: "collaboration_result",
+};
+
 export type ProtocolMessage = ServerRequest | ServerResponse;
 
 export function encodeMessage(message: ProtocolMessage): string {
@@ -623,10 +652,5 @@ export function encodeMessage(message: ProtocolMessage): string {
 
 export function parseRequestLine(line: string): ServerRequest {
 	const value = JSON.parse(line) as ServerRequest;
-	return value;
-}
-
-export function parseResponseLine(line: string): ServerResponse {
-	const value = JSON.parse(line) as ServerResponse;
 	return value;
 }

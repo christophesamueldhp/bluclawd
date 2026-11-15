@@ -2,7 +2,7 @@
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { sendIpcRequest } from "./ipc/client.ts";
+import { OrchestratorClient } from "./orchestrator-client.ts";
 import { serve } from "./serve.ts";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -40,7 +40,7 @@ async function main(): Promise<void> {
 	}
 
 	if (args[0] === "list") {
-		printResponse(await sendIpcRequest({ type: "list" }));
+		printResponse(await new OrchestratorClient().request({ type: "list" }));
 		return;
 	}
 
@@ -50,7 +50,7 @@ async function main(): Promise<void> {
 			console.error("Usage: server status <instance-id>");
 			process.exit(1);
 		}
-		printResponse(await sendIpcRequest({ type: "status", instanceId }));
+		printResponse(await new OrchestratorClient().request({ type: "status", instanceId }));
 		return;
 	}
 

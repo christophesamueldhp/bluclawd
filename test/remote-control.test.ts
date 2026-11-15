@@ -3,8 +3,8 @@ import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { handleIpcRequest, listSummaries, setRemoteControl } from "../daemon/handler.ts";
-import type { InstanceSummary } from "../daemon/ipc/protocol.ts";
+import { handleIpcRequest, listSummaries } from "../daemon/handler.ts";
+import type { InstanceSummary, ServerRequest } from "../daemon/ipc/protocol.ts";
 import { RemoteControl } from "../daemon/remote/control.ts";
 import { RemoteStore } from "../daemon/remote/pairing.ts";
 import type { PushResult, WebPushSubscription } from "../daemon/remote/webpush.ts";
@@ -17,6 +17,9 @@ describe("remote control switch", () => {
 	let dir: string;
 	let control: RemoteControl;
 	let supervisor: ServerSupervisor;
+	/** The remote control the daemon's handler is given, once a test gives it one. */
+	let remote: RemoteControl | undefined;
+	const handle = <R extends ServerRequest>(request: R) => handleIpcRequest(supervisor, request, { remote });
 	const make = () =>
 		new RemoteControl({
 			store: new RemoteStore(join(dir, "remote.json")),
@@ -42,7 +45,7 @@ describe("remote control switch", () => {
 	afterEach(async () => {
 		vi.useRealTimers();
 		await control.stop();
-		setRemoteControl(undefined);
+		remote = undefined;
 		rmSync(dir, { recursive: true, force: true });
 	});
 
@@ -104,14 +107,14 @@ describe("remote control switch", () => {
 	});
 
 	it("keeps one launch command in remote.json: a heartbeat's only while none usable is there, /remote-control's always", async () => {
-		setRemoteControl(control);
+		remote = control;
 		const file = join(dir, "remote.json");
 		const [a, b, c] = ["a.js", "b.js", "c.js"].map((name) => {
 			writeFileSync(join(dir, name), "");
 			return [process.execPath, join(dir, name)];
 		});
 		const beat = (command: string[]) =>
-			handleIpcRequest(supervisor, {
+			handle({
 				type: "register",
 				instance: { id: "pane-1", cwd: "/p", leafId: "e2", launch: { command } },
 			});
@@ -142,7 +145,7 @@ describe("remote control switch", () => {
 		// A restarted daemon has it before any heartbeat, and does not write it again.
 		await control.stop();
 		control = make();
-		setRemoteControl(control);
+		remote = control;
 		await control.apply();
 		expect(control.launch()).toEqual({ command: c });
 		const rewritten = statSync(file).ino;
@@ -154,7 +157,7 @@ describe("remote control switch", () => {
 		await beat(b);
 		expect(control.launch()).toEqual({ command: b });
 		expect(statSync(file).ino).toBe(off);
-		await handleIpcRequest(supervisor, { type: "unregister", instanceId: "pane-1" });
+		await handle({ type: "unregister", instanceId: "pane-1" });
 	});
 
 	it("learns the launch command from /remote-control too, as a fresh pi has no heartbeat yet", async () => {
@@ -203,7 +206,7 @@ describe("remote control switch", () => {
 				}),
 				webDir: dir,
 			});
-			setRemoteControl(control);
+			remote = control;
 			writeFileSync(join(dir, "pi.js"), "");
 			control.noteLaunch({ command: [process.execPath, join(dir, "pi.js")] });
 			const on = await control.handle({ type: "remote", action: "on", port: 0 });
@@ -227,7 +230,7 @@ describe("remote control switch", () => {
 			return { status: res.status, body: (await res.json()) as { pane?: string; error?: string } };
 		};
 		const register = (id: string) =>
-			handleIpcRequest(supervisor, {
+			handle({
 				type: "register",
 				instance: { id, cwd: dir, sessionFile: join(dir, "s.jsonl") },
 			});
@@ -257,28 +260,28 @@ describe("remote control switch", () => {
 			vi.advanceTimersByTime(START_TIMEOUT_MS);
 			expect(killed()).toEqual([]);
 			expect(deleted).toEqual([]);
-			await handleIpcRequest(supervisor, { type: "unregister", instanceId: task.body.pane! });
+			await handle({ type: "unregister", instanceId: task.body.pane! });
 		});
 	});
 
 	it("asks a heartbeat for a report while it has none for the pane, as after a daemon restart", async () => {
-		const beat = () => handleIpcRequest(supervisor, { type: "register", instance: { id: "pane-1", cwd: "/p" } });
+		const beat = () => handle({ type: "register", instance: { id: "pane-1", cwd: "/p" } });
 		expect(await beat()).not.toHaveProperty("wantReport");
-		setRemoteControl(control);
+		remote = control;
 		expect(await beat()).toMatchObject({ type: "register_result", wantReport: true });
-		await handleIpcRequest(supervisor, { type: "remote_report", instanceId: "pane-1", report: { models: [] } });
+		await handle({ type: "remote_report", instanceId: "pane-1", report: { models: [] } });
 		expect(await beat()).not.toHaveProperty("wantReport");
-		await handleIpcRequest(supervisor, { type: "unregister", instanceId: "pane-1" });
+		await handle({ type: "unregister", instanceId: "pane-1" });
 		expect(await beat()).toMatchObject({ wantReport: true });
-		await handleIpcRequest(supervisor, { type: "unregister", instanceId: "pane-1" });
+		await handle({ type: "unregister", instanceId: "pane-1" });
 	});
 
 	it("tells a heartbeat when a phone watches its session, and streams what the pane sends", async () => {
-		setRemoteControl(control);
+		remote = control;
 		const on = await control.handle({ type: "remote", action: "on", port: 0 });
 		if (on.type !== "remote_result" || !on.code) throw new Error("not listening");
 		const base = `http://127.0.0.1:${on.port}`;
-		const beat = () => handleIpcRequest(supervisor, { type: "register", instance: { id: "pane-1", cwd: "/p" } });
+		const beat = () => handle({ type: "register", instance: { id: "pane-1", cwd: "/p" } });
 		expect(await beat()).not.toHaveProperty("watched");
 		const paired = await fetch(`${base}/api/pair`, {
 			method: "POST",
@@ -296,16 +299,16 @@ describe("remote control switch", () => {
 		await until(": connected");
 		expect(await beat()).toMatchObject({ type: "register_result", watched: true });
 		const live = { text: "Working on it", tools: [] };
-		expect(await handleIpcRequest(supervisor, { type: "remote_live", instanceId: "pane-1", live })).toMatchObject({
+		expect(await handle({ type: "remote_live", instanceId: "pane-1", live })).toMatchObject({
 			type: "ack",
 			ok: true,
 		});
 		await until(JSON.stringify({ sessionId: "pane-1", live }));
 		// The end of a reply names the transcript entry it became.
-		await handleIpcRequest(supervisor, { type: "remote_live", instanceId: "pane-1", live: null, entryId: "e7" });
+		await handle({ type: "remote_live", instanceId: "pane-1", live: null, entryId: "e7" });
 		await until(JSON.stringify({ sessionId: "pane-1", live: null, entryId: "e7" }));
-		await handleIpcRequest(supervisor, { type: "remote_live", instanceId: "pane-1", live });
-		await handleIpcRequest(supervisor, { type: "unregister", instanceId: "pane-1" });
+		await handle({ type: "remote_live", instanceId: "pane-1", live });
+		await handle({ type: "unregister", instanceId: "pane-1" });
 		await until(JSON.stringify({ sessionId: "pane-1", live: null }));
 		controller.abort();
 	});
@@ -327,18 +330,16 @@ describe("remote control switch", () => {
 			startFailed: () => {},
 			webDir: dir,
 		});
-		setRemoteControl(control);
+		remote = control;
 		const report = {
 			models: [{ provider: "openai", id: "gpt-5" }],
 			usage: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0, cost: 0 },
 		};
 		// Kept while remote control is off, so the phone has it once it is on.
-		expect(await handleIpcRequest(supervisor, { type: "remote_report", instanceId: "pane-1", report })).toMatchObject(
-			{
-				type: "ack",
-				ok: true,
-			},
-		);
+		expect(await handle({ type: "remote_report", instanceId: "pane-1", report })).toMatchObject({
+			type: "ack",
+			ok: true,
+		});
 		const on = await control.handle({ type: "remote", action: "on", port: 0 });
 		if (on.type !== "remote_result" || !on.code) throw new Error("not listening");
 		const base = `http://127.0.0.1:${on.port}`;
@@ -361,16 +362,16 @@ describe("remote control switch", () => {
 		};
 		await until(": connected");
 		const next = { ...report, thinkingLevel: "high" };
-		await handleIpcRequest(supervisor, { type: "remote_report", instanceId: "pane-1", report: next });
+		await handle({ type: "remote_report", instanceId: "pane-1", report: next });
 		await until("event: status");
 		expect(await (await status()).json()).toEqual({ report: next });
 		// The same report again still signals: a compact the pane skipped or pi refused changes nothing.
 		const signals = received.split("event: status").length;
-		await handleIpcRequest(supervisor, { type: "remote_report", instanceId: "pane-1", report: next });
+		await handle({ type: "remote_report", instanceId: "pane-1", report: next });
 		while (received.split("event: status").length === signals) {
 			received += new TextDecoder().decode((await reader.read()).value);
 		}
-		await handleIpcRequest(supervisor, { type: "unregister", instanceId: "pane-1" });
+		await handle({ type: "unregister", instanceId: "pane-1" });
 		expect((await status()).status).toBe(404);
 		controller.abort();
 	});
@@ -389,16 +390,15 @@ describe("remote control switch", () => {
 			startFailed: () => {},
 			webDir: dir,
 		});
-		setRemoteControl(control);
+		remote = control;
 		const sessionFile = join(dir, "s.jsonl");
 		writeFileSync(sessionFile, "");
-		const register = (id: string) =>
-			handleIpcRequest(supervisor, { type: "register", instance: { id, cwd: "/p", sessionFile } });
+		const register = (id: string) => handle({ type: "register", instance: { id, cwd: "/p", sessionFile } });
 		await register("pi-a");
-		await handleIpcRequest(supervisor, { type: "unregister", instanceId: "pi-a", reason: "quit" });
+		await handle({ type: "unregister", instanceId: "pi-a", reason: "quit" });
 
 		expect(await register("pi-b")).toMatchObject({ wantReport: true });
-		await handleIpcRequest(supervisor, { type: "remote_report", instanceId: "pi-b", report: { models: [] } });
+		await handle({ type: "remote_report", instanceId: "pi-b", report: { models: [] } });
 		expect(control.hasReport("pi-a")).toBe(true);
 		expect(await register("pi-b")).not.toHaveProperty("wantReport");
 	});
@@ -676,21 +676,22 @@ describe("remote control switch", () => {
 
 	it("acknowledges a pane's live reply and report when remote control is unavailable", async () => {
 		expect(
-			await handleIpcRequest(supervisor, {
+			await handle({
 				type: "remote_live",
 				instanceId: "pane-1",
 				live: { text: "", tools: [] },
 			}),
 		).toMatchObject({ type: "ack", ok: true });
-		expect(
-			await handleIpcRequest(supervisor, { type: "remote_report", instanceId: "pane-1", report: { models: [] } }),
-		).toMatchObject({ type: "ack", ok: true });
+		expect(await handle({ type: "remote_report", instanceId: "pane-1", report: { models: [] } })).toMatchObject({
+			type: "ack",
+			ok: true,
+		});
 	});
 
 	it("is reached through the daemon's IPC handler", async () => {
-		expect(await handleIpcRequest(supervisor, { type: "remote", action: "status" })).toMatchObject({ type: "error" });
-		setRemoteControl(control);
-		expect(await handleIpcRequest(supervisor, { type: "remote", action: "status" })).toMatchObject({
+		expect(await handle({ type: "remote", action: "status" })).toMatchObject({ type: "error" });
+		remote = control;
+		expect(await handle({ type: "remote", action: "status" })).toMatchObject({
 			type: "remote_result",
 			enabled: false,
 		});

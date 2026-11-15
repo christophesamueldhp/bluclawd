@@ -1,40 +1,14 @@
 import type { AgentActivity } from "./activity.ts";
 import type { Collaborations } from "./collaborations.ts";
 import type {
-	AckResponse,
 	CollaborationRequest,
 	CollaborationResponse,
-	DeleteRequest,
 	ErrorResponse,
 	InstanceSummary,
-	ListRequest,
-	ListResponse,
-	MetaRequest,
-	RegisterRequest,
-	RegisterResponse,
-	RemoteLiveRequest,
-	RemoteReportRequest,
-	RemoteRequest,
-	RemoteResponse,
-	RenameRequest,
-	RunQueueRequest,
-	RunQueueResponse,
-	SaveRequest,
-	SendRequest,
+	RequestMap,
+	ResponseMap,
+	ResponseTo,
 	ServerRequest,
-	ServerResponse,
-	ShutdownRequest,
-	ShutdownResponse,
-	StartFailedRequest,
-	StartRequest,
-	StartResponse,
-	StatusRequest,
-	StatusResponse,
-	UnregisterRequest,
-	UnregisterResponse,
-	WaitRequest,
-	WaitResponse,
-	WakeupsRequest,
 } from "./ipc/protocol.ts";
 import { pickPaneHeartbeat } from "./ipc/protocol.ts";
 import type { RemoteControl } from "./remote/control.ts";
@@ -68,42 +42,29 @@ function toInstanceSummary(
 /** Below the pane's 30 s request timeout, so a wait is answered rather than given up on. */
 const WAIT_MS = 25_000;
 
-/** Installed by serve.ts: the process's own graceful shutdown. Unset outside `serve` (tests). */
-let shutdownHook: (() => void) | undefined;
-
-export function setShutdownHook(hook: (() => void) | undefined): void {
-	shutdownHook = hook;
+/**
+ * What the handler works with beside the supervisor, as serve.ts gives it. A request for one that is not given is
+ * refused, or does nothing where it only reports to it.
+ */
+export interface HandlerParts {
+	/** The process's own graceful shutdown. */
+	shutdown?: () => void;
+	/** Remote control's switch. */
+	remote?: RemoteControl;
+	wakeups?: Pick<WakeupKeeper, "hold">;
+	/** The queue of subagent runs. */
+	runQueue?: RunQueue;
+	/** The collaborations between orchestrators. */
+	collaborations?: Collaborations;
 }
 
-/** Installed by serve.ts: remote control's switch. Unset outside `serve` (tests). */
-let remoteControl: RemoteControl | undefined;
-
-export function setRemoteControl(control: RemoteControl | undefined): void {
-	remoteControl = control;
-}
-
-let wakeupKeeper: Pick<WakeupKeeper, "hold"> | undefined;
-
-export function setWakeupKeeper(keeper: Pick<WakeupKeeper, "hold"> | undefined): void {
-	wakeupKeeper = keeper;
-}
-
-/** Installed by serve.ts: the queue of subagent runs. Unset outside `serve` (tests). */
-let runQueue: RunQueue | undefined;
-
-export function setRunQueue(queue: RunQueue | undefined): void {
-	runQueue = queue;
-}
-
-/** Installed by serve.ts: the collaborations between orchestrators. Unset outside `serve` (tests). */
-let collaborations: Collaborations | undefined;
-
-export function setCollaborations(held: Collaborations | undefined): void {
-	collaborations = held;
-}
+type Daemon = HandlerParts & { supervisor: ServerSupervisor };
 
 /** A collaboration request's answer; a refusal is an error with why. */
-async function handleCollaboration(request: CollaborationRequest): Promise<CollaborationResponse | ErrorResponse> {
+async function handleCollaboration(
+	collaborations: Collaborations | undefined,
+	request: CollaborationRequest,
+): Promise<CollaborationResponse | ErrorResponse> {
 	if (!collaborations) return { type: "error", ok: false, error: "collaborations are not kept in this process" };
 	const result = (fields: Omit<CollaborationResponse, "type" | "ok">): CollaborationResponse => ({
 		type: "collaboration_result",
@@ -165,248 +126,210 @@ function unknownInstanceError(instanceId: string): ErrorResponse {
 	};
 }
 
-// Overhead types
-export async function handleIpcRequest(
-	supervisor: ServerSupervisor,
-	request: ListRequest,
-): Promise<ListResponse | ErrorResponse>;
-export async function handleIpcRequest(
-	supervisor: ServerSupervisor,
-	request: StatusRequest,
-): Promise<StatusResponse | ErrorResponse>;
-export async function handleIpcRequest(
-	supervisor: ServerSupervisor,
-	request: RegisterRequest,
-): Promise<RegisterResponse | ErrorResponse>;
-export async function handleIpcRequest(
-	supervisor: ServerSupervisor,
-	request: WaitRequest,
-): Promise<WaitResponse | ErrorResponse>;
-export async function handleIpcRequest(
-	supervisor: ServerSupervisor,
-	request: UnregisterRequest,
-): Promise<UnregisterResponse | ErrorResponse>;
-export async function handleIpcRequest(
-	supervisor: ServerSupervisor,
-	request: ShutdownRequest,
-): Promise<ShutdownResponse | ErrorResponse>;
-export async function handleIpcRequest(
-	supervisor: ServerSupervisor,
-	request: RemoteRequest,
-): Promise<RemoteResponse | ErrorResponse>;
-export async function handleIpcRequest(
-	supervisor: ServerSupervisor,
-	request: StartRequest,
-): Promise<StartResponse | ErrorResponse>;
-export async function handleIpcRequest(
-	supervisor: ServerSupervisor,
-	request: RunQueueRequest,
-): Promise<RunQueueResponse | ErrorResponse>;
-export async function handleIpcRequest(
-	supervisor: ServerSupervisor,
-	request: CollaborationRequest,
-): Promise<CollaborationResponse | ErrorResponse>;
-export async function handleIpcRequest(
-	supervisor: ServerSupervisor,
-	request:
-		| DeleteRequest
-		| RenameRequest
-		| MetaRequest
-		| SaveRequest
-		| SendRequest
-		| StartFailedRequest
-		| RemoteLiveRequest
-		| RemoteReportRequest
-		| WakeupsRequest,
-): Promise<AckResponse | ErrorResponse>;
-export async function handleIpcRequest(supervisor: ServerSupervisor, request: ServerRequest): Promise<ServerResponse>;
-export async function handleIpcRequest(supervisor: ServerSupervisor, request: ServerRequest): Promise<ServerResponse> {
-	switch (request.type) {
-		case "list": {
-			// tmux is asked first, without blocking: a heartbeat is not held up behind the list's probes.
-			const probe = await supervisor.probeForList();
-			return { type: "list_result", ok: true, instances: listSummaries(supervisor, probe) };
-		}
+type Answer<K extends keyof RequestMap> = ResponseMap[K] | ErrorResponse;
 
-		case "status": {
-			const instance = supervisor.getInstance(request.instanceId);
-			if (!instance) {
-				return unknownInstanceError(request.instanceId);
+/** Each request's handler, held to the response declared for it (ResponseMap). */
+const handlers: {
+	[K in keyof RequestMap]: (request: RequestMap[K], daemon: Daemon) => Answer<K> | Promise<Answer<K>>;
+} = {
+	list: async (_request, { supervisor }) => {
+		// tmux is asked first, without blocking: a heartbeat is not held up behind the list's probes.
+		const probe = await supervisor.probeForList();
+		return { type: "list_result", ok: true, instances: listSummaries(supervisor, probe) };
+	},
+
+	status: (request, { supervisor }) => {
+		const instance = supervisor.getInstance(request.instanceId);
+		if (!instance) {
+			return unknownInstanceError(request.instanceId);
+		}
+		return {
+			type: "status_result",
+			ok: true,
+			instance: toInstanceSummary(instance),
+		};
+	},
+
+	register: (request, { supervisor, remote }) => {
+		const now = new Date().toISOString();
+		const { id, activity, launch } = request.instance;
+		const heartbeat = pickPaneHeartbeat(request.instance);
+		const record: InstanceRecord = {
+			...heartbeat,
+			id,
+			status: "online",
+			createdAt: heartbeat.createdAt ?? now,
+			lastSeenAt: now,
+		};
+		if (launch) remote?.noteLaunch(launch);
+		supervisor.registerExternal(record, activity ?? "idle");
+		// The phone started it by its pane's name, and knows it by its row's id.
+		remote?.registered(record.id);
+		const row = supervisor.rowIdOf(record.id);
+		const messages = supervisor.drainExternal(record.id);
+		return {
+			type: "register_result",
+			ok: true,
+			...(messages.length ? { messages } : {}),
+			...(remote?.watched(row) ? { watched: true } : {}),
+			...(remote && !remote.hasReport(row) ? { wantReport: true } : {}),
+		};
+	},
+
+	send: async (request, { supervisor }) => {
+		const { message } = request;
+		// Only the daemon says what a collaborator sent, and that a collaboration changed.
+		if (
+			message.type === "session_message" &&
+			(message.kind === "collaboration" || message.kind === "collaborator_message")
+		)
+			return { type: "error", ok: false, error: "only the daemon sends collaboration messages" };
+		return (await supervisor.sendExternal(request.instanceId, request.message))
+			? { type: "ack", ok: true }
+			: unknownInstanceError(request.instanceId);
+	},
+
+	wait: async (request, { supervisor }) => {
+		const waiting = supervisor.waitExternal(request.instanceId, WAIT_MS);
+		if (!waiting) return unknownInstanceError(request.instanceId);
+		const outcome = await waiting;
+		return {
+			type: "wait_result",
+			ok: true,
+			...(outcome === "queued" ? { queued: true } : outcome === "superseded" ? { superseded: true } : {}),
+		};
+	},
+
+	unregister: (request, { supervisor, remote }) => {
+		const row = supervisor.rowIdOf(request.instanceId);
+		supervisor.unregisterExternal(request.instanceId, request.reason);
+		remote?.live(row, null);
+		remote?.report(row, undefined);
+		return { type: "unregister_result", ok: true };
+	},
+
+	wakeups: (request, { wakeups }) => {
+		wakeups?.hold(request.held);
+		return { type: "ack", ok: true };
+	},
+
+	run_queue: async (request, { runQueue }) => {
+		if (!runQueue) return { type: "error", ok: false, error: "runs are not queued in this process" };
+		if (request.action === "claim") {
+			const granted = await runQueue.claim(request.run, request.parent);
+			return { type: "run_queue_result", ok: true, granted };
+		}
+		if (request.action === "claim_now") {
+			return { type: "run_queue_result", ok: true, ...runQueue.claimNow(request.run, request.parent) };
+		}
+		if (request.action === "release") {
+			runQueue.release(request.run);
+			return { type: "run_queue_result", ok: true };
+		}
+		if (request.action === "take_env") {
+			const env = runQueue.takePaneEnv(request.pane);
+			if (!env) return { type: "error", ok: false, error: `no run's environment waits for pane ${request.pane}` };
+			return { type: "run_queue_result", ok: true, env };
+		}
+		if (request.action === "launch") {
+			try {
+				return { type: "run_queue_result", ok: true, hostPid: runQueue.launch(request.run, request.host) };
+			} catch (error) {
+				return { type: "error", ok: false, error: error instanceof Error ? error.message : String(error) };
 			}
-			return {
-				type: "status_result",
-				ok: true,
-				instance: toInstanceSummary(instance),
-			};
 		}
+		// From a client built after this daemon: refused as such, never taken for another request.
+		const { action } = request as { action: unknown };
+		return { type: "error", ok: false, error: `unknown run_queue action ${JSON.stringify(action)}` };
+	},
 
-		case "register": {
-			const now = new Date().toISOString();
-			const { id, activity, launch } = request.instance;
-			const heartbeat = pickPaneHeartbeat(request.instance);
-			const record: InstanceRecord = {
-				...heartbeat,
-				id,
-				status: "online",
-				createdAt: heartbeat.createdAt ?? now,
-				lastSeenAt: now,
-			};
-			if (launch) remoteControl?.noteLaunch(launch);
-			supervisor.registerExternal(record, activity ?? "idle");
-			// The phone started it by its pane's name, and knows it by its row's id.
-			remoteControl?.registered(record.id);
-			const row = supervisor.rowIdOf(record.id);
-			const messages = supervisor.drainExternal(record.id);
-			return {
-				type: "register_result",
-				ok: true,
-				...(messages.length ? { messages } : {}),
-				...(remoteControl?.watched(row) ? { watched: true } : {}),
-				...(remoteControl && !remoteControl.hasReport(row) ? { wantReport: true } : {}),
-			};
+	collaboration: (request, { collaborations }) => handleCollaboration(collaborations, request),
+
+	delete: (request, { supervisor }) =>
+		supervisor.deleteInstance(request.instanceId)
+			? { type: "ack", ok: true }
+			: unknownInstanceError(request.instanceId),
+
+	rename: (request, { supervisor }) => {
+		const instance = supervisor.renameInstance(request.instanceId, request.name);
+		return instance
+			? { type: "ack", ok: true, instance: toInstanceSummary(instance) }
+			: unknownInstanceError(request.instanceId);
+	},
+
+	meta: (request, { supervisor }) => {
+		const instance = supervisor.setInstanceMeta(request.instanceId, {
+			pinned: request.pinned,
+			sortOrder: request.sortOrder,
+		});
+		return instance
+			? { type: "ack", ok: true, instance: toInstanceSummary(instance) }
+			: unknownInstanceError(request.instanceId);
+	},
+
+	save: (request, { supervisor }) => {
+		const instance = supervisor.saveInstance({
+			cwd: request.cwd,
+			label: request.label,
+			sessionFile: request.sessionFile,
+			sessionId: request.sessionId,
+			parent: request.parent,
+		});
+		return { type: "ack", ok: true, ...(instance ? { instance: toInstanceSummary(instance) } : {}) };
+	},
+
+	start: (request, { supervisor }) => {
+		if ("pane" in request) {
+			supervisor.paneStarting(request);
+			return { type: "start_result", ok: true, id: request.pane };
 		}
+		const claim = supervisor.claimStart(request);
+		if (!claim.ok) return { type: "error", ok: false, error: START_REFUSED[claim.refused] };
+		return { type: "start_result", ok: true, id: claim.id };
+	},
 
-		case "send": {
-			const { message } = request;
-			// Only the daemon says what a collaborator sent, and that a collaboration changed.
-			if (
-				message.type === "session_message" &&
-				(message.kind === "collaboration" || message.kind === "collaborator_message")
-			)
-				return { type: "error", ok: false, error: "only the daemon sends collaboration messages" };
-			return (await supervisor.sendExternal(request.instanceId, request.message))
-				? { type: "ack", ok: true }
-				: unknownInstanceError(request.instanceId);
-		}
+	start_failed: (request, { supervisor }) => {
+		supervisor.startFailed(request.instanceId);
+		return { type: "ack", ok: true };
+	},
 
-		case "wait": {
-			const waiting = supervisor.waitExternal(request.instanceId, WAIT_MS);
-			if (!waiting) return unknownInstanceError(request.instanceId);
-			const outcome = await waiting;
-			return {
-				type: "wait_result",
-				ok: true,
-				...(outcome === "queued" ? { queued: true } : outcome === "superseded" ? { superseded: true } : {}),
-			};
-		}
+	remote: (request, { remote }) => {
+		if (!remote) return { type: "error", ok: false, error: "remote control is not available in this process" };
+		return remote.handle(request);
+	},
 
-		case "unregister": {
-			const row = supervisor.rowIdOf(request.instanceId);
-			supervisor.unregisterExternal(request.instanceId, request.reason);
-			remoteControl?.live(row, null);
-			remoteControl?.report(row, undefined);
-			return { type: "unregister_result", ok: true };
-		}
+	remote_live: (request, { supervisor, remote }) => {
+		remote?.live(supervisor.rowIdOf(request.instanceId), request.live, request.entryId);
+		return { type: "ack", ok: true };
+	},
 
-		case "wakeups": {
-			wakeupKeeper?.hold(request.held);
-			return { type: "ack", ok: true };
-		}
+	remote_report: (request, { supervisor, remote }) => {
+		remote?.report(supervisor.rowIdOf(request.instanceId), request.report);
+		return { type: "ack", ok: true };
+	},
 
-		case "run_queue": {
-			if (!runQueue) return { type: "error", ok: false, error: "runs are not queued in this process" };
-			if (request.action === "claim") {
-				const granted = await runQueue.claim(request.run, request.parent);
-				return { type: "run_queue_result", ok: true, granted };
-			}
-			if (request.action === "claim_now") {
-				return { type: "run_queue_result", ok: true, ...runQueue.claimNow(request.run, request.parent) };
-			}
-			if (request.action === "release") {
-				runQueue.release(request.run);
-				return { type: "run_queue_result", ok: true };
-			}
-			if (request.action === "take_env") {
-				const env = runQueue.takePaneEnv(request.pane);
-				if (!env) return { type: "error", ok: false, error: `no run's environment waits for pane ${request.pane}` };
-				return { type: "run_queue_result", ok: true, env };
-			}
-			if (request.action === "launch") {
-				try {
-					return { type: "run_queue_result", ok: true, hostPid: runQueue.launch(request.run, request.host) };
-				} catch (error) {
-					return { type: "error", ok: false, error: error instanceof Error ? error.message : String(error) };
-				}
-			}
-			// From a client built after this daemon: refused as such, never taken for another request.
-			const { action } = request as { action: unknown };
-			return { type: "error", ok: false, error: `unknown run_queue action ${JSON.stringify(action)}` };
-		}
+	shutdown: (_request, { shutdown }) => {
+		if (!shutdown) return { type: "error", ok: false, error: "shutdown is not available in this process" };
+		// Deferred so the reply is written before the socket server closes.
+		setTimeout(shutdown, 100);
+		return { type: "shutdown_result", ok: true };
+	},
+};
 
-		case "collaboration":
-			return handleCollaboration(request);
-
-		case "delete": {
-			return supervisor.deleteInstance(request.instanceId)
-				? { type: "ack", ok: true }
-				: unknownInstanceError(request.instanceId);
-		}
-
-		case "rename": {
-			const instance = supervisor.renameInstance(request.instanceId, request.name);
-			return instance
-				? { type: "ack", ok: true, instance: toInstanceSummary(instance) }
-				: unknownInstanceError(request.instanceId);
-		}
-
-		case "meta": {
-			const instance = supervisor.setInstanceMeta(request.instanceId, {
-				pinned: request.pinned,
-				sortOrder: request.sortOrder,
-			});
-			return instance
-				? { type: "ack", ok: true, instance: toInstanceSummary(instance) }
-				: unknownInstanceError(request.instanceId);
-		}
-
-		case "save": {
-			const instance = supervisor.saveInstance({
-				cwd: request.cwd,
-				label: request.label,
-				sessionFile: request.sessionFile,
-				sessionId: request.sessionId,
-				parent: request.parent,
-			});
-			return { type: "ack", ok: true, ...(instance ? { instance: toInstanceSummary(instance) } : {}) };
-		}
-
-		case "start": {
-			if ("pane" in request) {
-				supervisor.paneStarting(request);
-				return { type: "start_result", ok: true, id: request.pane };
-			}
-			const claim = supervisor.claimStart(request);
-			if (!claim.ok) return { type: "error", ok: false, error: START_REFUSED[claim.refused] };
-			return { type: "start_result", ok: true, id: claim.id };
-		}
-
-		case "start_failed": {
-			supervisor.startFailed(request.instanceId);
-			return { type: "ack", ok: true };
-		}
-
-		case "remote": {
-			if (!remoteControl)
-				return { type: "error", ok: false, error: "remote control is not available in this process" };
-			return remoteControl.handle(request);
-		}
-
-		case "remote_live": {
-			remoteControl?.live(supervisor.rowIdOf(request.instanceId), request.live, request.entryId);
-			return { type: "ack", ok: true };
-		}
-
-		case "remote_report": {
-			remoteControl?.report(supervisor.rowIdOf(request.instanceId), request.report);
-			return { type: "ack", ok: true };
-		}
-
-		case "shutdown": {
-			if (!shutdownHook) return { type: "error", ok: false, error: "shutdown is not available in this process" };
-			// Deferred so the reply is written before the socket server closes.
-			const hook = shutdownHook;
-			setTimeout(hook, 100);
-			return { type: "shutdown_result", ok: true };
-		}
-	}
+/**
+ * The daemon's answer to a request. One of a type it does not know, from a client built after it, gets no answer of
+ * any type: the client tells by that (OrchestratorClient.ask).
+ */
+export async function handleIpcRequest<R extends ServerRequest>(
+	supervisor: ServerSupervisor,
+	request: R,
+	parts: HandlerParts = {},
+): Promise<ResponseTo<R> | ErrorResponse> {
+	const handle = Object.hasOwn(handlers, request.type)
+		? (handlers[request.type] as (
+				request: ServerRequest,
+				daemon: Daemon,
+			) => Answer<R["type"]> | Promise<Answer<R["type"]>>)
+		: undefined;
+	return (await handle?.(request, { ...parts, supervisor })) as ResponseTo<R> | ErrorResponse;
 }

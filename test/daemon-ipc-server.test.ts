@@ -4,7 +4,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { BUILD_ID, VERSION } from "../daemon/config.ts";
-import { sendIpcRequest } from "../daemon/ipc/client.ts";
 import { type IpcRequestHandler, startIpcServer } from "../daemon/ipc/server.ts";
 import { OrchestratorClient } from "../daemon/orchestrator-client.ts";
 
@@ -91,7 +90,7 @@ describe("startIpcServer — version echo", () => {
 		});
 		await new Promise<void>((resolve) => server?.listen(join(tempDir, "server.sock"), resolve));
 
-		expect(await sendIpcRequest({ type: "list" })).toEqual(response);
+		expect(await new OrchestratorClient().request({ type: "list" })).toEqual(response);
 	});
 
 	it("reads a large request whole, with characters cut across its reads", async () => {

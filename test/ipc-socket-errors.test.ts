@@ -3,7 +3,6 @@ import * as net from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { sendIpcRequest } from "../daemon/ipc/client.ts";
 import { startIpcServer } from "../daemon/ipc/server.ts";
 import { OrchestratorClient } from "../daemon/orchestrator-client.ts";
 
@@ -48,13 +47,6 @@ describe("IPC socket errors", () => {
 		const daemonSide = await connected;
 		expect(() => daemonSide.emit("error", Object.assign(new Error("reset"), { code: "ECONNRESET" }))).not.toThrow();
 		client.destroy();
-	});
-
-	it("sendIpcRequest leaves no socket that can throw after the reply", async () => {
-		server = await startIpcServer(listHandler);
-		await sendIpcRequest({ type: "list" });
-		expect(clientSockets).toHaveLength(1);
-		expect(() => clientSockets[0].emit("error", new Error("late reset"))).not.toThrow();
 	});
 
 	it("OrchestratorClient leaves no socket that can throw after the reply", async () => {
