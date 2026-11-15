@@ -21,7 +21,7 @@ import {
 } from "./chat.js";
 import { setNewOptions } from "./composer.js";
 import { diffCounts, diffHtml } from "./diff.js";
-import { ICONS } from "./icons.js";
+import { ICONS, toolIcon } from "./icons.js";
 import { dataUrl, isImageFile, readImage } from "./image.js";
 import {
 	ageAt,
@@ -73,7 +73,7 @@ import { composerAction, duration, STOP_GUARD_MS, turnSince, turnTimes } from ".
 /** @typedef {import("./statusbar.js").Report} Report */
 
 /** This build's version, as sw.js caches it (a test keeps the two the same). */
-const VERSION = "0.0.59";
+const VERSION = "0.0.60";
 const VIEW_MODE_KEY = "bluclawd-view-mode";
 /** Each chat's pending prompts and unsent text, kept for when it opens again. */
 const keptPending = pendingStore(() => localStorage);
@@ -859,11 +859,13 @@ function rowHtml(s) {
 	]
 		.filter(Boolean)
 		.join(" · ");
+	// Idle is what a row is when it says nothing else.
+	const said = status === STATE_WORDS.idle ? "" : `<span class="session-state ${esc(tone)}">${esc(status)}</span>`;
 	const unseen = isUnseen(s, seen);
 	const mark = unseen ? '<span class="unseen-dot" role="img" aria-label="Unseen"></span>' : "";
 	return `<a class="row${s.alive ? "" : " closed"}${unseen ? " unseen" : ""}" href="#s/${encodeURIComponent(s.id)}"><span class="glyph ${esc(tone)}" aria-hidden="true">${glyph}</span>
-<span class="name">${mark}${esc(s.label)}<small><span class="session-state ${esc(tone)}">${esc(status)}</span>${detail ? ` · ${detail}` : ""}</small></span>
-<span class="age">${age(ageAt(s))}</span></a>`;
+<span class="name">${mark}${esc(s.label)}<small>${detail}</small></span>
+<span class="age">${said}<span>${age(ageAt(s))}</span></span></a>`;
 }
 
 function rowsHtml() {
@@ -913,14 +915,14 @@ function outHtml(lines) {
 }
 
 /**
- * A tool call: `● Bash(npm test)`, and what it did on a line under it
+ * A tool call: its tool's icon and `Bash npm test`, and what it did on a line under it
  * (output.js); a tap shows the whole output. An edit shows its diff at once.
  * @param {string} name @param {string} summary @param {Message | undefined} result @param {string} key @param {boolean} [running]
  */
 function toolHtml(name, summary, result, key, running = false) {
-	const call = `<span class="call"><span class="bullet" aria-hidden="true">●</span> <b>${esc(name.charAt(0).toUpperCase() + name.slice(1))}</b>${summary ? `(${esc(summary)})` : ""}</span>`;
+	const call = `<span class="call"><span class="tool">${toolIcon(name)}</span><span class="said"><b>${esc(name.charAt(0).toUpperCase() + name.slice(1))}</b>${summary ? ` ${esc(summary)}` : ""}</span></span>`;
 	if (!result) return `<div class="t${running ? " running" : ""}">${call}</div>`;
-	const kind = result.ok ? "t ok" : "t err";
+	const kind = result.ok ? "t" : "t err";
 	if (result.diff) {
 		const { added, removed } = diffCounts(result.diff);
 		return `<div class="${kind}">${call}${outHtml([diffSummary(added, removed)])}
@@ -1069,17 +1071,17 @@ function transcriptHtml(calls, running, midTurn) {
 }
 
 /**
- * Finished tool calls folded into one line: "▸ Ran 2 commands, edited a file";
+ * Finished tool calls folded into one line: "Ran 2 commands, edited a file";
  * a tap shows each call, and a tap on a call its output.
  * @param {string[]} names the calls' tools @param {string[]} blocks the calls', and the thinking between them @param {string} key
  */
 function groupHtml(names, blocks, key) {
-	return `<details class="run" data-key="${esc(key)}"><summary>${esc(groupSummary(names))}</summary><div class="steps">${blocks.join("")}</div></details>`;
+	return `<details class="run" data-key="${esc(key)}"><summary>${ICONS.wrench}${esc(groupSummary(names))}</summary><div class="steps">${blocks.join("")}</div></details>`;
 }
 
 /** Hidden until tapped. @param {string} thinking @param {string} key */
 function thinkingBlock(thinking, key) {
-	return `<details class="think" data-key="${esc(key)}"><summary>Thinking</summary><pre>${esc(thinking)}</pre></details>`;
+	return `<details class="think" data-key="${esc(key)}"><summary>${ICONS.brain}Thinking</summary><pre>${esc(thinking)}</pre></details>`;
 }
 
 /** Under a sent prompt: what its pane reported of it, if it reports outcomes. */
@@ -1629,7 +1631,7 @@ function updateFloat(session) {
 	const tasks = chat.report?.tasks?.length ?? 0;
 	if (tasks) {
 		items.push(
-			`<button type="button" class="pill-item" data-float="tasks" aria-haspopup="dialog" aria-label="${tasks} background task${tasks === 1 ? "" : "s"}">${ICONS.tasks}${tasks}</button>`,
+			`<button type="button" class="pill-item" data-float="tasks" aria-haspopup="dialog" aria-label="${tasks} background task${tasks === 1 ? "" : "s"}">${ICONS.terminal}${tasks}</button>`,
 		);
 	}
 	if (!stuck)

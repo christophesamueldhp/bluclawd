@@ -1,7 +1,7 @@
 // @ts-check
 /**
  * What the chat shows of a tool's result and of a marker, as bluclawd's transcript does: a
- * call is one line, `● Read(src/x.ts)`, and its result one more under it, `⎿ Read 120 lines`;
+ * call is one line, `Read src/x.ts`, and its result one more under it, `⎿ Read 120 lines`;
  * the whole output is a tap away. Pure, so the tests import it.
  */
 
