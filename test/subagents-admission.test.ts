@@ -23,8 +23,8 @@ import { prepareRunContainment } from "../ext/sandbox/run-containment.ts";
 import {
 	type AdmissionContext,
 	type AdmissionResult,
-	type ChainPlacement,
 	createRunAdmission,
+	type LaunchRequest,
 	MAX_TASK_INPUT_BYTES,
 	type RunAdmissionDeps,
 	type RunExecutionContext,
@@ -171,10 +171,10 @@ async function setup(
 		params: LaunchParams,
 		overrides: Partial<AdmissionContext> = {},
 		signal?: AbortSignal,
-		chain?: ChainPlacement,
+		placement: Pick<LaunchRequest, "group" | "workspace"> = {},
 	) =>
 		admission.launch(
-			{ toolCallId: `call_${++calls}`, parentTurnId: "turn_0", params, signal, chain },
+			{ toolCallId: `call_${++calls}`, parentTurnId: "turn_0", params, signal, ...placement },
 			{ ...ctx, ...overrides },
 		);
 	const resume = (
@@ -183,7 +183,10 @@ async function setup(
 		overrides: Partial<AdmissionContext> = {},
 	) => {
 		const resumeCtx = { ...ctx, ...overrides };
-		return { result: admission.resume(run, buildPrompt, resumeCtx), ctx: resumeCtx };
+		return {
+			result: admission.resume(run, { from: "orchestrator", text: buildPrompt }, resumeCtx),
+			ctx: resumeCtx,
+		};
 	};
 	const storageDir = join(agentDir, "bluclawd", "subagents", sessionManager.getSessionId());
 	return {
@@ -243,6 +246,80 @@ describe("Run admission", () => {
 		expect(handleOf(second).record.name).toBe("explorer-2");
 		// Admission prepares each admitted run's directory, and no other.
 		expect(readdirSync(storageDir).sort()).toEqual([handleOf(first).runId, handleOf(second).runId].sort());
+	});
+
+	it("checks a launch without admitting it, and admits what passed once", async () => {
+		const { admission, ctx, scheduler, storageDir } = await setup();
+		const checked = await admission.check(
+			{ toolCallId: "call_c", parentTurnId: "turn_0", params: { agent: "explorer", task: "Look." } },
+			ctx,
+		);
+		if (!checked.ok) throw new Error(checked.error);
+		expect(checked.checked).toMatchObject({ writes: false });
+		expect(checked.checked.root).toBe(checked.checked.cwd);
+		// Nothing of it is stored or listed until it is admitted.
+		expect(scheduler.listRuns()).toEqual([]);
+		expect(existsSync(storageDir) ? readdirSync(storageDir) : []).toEqual([]);
+		const admitted = handleOf(admission.admit(checked.checked));
+		expect(scheduler.listRuns().map(({ runId }) => runId)).toEqual([admitted.runId]);
+		expect(() => admission.admit(checked.checked)).toThrow(/admitted once/);
+	});
+
+	it("refuses at its admission what changed since its check: the name, or the session", async () => {
+		const { admission, ctx, invalidateSession } = await setup();
+		const check = async (name: string) => {
+			const checked = await admission.check(
+				{ toolCallId: "call_c", parentTurnId: "turn_0", params: { agent: "explorer", task: "x", name } },
+				ctx,
+			);
+			if (!checked.ok) throw new Error(checked.error);
+			return checked.checked;
+		};
+		const first = await check("backend");
+		const second = await check("backend");
+		const held = handleOf(admission.admit(first));
+		expect(errorOf(admission.admit(second))).toBe(
+			`Subagent name "backend" is already used by running agent ${held.runId}; choose another name.`,
+		);
+		const third = await check("frontend");
+		invalidateSession();
+		expect(errorOf(admission.admit(third))).toMatch(/Parent session or branch changed before subagent admission/);
+	});
+
+	it("keeps a run's worktree once it ends when asked to, at a launch and at a Resume", async () => {
+		const { admission, agentDir, cwd, ctx, launch, scheduler } = await setup({ firstGenerationCompletes: true });
+		const rpcOf = (runId: string) => {
+			const context = scheduler.getContext(runId);
+			return context && "rpc" in context ? context.rpc : undefined;
+		};
+		const kept = handleOf(
+			await admission.launch(
+				{
+					toolCallId: "call_k",
+					parentTurnId: "turn_0",
+					params: { agent: "explorer", task: "x" },
+					keepWorktree: true,
+				},
+				ctx,
+			),
+		);
+		expect(rpcOf(kept.runId)?.keepWorktree).toBe(true);
+		const plain = await handleOf(await launch({ agent: "explorer", task: "x" })).completion;
+		expect(rpcOf(plain.runId)?.keepWorktree).toBeUndefined();
+		saveConversation(agentDir, cwd);
+		const resumed = handleOf(
+			await admission.resume(plain, { from: "orchestrator", text: () => "Go on." }, ctx, { keepWorktree: true }),
+		);
+		expect(rpcOf(resumed.runId)?.keepWorktree).toBe(true);
+	});
+
+	it("refuses a Resume the user would type in its pane when its orchestrator's runs do not run in panes", async () => {
+		const { admission, agentDir, cwd, ctx, launch } = await setup({ firstGenerationCompletes: true });
+		const completed = await handleOf(await launch({ agent: "explorer", task: "x" })).completion;
+		saveConversation(agentDir, cwd);
+		expect(errorOf(await admission.resume(completed, { typed: true }, ctx))).toMatch(
+			/Missing required parameter: task/,
+		);
 	});
 
 	it("refuses missing input, oversized tasks, denied roles, unknown roles and background runs in one-shot modes", async () => {
@@ -608,7 +685,7 @@ describe("Run admission of a run's own directory, and of its Resume", () => {
 		const baseline = { source, gitDir: join(source, ".git"), head: "", index: "", tree: "", commit: "", ref: "" };
 		const step = (dir: string) =>
 			launch({ agent: "explorer", cwd: dir, task: "Look." }, {}, undefined, {
-				id: "chain_x",
+				group: { chain: "chain_x" },
 				workspace: { root, baseline },
 			});
 		expect(errorOf(await step("sub"))).toMatch(/is not in the worktree of its chain/);

@@ -354,6 +354,19 @@ describe("a batch", () => {
 		expect(fake.getRun("sub_1")).toMatchObject({ name: "a", status: "cancelled" });
 	});
 
+	it("cancels the members admitted when admitting another throws", async () => {
+		const { fake, batches } = orchestrator({ a: { hold: true }, b: { throwLate: "its storage broke" } });
+		const result = await runTaskBatch(batches, [task("a", "Look."), task("b", "Look.")], request(), fake.ctx);
+
+		expect(fake.stable(textOf(result))).toBe(
+			[
+				"The batch could not be admitted whole, and the tasks admitted were cancelled before they started:",
+				'- tasks[1] ("b"): its storage broke',
+			].join("\n"),
+		);
+		expect(fake.getRun("sub_1")).toMatchObject({ name: "a", status: "cancelled" });
+	});
+
 	it("leaves a failed member's siblings working, and settles once all are final", async () => {
 		const { fake, batches, manifest } = orchestrator({
 			a: { hold: true, report: "A done." },

@@ -1,7 +1,13 @@
 import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AdmissionContext, AdmissionResult, RunAdmission } from "../../ext/subagents/admission.ts";
+import type {
+	AdmissionContext,
+	AdmissionResult,
+	Checked,
+	LaunchRequest,
+	RunAdmission,
+} from "../../ext/subagents/admission.ts";
 import type { SubagentRunRecord } from "../../ext/subagents/runs.ts";
 import { storeRunReport, subagentRunDir } from "../../ext/subagents/storage.ts";
 
@@ -69,54 +75,68 @@ export function fakeAdmission(plans: Record<string, RunPlan>) {
 		return { ok: true, handle: { runId: record.runId, record, completion } };
 	};
 
-	const admission: Pick<RunAdmission, "launch" | "resume"> = {
-		launch: async (request, ctx) => {
+	/** What admits each launch the fake checked. */
+	const admits = new WeakMap<Checked, () => AdmissionResult>();
+	const admission: Pick<RunAdmission, "check" | "admit" | "launch" | "resume"> = {
+		check: async (request, ctx) => {
 			const { params } = request;
 			const name = params.name ?? String(params.agent);
 			const plan = plans[name] ?? {};
 			if (plan.refuse) return { ok: false, error: plan.refuse };
-			if (request.ready && !(await request.ready({ cwd: ctx.cwd, root: ctx.cwd, writes: false }))) {
-				return { ok: false, error: "not admitted: its call was not admitted whole" };
-			}
-			if (plan.refuseLate) return { ok: false, error: plan.refuseLate };
-			if (plan.throwLate) throw new Error(plan.throwLate);
-			admitted.push({ name, task: params.task, generation: 0 });
-			const runId = request.chain?.runId ?? `sub_${++seq}`;
-			return start(
-				{
-					runId,
-					parentSessionId: SESSION,
-					sessionEpoch: 1,
-					parentTurnId: request.parentTurnId,
-					originToolCallId: request.toolCallId,
-					name,
-					generation: 0,
-					backend: "rpc",
-					agentName: String(params.agent),
-					provider: "faux",
-					modelId: "faux-1",
-					thinkingLevel: "off",
-					cwd: ctx.cwd,
-					taskSummary: params.task,
-					admittedAt: Date.now(),
-					startedAt: Date.now(),
-					deliveryMode: params.background ? "background" : "foreground",
-					...(request.batch ? { batch: request.batch } : {}),
-					...(request.chain ? { chain: request.chain.id } : {}),
-					status: "running",
-					backgroundDeliveryAttempted: false,
-				} as SubagentRunRecord,
-				plan,
-			);
+			const checked: Checked = { cwd: ctx.cwd, root: ctx.cwd, writes: false };
+			admits.set(checked, () => admit(request, ctx, name, plan));
+			return { ok: true, checked };
 		},
-		resume: async (run, buildPrompt) => {
+		admit: (checked) => {
+			const admitted = admits.get(checked);
+			if (!admitted) throw new Error("admitted twice");
+			admits.delete(checked);
+			return admitted();
+		},
+		launch: async (request, ctx) => {
+			const checked = await admission.check(request, ctx);
+			return checked.ok ? admission.admit(checked.checked) : checked;
+		},
+		resume: async (run, instruction) => {
 			const plan = plans[run.name ?? ""]?.resumed ?? {};
-			if (plan.refuse || !buildPrompt) return { ok: false, error: plan.refuse ?? "no instruction" };
+			if (plan.refuse) return { ok: false, error: plan.refuse };
 			const generation = run.generation + 1;
-			admitted.push({ name: run.name ?? "", task: buildPrompt(), generation });
+			admitted.push({ name: run.name ?? "", task: "typed" in instruction ? "" : instruction.text(), generation });
 			return start({ ...run, generation, status: "running", startedAt: Date.now() } as SubagentRunRecord, plan);
 		},
 	};
+	function admit(request: LaunchRequest, ctx: AdmissionContext, name: string, plan: RunPlan): AdmissionResult {
+		const { params } = request;
+		if (plan.refuseLate) return { ok: false, error: plan.refuseLate };
+		if (plan.throwLate) throw new Error(plan.throwLate);
+		admitted.push({ name, task: params.task, generation: 0 });
+		const runId = request.runId ?? `sub_${++seq}`;
+		return start(
+			{
+				runId,
+				parentSessionId: SESSION,
+				sessionEpoch: 1,
+				parentTurnId: request.parentTurnId,
+				originToolCallId: request.toolCallId,
+				name,
+				generation: 0,
+				backend: "rpc",
+				agentName: String(params.agent),
+				provider: "faux",
+				modelId: "faux-1",
+				thinkingLevel: "off",
+				cwd: ctx.cwd,
+				taskSummary: params.task,
+				admittedAt: Date.now(),
+				startedAt: Date.now(),
+				deliveryMode: params.background ? "background" : "foreground",
+				...request.group,
+				status: "running",
+				backgroundDeliveryAttempted: false,
+			} as SubagentRunRecord,
+			plan,
+		);
+	}
 
 	const ctx = {
 		cwd,

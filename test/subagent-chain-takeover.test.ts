@@ -143,9 +143,10 @@ function takeOver(
 	return new Promise((resolve) => {
 		const deps: ChainDeps = {
 			admission: {
-				launch: async ({ params, chain }) => {
+				check: async () => ({ ok: false, error: "no chain is checked after the takeover" }),
+				launch: async ({ params, runId }) => {
 					tasks.push(params.task);
-					const run = closedRun(chain?.runId ?? createRunId(), params.name ?? "", workspace.root);
+					const run = closedRun(runId ?? createRunId(), params.name ?? "", workspace.root);
 					storeRunReport(subagentRunDir(agentDir, SESSION, run.runId), {
 						text: "Admitted done.",
 						outcome: { status: "completed" },

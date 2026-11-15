@@ -117,7 +117,7 @@ export function createRunIntervention(deps: RunInterventionDeps) {
 			if (!isTerminalSubagentStatus(current.status)) {
 				current = (await deps.scheduler.whenFinal(current.runId)) ?? current;
 			}
-			const resumed = await deps.admission.resume(current, () => text, ctx, { from: "user" });
+			const resumed = await deps.admission.resume(current, { from: "user", text: () => text }, ctx);
 			if (!resumed.ok) return { ok: false, error: resumed.error };
 			noteFor(current, text);
 			return { ok: true, text: `${name} resumes with your instruction, in the background, once its turn comes.` };
