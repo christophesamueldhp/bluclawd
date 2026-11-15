@@ -379,7 +379,6 @@ describe("phone control", () => {
 
 		it.each<[string, PhoneAction, PhoneOutcome]>([
 			["a rename", { type: "rename", name: "later" }, operation({ type: "rename", name: "later" })],
-			["a delete", { type: "delete" }, operation({ type: "delete" })],
 			["stopping a task", { type: "stop_task", taskId: "f2" }, error("unknown_task")],
 			["a task's output", { type: "task_output", taskId: "b1" }, error("unknown_task")],
 			["its status", { type: "status" }, error("no_status")],
@@ -387,6 +386,11 @@ describe("phone control", () => {
 		])("answers a starting row as a stored one, which has no pane: %s", (_, action, expected) => {
 			expect(decide(at("starting"), action)).toEqual(expected);
 			expect(decide(at("stored"), action)).toEqual(expected);
+		});
+
+		it("deletes a stored row, but not a starting one, whose pane would list it again", () => {
+			expect(decide(at("stored"), { type: "delete" })).toEqual(operation({ type: "delete" }));
+			expect(decide(at("starting"), { type: "delete" })).toEqual(notRunning);
 		});
 	});
 

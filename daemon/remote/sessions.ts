@@ -74,8 +74,10 @@ export function chatActions(verdict: ChatVerdict, terminalOpen: boolean): ChatAc
 		// A pane's pi names its session; a stored or starting row is the daemon's to name.
 		rename: silent ? verdict : allowed,
 		pin: allowed,
-		// A pane's row comes back with its next heartbeat: its pi has to quit first.
-		delete: verdict.act || silent ? { act: false, reason: "running" } : allowed,
+		// A pane's row comes back with its next heartbeat: its pi has to quit first. A starting row's
+		// pane lists it again once it registers.
+		delete:
+			verdict.act || silent ? { act: false, reason: "running" } : verdict.reason === "starting" ? verdict : allowed,
 	};
 }
 

@@ -30,8 +30,8 @@ const OPEN: Record<ChatAction, Record<State, ActionVerdict>> = {
 	// A pane's pi names its session; a stored or starting row is the daemon's to name.
 	rename: { live: allowed, silent: refused("silent"), starting: allowed, stored: allowed },
 	pin: { live: allowed, silent: allowed, starting: allowed, stored: allowed },
-	// A pane's pi has to quit first.
-	delete: { live: refused("running"), silent: refused("running"), starting: allowed, stored: allowed },
+	// A pane's pi has to quit first; a starting row's pane would list it again.
+	delete: { live: refused("running"), silent: refused("running"), starting: refused("starting"), stored: allowed },
 	tasks: toPi,
 };
 const verdictOf = (state: State, open: boolean, kind: ChatAction) =>
