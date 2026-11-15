@@ -1,10 +1,11 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { appendFileSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { RUN_PANE_ENV } from "../daemon/tmux.ts";
+import { RUN_HOST_ENV, RUN_PANE_ENV } from "../daemon/tmux.ts";
 import { generationState, hostGeneration, storeLaunch } from "../ext/subagents/generation-state.ts";
 import paneChild from "../ext/subagents/pane-child.ts";
+import { noteRunError, saidSince, stderrSize } from "../ext/subagents/rpc-host.ts";
 import { waitFor } from "./helpers/wait-for.ts";
 
 describe("a run's pi in a pane, waiting on a dialog", () => {
@@ -32,6 +33,7 @@ describe("a run's pi in a pane, waiting on a dialog", () => {
 		// Its host, which started it, holds its generation.
 		hostGeneration(runDir, process.ppid);
 		vi.stubEnv(RUN_PANE_ENV, runDir);
+		vi.stubEnv(RUN_HOST_ENV, String(process.ppid));
 		vi.stubEnv("TMUX", "");
 		handlers = new Map();
 		paneChild({ on: (event: string, handler: (event: unknown) => unknown) => handlers.set(event, handler) } as never);
@@ -82,6 +84,7 @@ describe("a run's pi in a pane, as it starts", () => {
 		});
 		hostGeneration(runDir, process.ppid);
 		vi.stubEnv(RUN_PANE_ENV, runDir);
+		vi.stubEnv(RUN_HOST_ENV, String(process.ppid));
 		vi.stubEnv("TMUX", "");
 		const handlers = new Map<string, (event: unknown, ctx: unknown) => unknown>();
 		const given: string[] = [];
@@ -114,5 +117,98 @@ describe("a run's pi in a pane, as it starts", () => {
 		});
 		// Should it have been given its task, its pi shutting down ends it, and its checks.
 		handlers.get("session_shutdown")?.({ type: "session_shutdown" }, undefined);
+	});
+});
+
+describe("a run's pi in a pane that finds no Generation of its own", () => {
+	let runDir: string;
+	beforeEach(() => {
+		runDir = mkdtempSync(join(tmpdir(), "bc-pane-child-"));
+		storeLaunch(runDir, {
+			args: [],
+			cwd: runDir,
+			agentDir: runDir,
+			prompt: "Look.",
+			model: { provider: "faux", id: "faux-1", thinkingLevel: "off" },
+			generation: 0,
+			pane: { session: "sub_run-0", parent: "pi-orchestrator" },
+		});
+		vi.stubEnv(RUN_PANE_ENV, runDir);
+		vi.stubEnv("TMUX", "");
+	});
+	afterEach(() => {
+		vi.unstubAllEnvs();
+		rmSync(runDir, { recursive: true, force: true });
+	});
+
+	/** Its pi as it starts: what it was given, said and asked to end with. */
+	const start = () => {
+		const handlers = new Map<string, (event: unknown, ctx: unknown) => unknown>();
+		const given: string[] = [];
+		const notices: string[] = [];
+		const shutdown = vi.fn();
+		paneChild({
+			on: (event: string, handler: (event: unknown, ctx: unknown) => unknown) => handlers.set(event, handler),
+			sendUserMessage: (text: string) => given.push(text),
+			getThinkingLevel: () => "off",
+		} as never);
+		handlers.get("session_start")?.(
+			{ type: "session_start", reason: "startup" },
+			{
+				hasUI: true,
+				ui: { notify: (text: string) => notices.push(text) },
+				sessionManager: { getSessionFile: () => undefined, getSessionId: () => "session-1" },
+				model: { provider: "faux", id: "faux-1" },
+				modelRegistry: { getAvailable: () => [{ provider: "faux", id: "faux-1" }] },
+				isIdle: () => true,
+				hasPendingMessages: () => false,
+				shutdown,
+			},
+		);
+		const said = () => readFileSync(join(runDir, "rpc-child.stderr"), "utf8");
+		// Its checks end with its pi.
+		const end = () => handlers.get("session_shutdown")?.({ type: "session_shutdown" }, undefined);
+		return { given, notices, shutdown, said, end };
+	};
+
+	it("does no work, says why where its host's failure tells of it, and ends", () => {
+		// Another host holds its generation.
+		hostGeneration(runDir, 999_999);
+		vi.stubEnv(RUN_HOST_ENV, String(process.ppid));
+		const pi = start();
+		expect(pi.given).toEqual([]);
+		expect(pi.shutdown).toHaveBeenCalledOnce();
+		const why = `it found no Generation of its own (its host, pid ${process.ppid}, holds none of ${runDir})`;
+		expect(pi.notices).toEqual([why]);
+		expect(pi.said()).toBe(`${why}\n`);
+	});
+
+	it("does none when its host gave it no pid", () => {
+		hostGeneration(runDir, process.ppid);
+		const pi = start();
+		expect(pi.shutdown).toHaveBeenCalledOnce();
+		expect(pi.said()).toBe("it found no Generation of its own (its host gave it no pid)\n");
+	});
+
+	it("is told of by its host's failure, after anything its run's stderr held from before", () => {
+		const stderr = join(runDir, "rpc-child.stderr");
+		// An earlier generation's, on pi's RPC.
+		appendFileSync(stderr, "an earlier generation's warning\n");
+		const before = stderrSize(runDir);
+		expect(saidSince(runDir, before)).toBe("");
+		noteRunError(runDir, "it found no Generation of its own (its host gave it no pid)");
+		expect(saidSince(runDir, before)).toBe(": it found no Generation of its own (its host gave it no pid)");
+		appendFileSync(stderr, ["1", "2", "3", "4", "5", "6"].join("\n"));
+		expect(saidSince(runDir, before)).toBe(": 2\n3\n4\n5\n6");
+		expect(saidSince(join(runDir, "none"), 0)).toBe("");
+	});
+
+	it("finds its Generation by the pid its host gave it, not its parent's", async () => {
+		hostGeneration(runDir, 424_242);
+		vi.stubEnv(RUN_HOST_ENV, "424242");
+		const pi = start();
+		await waitFor(() => expect(pi.given).toEqual(["Look."]));
+		expect(pi.shutdown).not.toHaveBeenCalled();
+		pi.end();
 	});
 });

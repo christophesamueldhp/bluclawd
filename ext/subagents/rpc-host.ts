@@ -9,12 +9,12 @@
  */
 
 import { type ChildProcess, spawn } from "node:child_process";
-import { appendFileSync, openSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { appendFileSync, openSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { OrchestratorClient, piPackageRoot } from "../../daemon/orchestrator-client.ts";
 import type { RunHostLaunch } from "../../daemon/run-queue.ts";
-import { PANE_ENV, PARENT_ENV, RUN_PANE_ENV, Tmux } from "../../daemon/tmux.ts";
+import { PANE_ENV, PARENT_ENV, RUN_HOST_ENV, RUN_PANE_ENV, Tmux } from "../../daemon/tmux.ts";
 import { type StartedPi, startGeneration } from "./generation-protocol.ts";
 import { type HostSeat, hostGeneration } from "./generation-state.ts";
 import {
@@ -84,6 +84,9 @@ export const PANE_ENDED = "its pane was ended";
 
 /** Child stderr: pi reports a failed start only there. */
 const stderrPath = (runDir: string) => join(runDir, "rpc-child.stderr");
+/** Tells why a run's pi did no work, where its host's failure tells of it. */
+export const noteRunError = (runDir: string, text: string): void =>
+	appendFileSync(stderrPath(runDir), `${text}\n`, { mode: 0o600 });
 /** How long a run's host and its pi may take to end, once stopped or done, before what is left of them is killed. */
 export const STOP_GRACE_MS = 10_000;
 /** How often the host looks for answers to the approvals the run asks for. */
@@ -164,6 +167,7 @@ function paneChildEnv(
 		...Object.fromEntries(kept),
 		PI_CODING_AGENT_DIR: agentDir,
 		[RUN_PANE_ENV]: runDir,
+		[RUN_HOST_ENV]: String(process.pid),
 		[PANE_ENV]: pane.session,
 		[PARENT_ENV]: pane.parent,
 	};
@@ -375,6 +379,8 @@ async function paneHost(runDir: string, seat: HostSeat, pane: NonNullable<RpcHos
 		seat.save({ notStarted: `${PANE_ENDED} before its pi started` });
 		return;
 	}
+	// What its pi says went wrong is told of after what is there from before.
+	const saidBefore = stderrSize(runDir);
 	const child = spawn(process.execPath, [piEntry(), ...spec.args], {
 		cwd: spec.cwd,
 		env: paneChildEnv(launched, process.env, runDir, pane, spec.agentDir),
@@ -407,7 +413,7 @@ async function paneHost(runDir: string, seat: HostSeat, pane: NonNullable<RpcHos
 				? { status: "stopped", error: PANE_ENDED }
 				: {
 						status: "failed",
-						error: `its pi exited before its work settled (${exit.signal ?? `code ${exit.code}`})`,
+						error: `its pi exited before its work settled (${exit.signal ?? `code ${exit.code}`})${saidSince(runDir, saidBefore)}`,
 					};
 		failed = {
 			outcome,
@@ -429,6 +435,24 @@ async function paneHost(runDir: string, seat: HostSeat, pane: NonNullable<RpcHos
 		);
 	} catch {
 		// Its orchestrator's pane is gone, or tmux did not answer: tmux shows another session once this one ends.
+	}
+}
+
+export const stderrSize = (runDir: string): number => {
+	try {
+		return statSync(stderrPath(runDir)).size;
+	} catch {
+		return 0;
+	}
+};
+
+/** What was written to the run's stderr file past `from`, after a colon: its last lines; nothing when nothing was. */
+export function saidSince(runDir: string, from: number): string {
+	try {
+		const text = readFileSync(stderrPath(runDir)).subarray(from).toString("utf8").trim();
+		return text ? `: ${text.split("\n").slice(-5).join("\n")}` : "";
+	} catch {
+		return "";
 	}
 }
 
