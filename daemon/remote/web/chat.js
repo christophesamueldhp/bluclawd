@@ -1,9 +1,9 @@
 // @ts-check
 /**
  * The open chat: one session as the phone shows it, from when it opens until another session or the
- * list is shown, and what changes it as the transcript, the list and sent prompts come in. No DOM
- * and no requests: app.js fetches, renders, runs the timers it keeps here, and drops a chat no longer
- * open.
+ * list is shown, and what changes it as the transcript, the list and sent prompts come in. No DOM,
+ * no requests and no timers: app.js fetches, renders, tells it what arrived and that time passed (see
+ * arrive), does what it says next, and drops a chat no longer open.
  */
 
 import { giveUp, promptKey, sentText, settle, shellLine } from "./live.js";
@@ -20,15 +20,19 @@ import { createSkillDraft } from "./skills.js";
  * was seen working since. `last`: the transcript's last message when it was sent. `lifetime`: the
  * daemon's, as it answered that it has it, which the daemon is asked about it by. `acceptedAt`: set
  * instead by an older phone (0.0.52), which kept no lifetime, once the daemon had it. `outcome`: what its
- * pane reported of it, a pane that reports outcomes.
- * @typedef {{ id: string, text: string, prompt: string, images: Attachment[], before: number, sentAt: number, started?: boolean, last: string, lifetime?: string, acceptedAt?: number, outcome?: "taken" | "queued", skillDraft?: import("./skills.js").SkillDraft }} Pending
+ * pane reported of it, a pane that reports outcomes. `giveUpAt`: when it is looked at again, if no sign of the
+ * session came by then (see PROMPT_GIVE_UP_MS); none once it waits on.
+ * @typedef {{ id: string, text: string, prompt: string, images: Attachment[], before: number, sentAt: number, started?: boolean, last: string, lifetime?: string, acceptedAt?: number, outcome?: "taken" | "queued", skillDraft?: import("./skills.js").SkillDraft, giveUpAt?: number }} Pending
  */
 
 /** A reply's text and thinking, held until a page has its entry. @typedef {{ entryId: string, text: string, thinking?: string }} Held */
 
-/** Why a sent prompt came back: its pane refused it, or it was lost. @typedef {{ entry: Pending, reason: string }} Failed */
+/** A sent prompt that came back, and why: its pane refused it, it was lost, or it was `not_delivered` by its give-up. No reason for one the daemon never accepted. @typedef {{ entry: Pending, reason?: string }} Failed */
 
 /** @typedef {import("./statusbar.js").PromptOutcome} PromptOutcome */
+
+/** A sent prompt the session neither ran nor wrote by then never reached it (pi turns one away while compacting). */
+export const PROMPT_GIVE_UP_MS = 20_000;
 
 /** Unique across chats and reloads: the daemon keeps outcomes by it. */
 function promptId() {
@@ -209,7 +213,7 @@ function written(chat, entry) {
  * @param {Chat} chat @param {PromptOutcome[] | undefined} outcomes
  * @returns {Failed[]}
  */
-export function settleOutcomes(chat, outcomes) {
+function settleOutcomes(chat, outcomes) {
 	/** @type {Failed[]} */
 	const failed = [];
 	for (const outcome of outcomes ?? []) {
@@ -231,7 +235,7 @@ export function settleOutcomes(chat, outcomes) {
  * @param {Chat} chat
  * @returns {{ id: string, lifetime?: string }[]}
  */
-export function waitingOn(chat) {
+function waitingOn(chat) {
 	return chat.pending.flatMap(({ id, lifetime, acceptedAt, outcome }) => {
 		if (outcome) return [];
 		if (lifetime) return [{ id, lifetime }];
@@ -248,7 +252,7 @@ export function waitingOn(chat) {
  * @param {Chat} chat @param {PromptOutcome[]} [replay]
  * @returns {Failed[]}
  */
-export function restorePending(chat, replay) {
+function restorePending(chat, replay) {
 	if (chat.restored) return [];
 	chat.replay = replay ?? chat.replay;
 	if (!chat.replay || chat.report === undefined) return [];
@@ -319,7 +323,7 @@ export function listed(chat, was, now, asked) {
  * @param {Chat} chat @param {string} prompt @param {Attachment[]} images @param {number} now
  * @returns {Pending}
  */
-export function addPending(chat, prompt, images, now) {
+function addPending(chat, prompt, images, now) {
 	const text = promptKey(prompt, images.length);
 	const before = userCount(chat.messages, text) + chat.pending.filter((p) => p.text === text).length;
 	const last = chat.messages.at(-1)?.id ?? "";
@@ -330,7 +334,7 @@ export function addPending(chat, prompt, images, now) {
 }
 
 /** A sent prompt no longer waited for: those sent after it with the same text no longer count it. @param {Chat} chat @param {Pending} entry */
-export function forget(chat, entry) {
+function forget(chat, entry) {
 	const at = chat.pending.indexOf(entry);
 	if (at < 0) return;
 	chat.pending.splice(at, 1);
@@ -345,9 +349,101 @@ export function forget(chat, entry) {
  * @param {Chat} chat @param {Pending} entry @param {string | undefined} sessionState @param {boolean} [silent]
  * @returns {"wait" | "drop" | "fail"}
  */
-export function checkPending(chat, entry, sessionState, silent) {
+function checkPending(chat, entry, sessionState, silent) {
 	if (entry.outcome || (silent && !olderBuild(chat))) return "wait";
 	const verdict = giveUp(entry, sessionState, chat.messages.at(-1)?.id ?? "");
 	if (verdict !== "wait") forget(chat, entry);
 	return verdict;
+}
+
+/**
+ * A prompt sent at `now`, with what was selected in the reply box: pending until the transcript has it, and looked
+ * at again once its give-up time is up.
+ * @param {Chat} chat @param {string} prompt @param {Attachment[]} images
+ * @param {import("./skills.js").SkillDraft} skillDraft @param {number} now
+ * @returns {Pending}
+ */
+export function promptSent(chat, prompt, images, skillDraft, now) {
+	const entry = addPending(chat, prompt, images, now);
+	entry.skillDraft = skillDraft;
+	entry.giveUpAt = now + PROMPT_GIVE_UP_MS;
+	chat.sentAt = now;
+	return entry;
+}
+
+/**
+ * What reaches the open chat about the prompts sent from it. `status`: its pane's report, null when it has sent
+ * none. `outcomes`: those the event stream's status carries. `replay`: every outcome the daemon knows for the
+ * session, as the stream opens. `answer`: the daemon's, about those it was asked of. `accepted`: the daemon has a
+ * prompt, under its `lifetime`. `notSent`: the daemon did not take one. `startTimedOut`: the session it was
+ * started for never came. `time`: time passed, with the session's row as listed (`starting`: one is being started).
+ * @typedef {{ status: Report | null } | { outcomes: PromptOutcome[] | undefined } | { replay: PromptOutcome[] } | { answer: PromptOutcome[] } | { accepted: Pending, lifetime: string | undefined } | { notSent: Pending } | { startTimedOut: true } | { time: { state: string | undefined, silent?: boolean, starting?: boolean } }} Arrival
+ */
+
+/**
+ * What app.js does next. `returned`: the prompts to put back in the reply box, the last one's reason shown.
+ * `ask`: those to ask the daemon about (see waitingOn). `dropped`: one left quietly at its give-up.
+ * @typedef {{ returned: Failed[], ask: { id: string, lifetime?: string }[], dropped: boolean }} Next
+ */
+
+/**
+ * Takes an arrival at `now`. Whatever says what became of prompts first puts back in those the phone kept, once it
+ * can (see restorePending), then settles by the outcomes it carries. The daemon is asked about those still waiting
+ * after its pane's report and after the replay only: it answers one still on its way with no outcome, so its answer
+ * never leads to another ask.
+ * @param {Chat} chat @param {Arrival} arrival @param {number} now
+ * @returns {Next}
+ */
+export function arrive(chat, arrival, now) {
+	/** @type {Next} */
+	const next = { returned: [], ask: [], dropped: false };
+	if ("accepted" in arrival) arrival.accepted.lifetime = arrival.lifetime;
+	else if ("notSent" in arrival) {
+		forget(chat, arrival.notSent);
+		next.returned.push({ entry: arrival.notSent });
+	} else if ("startTimedOut" in arrival) chat.pending = [];
+	else if ("time" in arrival) checkDue(chat, arrival.time, now, next);
+	else {
+		if ("status" in arrival) chat.report = arrival.status;
+		const replay = "replay" in arrival ? arrival.replay : undefined;
+		const outcomes =
+			"status" in arrival
+				? arrival.status?.outcomes
+				: "answer" in arrival
+					? arrival.answer
+					: "replay" in arrival
+						? arrival.replay
+						: arrival.outcomes;
+		// Their give-up times went with the page or the chat that sent them.
+		const kept = chat.kept;
+		next.returned.push(...restorePending(chat, replay));
+		if (chat.restored) for (const entry of kept) entry.giveUpAt = now + PROMPT_GIVE_UP_MS;
+		next.returned.push(...settleOutcomes(chat, outcomes));
+		if ("status" in arrival || "replay" in arrival) next.ask = waitingOn(chat);
+	}
+	return next;
+}
+
+/**
+ * The pending prompts whose give-up time is up (see checkPending). None is given up on while a session is starting:
+ * its pane takes them once it is there, or the start's own timeout drops them.
+ * @param {Chat} chat @param {{ state: string | undefined, silent?: boolean, starting?: boolean }} row
+ * @param {number} now @param {Next} next
+ */
+function checkDue(chat, { state, silent, starting }, now, next) {
+	for (const entry of chat.pending.filter((p) => p.giveUpAt !== undefined && p.giveUpAt <= now)) {
+		entry.giveUpAt = undefined;
+		if (starting) continue;
+		const verdict = checkPending(chat, entry, state, silent);
+		// Its pane may come back and never report it (another extension took it): looked at again then.
+		if (verdict === "wait" && silent) entry.giveUpAt = now + PROMPT_GIVE_UP_MS;
+		else if (verdict === "drop") next.dropped = true;
+		else if (verdict === "fail") next.returned.push({ entry, reason: "not_delivered" });
+	}
+}
+
+/** When the chat is next to be told time passed: its earliest give-up, if any. @param {Chat} chat @returns {number | undefined} */
+export function nextGiveUp(chat) {
+	const times = chat.pending.flatMap((p) => (p.giveUpAt === undefined ? [] : [p.giveUpAt]));
+	return times.length ? Math.min(...times) : undefined;
 }
