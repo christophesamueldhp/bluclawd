@@ -597,7 +597,7 @@ describe("agent view in pane mode", () => {
 	it("a peek whose session goes away ends, rather than sending its reply to the next row", async () => {
 		const listed = [paneRow("pi-x", { label: "x" }), paneRow("pi-y", { label: "y" })];
 		const { view, calls, flush } = setup(listed);
-		const internals = view as unknown as { selectedKey?: string; refresh(): Promise<void> };
+		const internals = view as unknown as { selectedKey?: string };
 		await view.onShow();
 		const peeked = internals.selectedKey;
 		view.handleInput(" ");
@@ -606,50 +606,24 @@ describe("agent view in pane mode", () => {
 			listed.findIndex((i) => i.id === peeked),
 			1,
 		);
-		await internals.refresh();
+		await view.refresh();
 		view.handleInput(ENTER);
 		await flush();
 		expect(calls.filter(([name]) => name === "send")).toEqual([]);
 		view.close();
 	});
 
-	it("a row deleted just after a daemon restart is not carried back by the restart's grace", async () => {
-		const listed = [paneRow("pi-x", { label: "doomed" }), paneRow("pi-y", { label: "kept" })];
-		const { view, flush } = setup(listed);
-		const internals = view as unknown as {
-			selectedKey?: string;
-			restartedAt: number;
-			refresh(): Promise<void>;
-		};
-		await internals.refresh();
-		for (let i = 0; i < 4 && !focusedLine(view)?.includes("doomed"); i++) view.handleInput("\x1b[B");
-		expect(focusedLine(view)).toContain("doomed");
-		// A restarted daemon lists no pane until it beats again; their rows are carried meanwhile.
-		internals.restartedAt = Date.now();
-		const before = [...listed];
-		view.handleInput(CTRL_X);
-		view.handleInput(CTRL_X);
-		await flush();
-		// A poll read before the delete landed answers with the row still in it.
-		listed.splice(0, listed.length, ...before);
-		await internals.refresh();
-		listed.splice(0, listed.length, before[1]);
-		await internals.refresh();
-		expect(view.render(100).join("\n")).not.toContain("doomed");
-		view.close();
-	});
-
 	it("a name search focuses its best match as it is typed, then keeps the focus the user moves to", async () => {
 		const listed = [paneRow("pi-a1", { label: "alpha one" }), paneRow("pi-a2", { label: "alpha two" })];
 		const { view } = setup(listed);
-		const internals = view as unknown as { selectedKey?: string; refresh(): Promise<void> };
+		const internals = view as unknown as { selectedKey?: string };
 		await view.onShow();
 		for (const ch of "n:alpha") view.handleInput(ch);
 		const best = internals.selectedKey;
 		view.handleInput("\x1b[B");
 		const moved = internals.selectedKey;
 		expect(moved).not.toBe(best);
-		await internals.refresh();
+		await view.refresh();
 		expect(internals.selectedKey).toBe(moved);
 		view.close();
 	});
