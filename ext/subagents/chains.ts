@@ -91,7 +91,7 @@ export interface ChainResultDetails {
 }
 
 export interface ChainDeps {
-	admission: Pick<RunAdmission, "launch" | "resume">;
+	admission: Pick<RunAdmission, "check" | "launch" | "resume">;
 	/** The running agent of the orchestrator's current scope that holds `name`, if any. */
 	nameHolder(name: string): Readonly<SubagentRunRecord> | undefined;
 	agentDir(): string;
@@ -163,19 +163,9 @@ export async function runChain(
 			if (twin < i) faults.push({ i, error: `"${named}" is also the name of chain[${twin}]; give each its own.` });
 			else if (named && holder) faults.push({ i, error: `${nameTaken(named, holder)}.` });
 			try {
-				const result = await deps.admission.launch(
-					{
-						...request,
-						params: step.run,
-						chain: { id: chain },
-						ready: async (run) => {
-							checked[i] = run;
-							return false;
-						},
-					},
-					ctx,
-				);
-				if (!checked[i] && !result.ok) faults.push({ i, error: result.error });
+				const result = await deps.admission.check({ ...request, params: step.run, group: { chain } }, ctx);
+				if (result.ok) checked[i] = result.checked;
+				else faults.push({ i, error: result.error });
 			} catch (error) {
 				faults.push({ i, error: error instanceof Error ? error.message : String(error) });
 			}
@@ -221,7 +211,10 @@ export async function runChain(
 			...request,
 			signal: stopped,
 			params: first,
-			chain: { id: chain, runId: plan.ran[0]?.runId, ...(writer >= 0 ? { workspace: "record" } : {}) },
+			group: { chain },
+			runId: plan.ran[0]?.runId,
+			...(writer >= 0 ? { workspace: "isolated" as const } : {}),
+			keepWorktree: true,
 		},
 		ctx,
 	);
@@ -384,7 +377,11 @@ async function driveChain(
 					...request,
 					signal: stopped,
 					params: { ...step.run, task: `${own}${handoff}` },
-					chain: { id: chain, runId, ...(workspace ? { workspace } : {}), origin: start.originEntryId },
+					group: { chain },
+					runId,
+					...(workspace ? { workspace } : {}),
+					origin: start.originEntryId,
+					keepWorktree: true,
 				},
 				now,
 			);
@@ -395,7 +392,11 @@ async function driveChain(
 		plan.ran[i] = { runId: resumed.runId, generation: resumed.generation + 1 };
 		storePlan(planPath, plan);
 		const { model, thinkingLevel } = step;
-		return deps.admission.resume(resumed, () => `${own}${handoff}`, now, { model, thinkingLevel, chainStep: true });
+		return deps.admission.resume(resumed, { from: "orchestrator", text: () => `${own}${handoff}` }, now, {
+			model,
+			thinkingLevel,
+			keepWorktree: true,
+		});
 	};
 
 	/** Handed off on a reload: the next instance of the session goes on with the chain, and this one does nothing more. */

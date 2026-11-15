@@ -138,7 +138,7 @@ export function createRunOpening(deps: RunOpeningDeps): (runId: string, owner?: 
 			);
 			return;
 		}
-		const resumed = await admission.resume(run, () => "", ctx, { from: "user", typed: true });
+		const resumed = await admission.resume(run, { typed: true }, ctx);
 		if (!resumed.ok) {
 			slots.release(key).catch(() => {});
 			ctx.ui.notify(resumed.error, "warning");

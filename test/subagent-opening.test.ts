@@ -38,7 +38,7 @@ function setup(
 	const instructed: string[] = [];
 	const claimed: string[] = [];
 	const released: string[] = [];
-	const resumed: { runId: string; changes: unknown }[] = [];
+	const resumed: { runId: string; instruction: unknown }[] = [];
 	const up = new Set(options.up ?? []);
 	const ctx = {
 		mode: options.mode ?? "tui",
@@ -54,8 +54,8 @@ function setup(
 		scope: { current: () => ({ parentSessionId: SESSION, sessionEpoch: 1 }), context: () => ctx },
 		scheduler,
 		admission: {
-			resume: async (run, _prompt, _ctx, changes) => {
-				resumed.push({ runId: run.runId, changes });
+			resume: async (run, instruction) => {
+				resumed.push({ runId: run.runId, instruction });
 				return (options.resume?.(run) ?? {
 					ok: true,
 					handle: { runId: run.runId, record: { ...run, generation: run.generation + 1 } },
@@ -172,7 +172,7 @@ describe("Opening a run", () => {
 			const s = setup([runRecord({ name: "a", kind: "pane", status: "closed" })], { ...options, up: ["sub_a-1"] });
 			await s.open("sub_a");
 			expect(s.claimed).toEqual(["sub_a/1"]);
-			expect(s.resumed).toEqual([{ runId: "sub_a", changes: { from: "user", typed: true } }]);
+			expect(s.resumed).toEqual([{ runId: "sub_a", instruction: { typed: true } }]);
 			expect(s.switched).toEqual(["sub_a-1"]);
 		});
 

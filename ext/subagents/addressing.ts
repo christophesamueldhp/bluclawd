@@ -63,7 +63,7 @@ export function createRunAddressing(deps: RunAddressingDeps) {
 		if (!isTerminalSubagentStatus(run.status)) {
 			return refused(`${formatRunLabel(run)} is still ${run.status}: message it instead.`);
 		}
-		const resumed = await admission.resume(run, () => instruction, ctx, changes);
+		const resumed = await admission.resume(run, { from: "orchestrator", text: () => instruction }, ctx, changes);
 		if (!resumed.ok) return refused(resumed.error);
 		const { record } = resumed.handle;
 		return {

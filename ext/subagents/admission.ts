@@ -98,31 +98,30 @@ export interface LaunchRequest {
 	parentTurnId: string;
 	params: LaunchParams;
 	signal?: AbortSignal;
-	/** The ID of the `tasks` batch the run is a member of. */
-	batch?: string;
-	/** The chain the run is a step of. */
-	chain?: ChainPlacement;
+	/** The Batch or Chain the run is a member of, which its record keeps. */
+	group?: { batch: string } | { chain: string };
+	/** The ID the run gets, which its caller stored before admitting it; a new one when absent. */
+	runId?: string;
+	/** The entry the run is held to, as launched from it; the current leaf when absent. */
+	origin?: string;
 	/**
-	 * Awaited once the run passed every check, just before it is admitted, with where it would work and whether it
-	 * edits: a batch's members are admitted together, or none is. False when a sibling was refused, and this run is not
-	 * admitted either.
+	 * Where the run works, rather than as its role has it: "isolated" in a worktree recorded from the checkout as it is
+	 * now, though its role only reads; in `IsolatedWorkspace`, a worktree recorded before, whether it edits or not.
 	 */
-	ready?: (run: { cwd: string; root: string; writes: boolean }) => Promise<boolean>;
+	workspace?: "isolated" | IsolatedWorkspace;
+	/** Its worktree is kept once it ends, for a later run to work in. */
+	keepWorktree?: true;
 }
 
-/** Where a step of a chain works, and the branch it is held to. */
-export interface ChainPlacement {
-	id: string;
-	/**
-	 * The worktree the chain's steps share, when one of them edits: "record" for the first step, whose Admission
-	 * records it from the checkout as it is now; the worktree recorded, for each later step.
-	 */
-	workspace?: "record" | IsolatedWorkspace;
-	/** The entry the chain was launched from, which a later step is held to; the current leaf when absent. */
-	origin?: string;
-	/** The ID the step's run gets, which its chain stored before admitting it. */
-	runId?: string;
+/** A launch that passed every check, not admitted yet: where it would work, and whether it edits. */
+export interface Checked {
+	readonly cwd: string;
+	readonly root: string;
+	readonly writes: boolean;
 }
+
+/** Why a run was not admitted. */
+export type Refusal = Extract<AdmissionResult, { ok: false }>;
 
 /** The parts of the calling tool's context admission reads. */
 export type AdmissionContext = Pick<
@@ -166,27 +165,34 @@ export type AdmissionResult =
 			readonly refusal?: "invalidated" | "unavailable";
 	  };
 
+/**
+ * What a Resume goes on with: an instruction, its orchestrator's or the user's own, built only once every check has
+ * passed; or none, when the user opened the run to type it in its pane.
+ */
+export type ResumeInstruction = { from: "orchestrator" | "user"; text: () => string } | { typed: true };
+
 /** A model or thinking level a Resume asks for in place of those the run had; "inherit" for the orchestrator's. */
 export interface ResumeChanges {
 	model?: string;
 	thinkingLevel?: string;
-	/** Set when the instruction is the user's own, given to the run directly, rather than its orchestrator's. */
-	from?: "user";
-	/** Set when the Resume is a step of the run's chain, which releases the worktree once the chain settles. */
-	chainStep?: true;
-	/** Set when the user opened the run to type its instruction in its pane: the Resume starts with no task. */
-	typed?: true;
+	/** Its worktree is kept once it ends, for a later run to work in. */
+	keepWorktree?: true;
 }
 
 export interface RunAdmission {
-	launch(request: LaunchRequest, ctx: AdmissionContext): Promise<AdmissionResult>;
+	/** Runs every check of a launch, admitting nothing: what passed is admitted by `admit`, or dropped. */
+	check(request: LaunchRequest, ctx: AdmissionContext): Promise<{ ok: true; checked: Checked } | Refusal>;
 	/**
-	 * Admits a finished run's next generation on pi's RPC. `buildPrompt` is called only once every check has passed,
-	 * just before the run starts again; without one, it is refused. A run in tmux from before is never resumed.
+	 * Admits a launch `check` passed, at once: refused if what can change meanwhile did (its session or branch, the
+	 * name, its worktree's occupant), or if its request was aborted. Each `Checked` is admitted once.
 	 */
+	admit(checked: Checked): AdmissionResult;
+	/** `check`, then `admit`. */
+	launch(request: LaunchRequest, ctx: AdmissionContext): Promise<AdmissionResult>;
+	/** Admits a finished run's next generation on pi's RPC. A run in tmux from before is never resumed. */
 	resume(
 		run: Readonly<SubagentRunRecord>,
-		buildPrompt: (() => string) | undefined,
+		instruction: ResumeInstruction,
 		ctx: AdmissionContext,
 		changes?: ResumeChanges,
 	): Promise<AdmissionResult>;
@@ -208,11 +214,17 @@ interface Entry {
 	agentName: string;
 	/** Whether the orchestrator's session and branch are still those the run was asked for in. */
 	inScope(): boolean;
-	refuse(error: string): AdmissionResult;
+	refuse(error: string): Refusal;
 	/** Refuses, saying the run cannot be launched or resumed, and why. */
-	cannot(why: string): AdmissionResult;
+	cannot(why: string): Refusal;
 	/** The refusal once the orchestrator's session or branch changed meanwhile. */
-	invalidated: AdmissionResult;
+	invalidated: Refusal;
+}
+
+/** A launch's or a Resume's run that passed every check, and what admits it. */
+interface Passed {
+	checked: Checked;
+	admit(): AdmissionResult;
 }
 
 /** A launch: its run's role is resolved afresh. */
@@ -231,7 +243,7 @@ interface ResumeEntry extends Entry {
 	label: string;
 	/** Whether this instance of the session already knows the run. */
 	known: boolean;
-	buildPrompt: () => string;
+	instruction: ResumeInstruction;
 	changes: ResumeChanges;
 }
 
@@ -308,7 +320,9 @@ export function invalidModelChoice({ model, thinkingLevel }: ResumeChanges): str
 
 export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 	const autoNameCounters = new Map<string, number>();
-	const reject = (error: string): AdmissionResult => ({ ok: false, error });
+	const reject = (error: string): Refusal => ({ ok: false, error });
+	/** What admits each launch `check` passed, until it is admitted. */
+	const admits = new WeakMap<Checked, () => AdmissionResult>();
 
 	const deniedReason = (agentName: string, ctx: AdmissionContext): string | undefined =>
 		delegationDenied(agentName, ctx.cwd, deps.agentDir(), ctx.isProjectTrusted());
@@ -334,7 +348,7 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 	 * What a Resume goes on from: the role its run was admitted with (definition.json), never the role's file as it
 	 * is now, its saved session, and its workspace, which must still be there.
 	 */
-	const resumedFrom = async (entry: ResumeEntry): Promise<AdmissionResult | (ResumeEntry & ResumedFrom)> => {
+	const resumedFrom = async (entry: ResumeEntry): Promise<Refusal | (ResumeEntry & ResumedFrom)> => {
 		const { run: current, cannot } = entry;
 		const agentDir = deps.agentDir();
 		const storage = ensureRunStorageDir(agentDir, current.parentSessionId, current.runId);
@@ -420,12 +434,12 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 	});
 
 	/**
-	 * Admits a launch's run, or a Resume's next generation, on pi's RPC, once it passed every check, in this order for
-	 * both. A launch resolves its role afresh. A Resume is held to the role its run was admitted with, and to no more
+	 * Checks a launch's run, or a Resume's next generation, on pi's RPC, in this order for both, and says what admits
+	 * it once it passed. A launch resolves its role afresh. A Resume is held to the role its run was admitted with, and to no more
 	 * than its orchestrator can give now: tools both allow, deny rules of either, trust both grant. It keeps its model
 	 * and level unless the call changes them, and its workspace.
 	 */
-	const admitOnRpc = async (asked: LaunchEntry | ResumeEntry, ctx: AdmissionContext): Promise<AdmissionResult> => {
+	const checkOnRpc = async (asked: LaunchEntry | ResumeEntry, ctx: AdmissionContext): Promise<Refusal | Passed> => {
 		const { scope, refuse, cannot } = asked;
 		const agentDir = deps.agentDir();
 
@@ -505,11 +519,11 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 			refuse(
 				`Subagent role "${definition.name}" may edit files or run commands, so it works in an isolated Git worktree, and none can be made: ${why}. Such a run never works in a shared checkout: give it a cwd in a Git repository with a commit, or a role that only reads.`,
 			);
-		// A step of a chain whose steps share a worktree works in it, whether it edits or not.
-		const shared = entry.kind === "launch" ? entry.launch.chain?.workspace : undefined;
+		// A run given a worktree works in it, whether it edits or not.
+		const shared = entry.kind === "launch" ? entry.launch.workspace : undefined;
 		if (entry.kind === "launch") {
-			// Known before a batch's members are admitted together, unlike what recording the checkout may still find.
-			const unisolated = writes || shared === "record" ? worktreeUnavailable(cwd) : undefined;
+			// Known at the check, unlike what recording the checkout at the admission may still find.
+			const unisolated = writes || shared === "isolated" ? worktreeUnavailable(cwd) : undefined;
 			if (unisolated) return cannotIsolate(unisolated);
 			if (typeof shared === "object" && !within(shared.baseline.source, cwd)) {
 				return refuse(
@@ -559,233 +573,231 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 			);
 		}
 		if (!(await deps.ensureQueue())) return cannot(QUEUE_DOWN);
-		const ready = entry.kind === "launch" ? entry.launch.ready : undefined;
-		if (ready && !(await ready({ cwd, root: workspace.root, writes }))) {
-			return refuse("Not admitted: another member of its batch was refused.");
-		}
-
-		// Everything from here to the admission runs without awaiting, so the session cannot change in between.
-		if (!entry.inScope()) return entry.invalidated;
-		if (entry.kind === "resume") {
-			const latest = deps.scheduler.getRun(entry.run.runId) ?? entry.run;
-			if (!isResumableSubagentStatus(latest.status) || latest.generation !== entry.run.generation) {
-				return cannot("another Resume of it started meanwhile.");
-			}
-		}
-		const holderOf = (name: string) => deps.directory.nameHolder(scope, name)?.record;
-		let name: string;
-		if (entry.kind === "resume") {
-			const holder = entry.run.name ? holderOf(entry.run.name) : undefined;
-			if (holder) return refuse(`${entry.label} cannot resume: its name is now used by ${holder.runId}.`);
-			name = entry.run.name ?? entry.run.runId;
-		} else {
-			const { requestedName } = entry;
-			if (requestedName !== undefined) {
-				const holder = holderOf(requestedName);
-				if (holder) {
-					return refuse(`${nameTaken(requestedName, holder)}; choose another name.`);
+		// What admits it runs without awaiting, so the session cannot change in between.
+		const admit = (): AdmissionResult => {
+			if (!entry.inScope()) return entry.invalidated;
+			if (entry.kind === "resume") {
+				const latest = deps.scheduler.getRun(entry.run.runId) ?? entry.run;
+				if (!isResumableSubagentStatus(latest.status) || latest.generation !== entry.run.generation) {
+					return cannot("another Resume of it started meanwhile.");
 				}
 			}
-			let runName = requestedName;
-			while (!runName || holderOf(runName)) {
-				const key = `${entry.parentSessionId}:${definition.name}`;
-				const next = (autoNameCounters.get(key) ?? 0) + 1;
-				autoNameCounters.set(key, next);
-				runName = `${definition.name}-${next}`;
+			const holderOf = (name: string) => deps.directory.nameHolder(scope, name)?.record;
+			let name: string;
+			if (entry.kind === "resume") {
+				const holder = entry.run.name ? holderOf(entry.run.name) : undefined;
+				if (holder) return refuse(`${entry.label} cannot resume: its name is now used by ${holder.runId}.`);
+				name = entry.run.name ?? entry.run.runId;
+			} else {
+				const { requestedName } = entry;
+				if (requestedName !== undefined) {
+					const holder = holderOf(requestedName);
+					if (holder) {
+						return refuse(`${nameTaken(requestedName, holder)}; choose another name.`);
+					}
+				}
+				let runName = requestedName;
+				while (!runName || holderOf(runName)) {
+					const key = `${entry.parentSessionId}:${definition.name}`;
+					const next = (autoNameCounters.get(key) ?? 0) + 1;
+					autoNameCounters.set(key, next);
+					runName = `${definition.name}-${next}`;
+				}
+				name = runName;
+				if (entry.launch.signal?.aborted) return refuse("Subagent request was aborted before admission.");
 			}
-			name = runName;
-			if (entry.launch.signal?.aborted) return refuse("Subagent request was aborted before admission.");
-		}
-		// A worktree has one run in it at a time: the step before hands it on by ending.
-		const root =
-			entry.kind === "resume"
-				? entry.admitted.workspace?.root
-				: typeof shared === "object"
-					? shared.root
-					: undefined;
-		const occupant = root && deps.directory.list(scope).find(({ record }) => within(root, record.cwd))?.record;
-		if (occupant) {
-			return entry.kind === "resume"
-				? cannot(
-						`its worktree ${root} is in use by ${formatRunLabel(occupant)}: no two runs work in one worktree at once.`,
-					)
-				: refuse(
-						`The worktree of its chain, ${root}, is in use by ${formatRunLabel(occupant)}: no two runs work in one worktree at once.`,
-					);
-		}
+			// A worktree has one run in it at a time: the step before hands it on by ending.
+			const root =
+				entry.kind === "resume"
+					? entry.admitted.workspace?.root
+					: typeof shared === "object"
+						? shared.root
+						: undefined;
+			const occupant = root && deps.directory.list(scope).find(({ record }) => within(root, record.cwd))?.record;
+			if (occupant) {
+				return entry.kind === "resume"
+					? cannot(
+							`its worktree ${root} is in use by ${formatRunLabel(occupant)}: no two runs work in one worktree at once.`,
+						)
+					: refuse(
+							`The worktree of its chain, ${root}, is in use by ${formatRunLabel(occupant)}: no two runs work in one worktree at once.`,
+						);
+			}
 
-		if (entry.kind === "resume") {
-			const { run: current, runDir, admitted, changes } = entry;
-			// One the user types in its pane has no task until they do.
-			const typed = changes.typed === true && deps.runPane() !== undefined;
-			const task = typed ? "" : entry.buildPrompt();
-			const invalidTask = typed ? undefined : invalidTaskText(task);
-			if (invalidTask) return refuse(invalidTask);
-			const model = { provider: childModel.model.provider, modelId: childModel.model.id, thinkingLevel };
-			const held: RunDefinition = {
-				...narrowRunDefinition(admitted, grantable, deny),
-				projectTrusted: admitted.projectTrusted && workspace.trusted(cwd),
-				admitted: model,
-			};
-			if (admitted.workspace && !worktreeInPlace(admitted.workspace, runDir)) {
-				return cannot("its worktree was cleaned up meanwhile.");
+			if (entry.kind === "resume") {
+				const { run: current, runDir, admitted, changes } = entry;
+				// One the user types in its pane has no task until they do.
+				const { instruction } = entry;
+				const typed = "typed" in instruction && deps.runPane() !== undefined;
+				const task = "typed" in instruction ? "" : instruction.text();
+				const invalidTask = typed ? undefined : invalidTaskText(task);
+				if (invalidTask) return refuse(invalidTask);
+				const model = { provider: childModel.model.provider, modelId: childModel.model.id, thinkingLevel };
+				const held: RunDefinition = {
+					...narrowRunDefinition(admitted, grantable, deny),
+					projectTrusted: admitted.projectTrusted && workspace.trusted(cwd),
+					admitted: model,
+				};
+				if (admitted.workspace && !worktreeInPlace(admitted.workspace, runDir)) {
+					return cannot("its worktree was cleaned up meanwhile.");
+				}
+				const generation = current.generation + 1;
+				const pane = paneOf();
+				try {
+					if (!admitGeneration(runDir, generation, held)) {
+						return cannot(`another Resume of it already started its generation ${generation}.`);
+					}
+				} catch (error) {
+					return cannot(`storage is unavailable (${error instanceof Error ? error.message : String(error)}).`);
+				}
+				const resumed = deps.scheduler.resume(
+					current.runId,
+					{
+						rpc: rpcLaunch(
+							{ runId: current.runId, generation },
+							runDir,
+							held,
+							{
+								name,
+								definition: held,
+								...model,
+								task,
+								sessionFile: entry.sessionFile,
+								...("typed" in instruction || instruction.from === "user" ? { taskFrom: "user" as const } : {}),
+								...(changes.keepWorktree ? { keepWorktree: true } : {}),
+								...pane,
+								...(typed ? { typed: true as const } : {}),
+							},
+							{ cwd: ctx.cwd, trusted: projectTrusted },
+						),
+					},
+					entry.known ? undefined : { ...current, sessionEpoch: scope.sessionEpoch },
+					{ ...model, kind: kindOf(pane) },
+				);
+				if (!resumed.ok) return refuse(resumed.error);
+				return { ok: true, handle: resumed.handle };
 			}
-			const generation = current.generation + 1;
+
+			const { toolCallId, parentTurnId, params, signal, group } = entry.launch;
+			const isBackground = params.background === true;
 			const pane = paneOf();
-			try {
-				if (!admitGeneration(runDir, generation, held)) {
-					return cannot(`another Resume of it already started its generation ${generation}.`);
+			const startSnapshot = captureWorkspaceSnapshot(cwd);
+			// Prepared before admission, so a run that cannot store anything is never listed.
+			const runId = entry.launch.runId ?? createRunId();
+			const storage = ensureRunStorageDir(agentDir, entry.parentSessionId, runId);
+			if (!storage.ok) return cannot(`storage is unavailable (${storage.error}).`);
+			const childTrusted = workspace.trusted(cwd);
+			// A run that edits works in a worktree of its own, made from the checkout as it is now, and never in the
+			// checkout. It keeps the checkout's trust and deny rules: its files are the checkout's.
+			let isolated: IsolatedWorkspace | undefined;
+			let runCwd = cwd;
+			if (typeof shared === "object") {
+				isolated = shared;
+				// As it resolves now: a step before may have made a link of it, which leads out of the worktree.
+				let step: string;
+				try {
+					step = realpathSync(join(shared.root, relative(shared.baseline.source, cwd)));
+				} catch {
+					return refuse(
+						`Subagent cwd ${cwd} is not in the worktree of its chain, ${shared.root}: the worktree was removed, or the directory is ignored or held no file when the chain began.`,
+					);
 				}
-			} catch (error) {
-				return cannot(`storage is unavailable (${error instanceof Error ? error.message : String(error)}).`);
+				if (!within(realpathSync(shared.root), step)) {
+					return refuse(
+						`Subagent cwd ${cwd} is not in the worktree of its chain, ${shared.root}: there, it leads to ${step}. A step works only in its chain's worktree.`,
+					);
+				}
+				runCwd = step;
+			} else if (writes || shared === "isolated") {
+				const captured = captureRunBaseline(cwd, runId);
+				if (!captured.ok) return cannotIsolate(captured.error);
+				isolated = { root: worktreePath(agentDir, runId), baseline: captured.baseline };
+				runCwd = join(isolated.root, captured.cwd);
 			}
-			const resumed = deps.scheduler.resume(
-				current.runId,
-				{
+			const refuseIsolated = (error: string): AdmissionResult => {
+				// A worktree the run was given, recorded before, is kept.
+				if (isolated && typeof shared !== "object") dropRunBaseline(isolated.baseline);
+				return refuse(error);
+			};
+			// The role as admitted, with what it may do and the model and level it runs at: what the run, and any later
+			// continuation of it, is held to.
+			const admitted = {
+				provider: childModel.model.provider,
+				modelId: childModel.model.id,
+				thinkingLevel,
+			};
+			const held: RunDefinition = {
+				...definition,
+				tools,
+				deny,
+				cwd: runCwd,
+				projectTrusted: childTrusted,
+				admitted,
+				...(isolated ? { workspace: isolated } : {}),
+				...(tools.includes("bash") ? { shell: { runId, runDir: storage.runDir } } : {}),
+			};
+			try {
+				admitGeneration(storage.runDir, 0, held);
+			} catch (error) {
+				return refuseIsolated(
+					`Cannot launch subagent: storage is unavailable (${error instanceof Error ? error.message : String(error)}).`,
+				);
+			}
+
+			const admitRes = deps.scheduler.admit({
+				runId,
+				parentSessionId: entry.parentSessionId,
+				sessionEpoch: scope.sessionEpoch,
+				parentTurnId,
+				originToolCallId: toolCallId,
+				originEntryId: entry.originEntryId,
+				name,
+				backend: "rpc",
+				kind: kindOf(pane),
+				agentName: definition.name,
+				definitionSource: definition.source,
+				provider: childModel.model.provider,
+				modelId: childModel.model.id,
+				thinkingLevel: childModel.thinkingLevel ?? MODEL_DEFAULT_THINKING,
+				cwd: runCwd,
+				taskSummary: summarizeTaskLabel(params.task),
+				startSnapshot,
+				deliveryMode: isBackground ? "background" : "foreground",
+				...group,
+				// Cancelling a foreground call cancels its run's work. A run in the background goes on whatever becomes of
+				// the call.
+				...(!isBackground && signal ? { signal } : {}),
+				context: {
 					rpc: rpcLaunch(
-						{ runId: current.runId, generation },
-						runDir,
+						{ runId, generation: 0 },
+						storage.runDir,
 						held,
 						{
 							name,
-							definition: held,
-							...model,
-							task,
-							sessionFile: entry.sessionFile,
-							...(changes.from ? { taskFrom: changes.from } : {}),
-							...(changes.chainStep ? { keepWorktree: true } : {}),
+							definition,
+							...admitted,
+							task: params.task,
+							...(typeof shared === "object" ? { worktreeMade: true } : {}),
+							...(entry.launch.keepWorktree ? { keepWorktree: true } : {}),
 							...pane,
-							...(typed ? { typed: true as const } : {}),
 						},
 						{ cwd: ctx.cwd, trusted: projectTrusted },
 					),
 				},
-				entry.known ? undefined : { ...current, sessionEpoch: scope.sessionEpoch },
-				{ ...model, kind: kindOf(pane) },
-			);
-			if (!resumed.ok) return refuse(resumed.error);
-			return { ok: true, handle: resumed.handle };
-		}
-
-		const { toolCallId, parentTurnId, params, signal, batch, chain } = entry.launch;
-		const isBackground = params.background === true;
-		const pane = paneOf();
-		const startSnapshot = captureWorkspaceSnapshot(cwd);
-		// Prepared before admission, so a run that cannot store anything is never listed.
-		const runId = chain?.runId ?? createRunId();
-		const storage = ensureRunStorageDir(agentDir, entry.parentSessionId, runId);
-		if (!storage.ok) return cannot(`storage is unavailable (${storage.error}).`);
-		const childTrusted = workspace.trusted(cwd);
-		// A run that edits works in a worktree of its own, made from the checkout as it is now, and never in the
-		// checkout. It keeps the checkout's trust and deny rules: its files are the checkout's.
-		let isolated: IsolatedWorkspace | undefined;
-		let runCwd = cwd;
-		if (typeof shared === "object") {
-			isolated = shared;
-			// As it resolves now: a step before may have made a link of it, which leads out of the worktree.
-			let step: string;
-			try {
-				step = realpathSync(join(shared.root, relative(shared.baseline.source, cwd)));
-			} catch {
-				return refuse(
-					`Subagent cwd ${cwd} is not in the worktree of its chain, ${shared.root}: the worktree was removed, or the directory is ignored or held no file when the chain began.`,
-				);
-			}
-			if (!within(realpathSync(shared.root), step)) {
-				return refuse(
-					`Subagent cwd ${cwd} is not in the worktree of its chain, ${shared.root}: there, it leads to ${step}. A step works only in its chain's worktree.`,
-				);
-			}
-			runCwd = step;
-		} else if (writes || shared === "record") {
-			const captured = captureRunBaseline(cwd, runId);
-			if (!captured.ok) return cannotIsolate(captured.error);
-			isolated = { root: worktreePath(agentDir, runId), baseline: captured.baseline };
-			runCwd = join(isolated.root, captured.cwd);
-		}
-		const refuseIsolated = (error: string): AdmissionResult => {
-			// A chain's worktree recorded by an earlier step stays its chain's.
-			if (isolated && typeof shared !== "object") dropRunBaseline(isolated.baseline);
-			return refuse(error);
+			});
+			if (!admitRes.ok) return refuseIsolated(admitRes.error);
+			return { ok: true, handle: admitRes.handle };
 		};
-		// The role as admitted, with what it may do and the model and level it runs at: what the run, and any later
-		// continuation of it, is held to.
-		const admitted = {
-			provider: childModel.model.provider,
-			modelId: childModel.model.id,
-			thinkingLevel,
-		};
-		const held: RunDefinition = {
-			...definition,
-			tools,
-			deny,
-			cwd: runCwd,
-			projectTrusted: childTrusted,
-			admitted,
-			...(isolated ? { workspace: isolated } : {}),
-			...(tools.includes("bash") ? { shell: { runId, runDir: storage.runDir } } : {}),
-		};
-		try {
-			admitGeneration(storage.runDir, 0, held);
-		} catch (error) {
-			return refuseIsolated(
-				`Cannot launch subagent: storage is unavailable (${error instanceof Error ? error.message : String(error)}).`,
-			);
-		}
-
-		const admitRes = deps.scheduler.admit({
-			runId,
-			parentSessionId: entry.parentSessionId,
-			sessionEpoch: scope.sessionEpoch,
-			parentTurnId,
-			originToolCallId: toolCallId,
-			originEntryId: entry.originEntryId,
-			name,
-			backend: "rpc",
-			kind: kindOf(pane),
-			agentName: definition.name,
-			definitionSource: definition.source,
-			provider: childModel.model.provider,
-			modelId: childModel.model.id,
-			thinkingLevel: childModel.thinkingLevel ?? MODEL_DEFAULT_THINKING,
-			cwd: runCwd,
-			taskSummary: summarizeTaskLabel(params.task),
-			startSnapshot,
-			deliveryMode: isBackground ? "background" : "foreground",
-			...(batch ? { batch } : {}),
-			...(chain ? { chain: chain.id } : {}),
-			// Cancelling a foreground call cancels its run's work. A run in the background goes on whatever becomes of
-			// the call.
-			...(!isBackground && signal ? { signal } : {}),
-			context: {
-				rpc: rpcLaunch(
-					{ runId, generation: 0 },
-					storage.runDir,
-					held,
-					{
-						name,
-						definition,
-						...admitted,
-						task: params.task,
-						...(typeof shared === "object" ? { worktreeMade: true } : {}),
-						...(chain ? { keepWorktree: true } : {}),
-						...pane,
-					},
-					{ cwd: ctx.cwd, trusted: projectTrusted },
-				),
-			},
-		});
-		if (!admitRes.ok) return refuseIsolated(admitRes.error);
-		return { ok: true, handle: admitRes.handle };
+		return { checked: { cwd, root: workspace.root, writes }, admit };
 	};
 
-	return {
-		async launch(request, ctx) {
-			const { params, chain } = request;
+	const admission: RunAdmission = {
+		async check(request, ctx) {
+			const { params } = request;
 			const dispatched = deps.scope.current();
 			if (!dispatched) return reject("Subagent runtime is not initialized for this session.");
 			const parentSessionId = ctx.sessionManager.getSessionId();
-			const originEntryId = chain?.origin ?? ctx.sessionManager.getLeafId() ?? undefined;
+			const originEntryId = request.origin ?? ctx.sessionManager.getLeafId() ?? undefined;
 			const inlineRole = typeof params.agent === "string" ? undefined : params.agent;
 			const agentName = (typeof params.agent === "string" ? params.agent : params.agent.name).trim();
 
@@ -796,7 +808,7 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 			const invalidName = requestedName === undefined ? undefined : invalidRunName(requestedName);
 			if (invalidName) return reject(invalidName);
 
-			return admitOnRpc(
+			const passed = await checkOnRpc(
 				{
 					kind: "launch",
 					scope: dispatched,
@@ -815,6 +827,21 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 				},
 				ctx,
 			);
+			if (!("checked" in passed)) return passed;
+			admits.set(passed.checked, passed.admit);
+			return { ok: true, checked: passed.checked };
+		},
+
+		admit(checked) {
+			const admit = admits.get(checked);
+			if (!admit) throw new Error("A launch is admitted once, after its check passed.");
+			admits.delete(checked);
+			return admit();
+		},
+
+		async launch(request, ctx) {
+			const checked = await admission.check(request, ctx);
+			return checked.ok ? admission.admit(checked.checked) : checked;
 		},
 
 		adopt(run) {
@@ -871,14 +898,14 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 			return true;
 		},
 
-		async resume(run, buildPrompt, ctx, changes = {}) {
+		async resume(run, instruction, ctx, changes = {}) {
 			const label = formatRunLabel(run);
-			const invalidated: AdmissionResult = {
+			const invalidated: Refusal = {
 				ok: false,
 				refusal: "invalidated",
 				error: `${label} belongs to a session that was replaced; spawn a new subagent and point it at ${run.reportPath ?? "the earlier report"}.`,
 			};
-			const unavailable = (error: string): AdmissionResult => ({ ok: false, refusal: "unavailable", error });
+			const unavailable = (error: string): Refusal => ({ ok: false, refusal: "unavailable", error });
 			if (ctx.mode === "print" || ctx.mode === "json") {
 				return unavailable(
 					`Resuming ${label} is not supported in one-shot "${ctx.mode}" mode because a resume runs in the background and the process exits before it completes.`,
@@ -902,11 +929,10 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 			if (!isResumableSubagentStatus(current.status)) {
 				return unavailable(`${label} is ${current.status}; only a finished or stopped subagent can be resumed.`);
 			}
-			if (!buildPrompt) return cannot("a Resume needs an instruction for it.");
 			const invalid = invalidModelChoice(changes);
 			if (invalid) return unavailable(invalid);
 
-			return admitOnRpc(
+			const passed = await checkOnRpc(
 				{
 					kind: "resume",
 					scope,
@@ -918,11 +944,13 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 					run: current,
 					label,
 					known: known !== undefined,
-					buildPrompt,
+					instruction,
 					changes,
 				},
 				ctx,
 			);
+			return "checked" in passed ? passed.admit() : passed;
 		},
 	};
+	return admission;
 }

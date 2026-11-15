@@ -11,6 +11,7 @@ import {
 	type AdmissionContext,
 	type AdmissionResult,
 	BATCH_ID_PREFIX,
+	type Checked,
 	type LaunchRequest,
 	nameTaken,
 	type RunAdmission,
@@ -170,7 +171,7 @@ function batchManifest(batch: string, members: readonly BatchMember[]): string {
 
 /** The orchestrator's parts a batch is admitted with. */
 export interface BatchAdmissionDeps {
-	admission: Pick<RunAdmission, "launch">;
+	admission: Pick<RunAdmission, "check" | "admit">;
 	/** The running agent of the orchestrator's current scope that holds `name`, if any. */
 	nameHolder(name: string): Readonly<SubagentRunRecord> | undefined;
 	/** Cancels an admitted member of a batch that could not be admitted whole. */
@@ -184,7 +185,7 @@ export interface BatchAdmissionDeps {
 export async function admitBatch(
 	deps: BatchAdmissionDeps,
 	entries: readonly LaunchParams[],
-	request: Omit<LaunchRequest, "params" | "ready">,
+	request: Omit<LaunchRequest, "params">,
 	ctx: AdmissionContext,
 ): Promise<{ ok: true; handles: AdmittedSubagentHandle[] } | { ok: false; error: string }> {
 	const label = (i: number) => {
@@ -201,45 +202,17 @@ export async function admitBatch(
 		else if (holder) faults.push({ i, error: `${nameTaken(named, holder)}.` });
 	});
 
-	let refused = faults.length > 0;
-	let waiting = entries.length;
-	let release!: (together: boolean) => void;
-	const together = new Promise<boolean>((resolve) => {
-		release = resolve;
-	});
-	const arrive = () => {
-		if (--waiting === 0) release(!refused);
-	};
-	const results = await Promise.all(
-		entries.map(async (params, i): Promise<AdmissionResult> => {
-			let ready = false;
+	// Every entry passes its checks, or none is admitted; then all are admitted at once.
+	const checked = await Promise.all(
+		entries.map(async (params, i) => {
 			try {
-				const result = await deps.admission.launch(
-					{
-						...request,
-						params,
-						ready: () => {
-							ready = true;
-							arrive();
-							return together;
-						},
-					},
-					ctx,
-				);
-				if (!result.ok && !ready) {
-					refused = true;
-					faults.push({ i, error: result.error });
-				}
-				return result;
+				const result = await deps.admission.check({ ...request, params }, ctx);
+				if (result.ok) return result.checked;
+				faults.push({ i, error: result.error });
 			} catch (error) {
-				refused = true;
-				const message = error instanceof Error ? error.message : String(error);
-				faults.push({ i, error: message });
-				return { ok: false, error: message };
-			} finally {
-				// Every entry is counted once, whether it got as far as being admitted or not.
-				if (!ready) arrive();
+				faults.push({ i, error: error instanceof Error ? error.message : String(error) });
 			}
+			return undefined;
 		}),
 	);
 	const listFaults = (list: { i: number; error: string }[]) =>
@@ -247,7 +220,16 @@ export async function admitBatch(
 			.sort((a, b) => a.i - b.i)
 			.map(({ i, error }) => `- ${label(i)}: ${error}`)
 			.join("\n");
-	if (refused) return { ok: false, error: `No task of the batch was started:\n${listFaults(faults)}` };
+	if (faults.length > 0) return { ok: false, error: `No task of the batch was started:\n${listFaults(faults)}` };
+
+	const passed = checked.filter((run): run is Checked => run !== undefined);
+	const results = passed.map((run): AdmissionResult => {
+		try {
+			return deps.admission.admit(run);
+		} catch (error) {
+			return { ok: false, error: error instanceof Error ? error.message : String(error) };
+		}
+	});
 
 	const handles = results.flatMap((result) => (result.ok ? [result.handle] : []));
 	const late = results.flatMap((result, i) => (result.ok ? [] : [{ i, error: result.error }]));
@@ -282,7 +264,7 @@ type BatchToolResult = CallResult<BatchResultDetails | undefined>;
 export async function runTaskBatch(
 	deps: TaskBatchDeps,
 	entries: readonly LaunchParams[],
-	request: Omit<LaunchRequest, "params" | "ready" | "batch">,
+	request: Omit<LaunchRequest, "params" | "group">,
 	ctx: AdmissionContext,
 ): Promise<BatchToolResult> {
 	const fail = (text: string): BatchToolResult => ({
@@ -291,7 +273,7 @@ export async function runTaskBatch(
 		isError: true,
 	});
 	const batch = createBatchId();
-	const admitted = await admitBatch(deps, entries, { ...request, batch }, ctx);
+	const admitted = await admitBatch(deps, entries, { ...request, group: { batch } }, ctx);
 	if (!admitted.ok) return fail(admitted.error);
 	const { handles } = admitted;
 	const background = entries[0].background === true;
