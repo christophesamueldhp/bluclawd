@@ -748,7 +748,23 @@ describe("Run admission of a run's own directory, and of its Resume", () => {
 		const { agentDir, cwd, launch, resume, storageDir } = await setup({ firstGenerationCompletes: true });
 		const completed = await handleOf(await launch({ agent: "explorer", task: "x" })).completion;
 		saveConversation(agentDir, cwd);
-		hostEnded(join(storageDir, completed.runId), await leaderlessGroup());
+		const group = await leaderlessGroup();
+		hostEnded(join(storageDir, completed.runId), group);
+
+		expect(errorOf(await resume(completed, () => "Go on.").result)).toMatch(
+			new RegExp(
+				`^Cannot resume .*: processes its earlier Generation started still run \\(process group ${group}\\)\\.$`,
+			),
+		);
+		expect(generationDefinition(join(storageDir, completed.runId), 1)).toBeUndefined();
+	});
+
+	it("refuses a Resume while its earlier Generation's host still runs, its pi's exit stored", async () => {
+		const { agentDir, cwd, launch, resume, storageDir } = await setup({ firstGenerationCompletes: true });
+		const completed = await handleOf(await launch({ agent: "explorer", task: "x" })).completion;
+		saveConversation(agentDir, cwd);
+		// This process, as the host: it lives, and started when it stored.
+		hostEnded(join(storageDir, completed.runId), process.pid);
 
 		expect(errorOf(await resume(completed, () => "Go on.").result)).toMatch(
 			/^Cannot resume .*: its pi from before is still running\.$/,

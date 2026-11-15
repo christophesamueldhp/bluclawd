@@ -11,7 +11,7 @@ import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { linkSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { processAlive, processGroupAlive } from "../../daemon/processes.ts";
+import { processAlive, processGroupAlive, processStarted } from "../../daemon/processes.ts";
 import type { PaneChildState, RpcHostSpec, RpcHostState } from "./rpc-host.ts";
 import type { RunDefinition } from "./rpc-runs.ts";
 import type { IsolatedWorkspace } from "./run-worktree.ts";
@@ -84,17 +84,22 @@ function hostRuns(pid: number, runDir: string): boolean {
 }
 
 /**
- * Whether processes of the run's latest host may still run, and in which process group: its group has members, or
- * its host lives and stored no exit. A Generation whose group was not confirmed gone still ends, so a finished run may
- * leave some. A live host is not asked whether it is the run's, unlike a host followed: a `ps` that fails would say
- * not.
+ * Whether processes of the run's latest host may still run, in which process group, and whether the host may be among
+ * them. A Generation whose group was not confirmed gone still ends, so a finished run may leave some once its host is
+ * gone. A live pid is the host when it started when the host stored. One that started otherwise was given out since,
+ * which no pid is while a group of that id has members, so nothing of the run is left. With no start to compare, read
+ * now or stored, a live pid counts as the host when its group is signalled or no exit is stored (ADR-0011).
  */
-export function runProcessesLeft(runDir: string): { group: number } | undefined {
-	const host = readState(runDir);
-	if (!host) return undefined;
-	const leaderRuns = processAlive(host.hostPid);
-	const left = processGroupAlive(host.hostPid, { leaderRuns }) || (host.exit === undefined && leaderRuns);
-	return left ? { group: host.hostPid } : undefined;
+export function runProcessesLeft(runDir: string): { group: number; host: boolean } | undefined {
+	const stored = readState(runDir);
+	if (!stored) return undefined;
+	const { hostPid: group, hostStarted } = stored;
+	if (!processAlive(group))
+		return processGroupAlive(group, { leaderRuns: false }) ? { group, host: false } : undefined;
+	const started = hostStarted && processStarted(group);
+	if (started) return started === hostStarted ? { group, host: true } : undefined;
+	const left = processGroupAlive(group, { leaderRuns: true }) || stored.exit === undefined;
+	return left ? { group, host: true } : undefined;
 }
 
 /** What a host stored of its generation's work so far. */
@@ -261,7 +266,8 @@ export function hostGeneration(runDir: string, hostPid = process.pid): HostSeat 
 		taken = false;
 	}
 	const stored = taken ? undefined : readState(runDir);
-	const state: RpcHostState = stored?.hostPid === hostPid ? stored : { hostPid, generation };
+	const state: RpcHostState =
+		stored?.hostPid === hostPid ? stored : { hostPid, generation, hostStarted: processStarted(hostPid) };
 	const child: PaneChildState = {};
 	const save = () => writeAtomicPrivateFile(statePath(runDir), JSON.stringify(state));
 	if (taken) {

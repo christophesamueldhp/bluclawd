@@ -3,6 +3,7 @@ import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSy
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, onTestFinished } from "vitest";
+import { processStarted } from "../daemon/processes.ts";
 import {
 	admitGeneration,
 	generationDefinition,
@@ -242,6 +243,7 @@ describe("a Generation's state on disk", () => {
 		expect(JSON.parse(read(join(runDir, "rpc-host.json")))).toEqual({
 			hostPid: first.pid,
 			generation: 0,
+			hostStarted: processStarted(first.pid),
 			childPid: 7,
 		});
 		expect(JSON.parse(read(join(runDir, "pane-child.json")))).toEqual({ sessionId: "s", awaiting: false });
@@ -249,6 +251,7 @@ describe("a Generation's state on disk", () => {
 		expect(JSON.parse(read(join(runDir, "rpc-host.json")))).toEqual({
 			hostPid: first.pid,
 			generation: 0,
+			hostStarted: processStarted(first.pid),
 			childPid: 7,
 			exit: exitedCleanly,
 		});
@@ -262,11 +265,16 @@ describe("a Generation's state on disk", () => {
 		expect(existsSync(join(runDir, "pane-child.json"))).toBe(false);
 		hostGeneration(runDir, process.pid)?.saveChild({ sessionFile: "/s.jsonl", sessionId: "s", reportSeq: 2 });
 		expect(seat?.takeChild()).toEqual({ sessionFile: "/s.jsonl", sessionId: "s", reportSeq: 2 });
-		expect(JSON.parse(read(join(runDir, "rpc-host.json")))).toEqual({ hostPid: process.pid, generation: 0 });
+		expect(JSON.parse(read(join(runDir, "rpc-host.json")))).toEqual({
+			hostPid: process.pid,
+			generation: 0,
+			hostStarted: processStarted(process.pid),
+		});
 		seat?.save({ exit: exitedCleanly });
 		expect(JSON.parse(read(join(runDir, "rpc-host.json")))).toEqual({
 			hostPid: process.pid,
 			generation: 0,
+			hostStarted: processStarted(process.pid),
 			sessionFile: "/s.jsonl",
 			sessionId: "s",
 			reportSeq: 2,
@@ -305,20 +313,39 @@ describe("a Generation's state on disk", () => {
 		expect(existsSync(join(runDir, "hosts"))).toBe(false);
 	});
 
-	it("says which process group of the run's latest host may still run", async () => {
+	it("says which process group of the run's latest host may still run, its host among them", async () => {
 		expect(runProcessesLeft(runDir)).toBeUndefined();
 		storeLaunch(runDir, spec(0));
 		const waiter = host();
 		const seat = hostGeneration(runDir, waiter.pid);
-		expect(runProcessesLeft(runDir)).toEqual({ group: waiter.pid });
+		expect(runProcessesLeft(runDir)).toEqual({ group: waiter.pid, host: true });
 		seat?.save({ exit: exitedCleanly });
-		// Its group still runs.
-		expect(runProcessesLeft(runDir)).toEqual({ group: waiter.pid });
+		// The host still runs.
+		expect(runProcessesLeft(runDir)).toEqual({ group: waiter.pid, host: true });
 		await end(waiter);
 		expect(runProcessesLeft(runDir)).toBeUndefined();
-		// A live host is not asked whether it is the run's.
+	});
+
+	it("says only the host's group still runs once the host ended and a process it started did not", async () => {
+		storeLaunch(runDir, spec(0));
+		const group = await leaderlessGroup();
+		hostGeneration(runDir, group)?.save({ exit: exitedCleanly });
+		expect(runProcessesLeft(runDir)).toEqual({ group, host: false });
+	});
+
+	it("takes a process given the host's pid since for none of the run's, though it leads a group of its own", () => {
+		const other = host();
+		const stored = { hostPid: other.pid, generation: 0, hostStarted: "an earlier start" };
+		writeFileSync(join(runDir, "rpc-host.json"), JSON.stringify({ ...stored, exit: exitedCleanly }));
+		expect(runProcessesLeft(runDir)).toBeUndefined();
+		// Its pi's exit not stored: the host is gone all the same.
+		writeFileSync(join(runDir, "rpc-host.json"), JSON.stringify(stored));
+		expect(runProcessesLeft(runDir)).toBeUndefined();
+	});
+
+	it("takes a live pid for the host when no start compares, as in a state stored before hosts stored theirs", () => {
 		writeFileSync(join(runDir, "rpc-host.json"), JSON.stringify({ hostPid: process.pid }));
-		expect(runProcessesLeft(runDir)).toEqual({ group: process.pid });
+		expect(runProcessesLeft(runDir)).toEqual({ group: process.pid, host: true });
 	});
 
 	it("keeps the files as ADR-0010 names them, in their format", () => {
@@ -342,7 +369,9 @@ describe("a Generation's state on disk", () => {
 		}
 		expect(read(join(runDir, "rpc-spec.json"))).toBe(JSON.stringify(launched));
 		expect(read(join(runDir, "hosts", "1"))).toBe(String(process.pid));
-		expect(read(join(runDir, "rpc-host.json"))).toBe(`{"hostPid":${process.pid},"generation":1,"childPid":7}`);
+		expect(read(join(runDir, "rpc-host.json"))).toBe(
+			JSON.stringify({ hostPid: process.pid, generation: 1, hostStarted: processStarted(process.pid), childPid: 7 }),
+		);
 		expect(read(join(runDir, "pane-child.json"))).toBe('{"awaiting":true}');
 	});
 });

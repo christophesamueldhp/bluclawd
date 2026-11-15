@@ -358,7 +358,9 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 		if (!admitted) return cannot("the role it was admitted with is not stored.");
 		const sessionFile = current.transcriptPath;
 		if (!sessionFile || !holdsConversation(sessionFile)) return cannot("it has no saved conversation to go on with.");
-		if (runProcessesLeft(runDir)) return cannot("its pi from before is still running.");
+		const left = runProcessesLeft(runDir);
+		if (left?.host) return cannot("its pi from before is still running.");
+		if (left) return cannot(`processes its earlier Generation started still run (process group ${left.group}).`);
 		// A run that edits resumes in its own worktree exactly, made again if it was removed holding only its baseline.
 		if (admitted.workspace) {
 			const lost = await restoreWorktree(admitted.workspace, { agentDir, runId: current.runId, runDir });

@@ -3,7 +3,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { processAlive, processGroupAlive } from "../daemon/processes.ts";
+import { processAlive, processGroupAlive, processStarted } from "../daemon/processes.ts";
 import { readinessMs } from "./helpers/heartbeats.ts";
 
 /** Processes the tests started, each ended afterwards with the process group it leads, if any. */
@@ -89,6 +89,26 @@ describe("probing a process by its pid", () => {
 		await expect.poll(() => liveMembers(pid)).toEqual([]);
 		expect(processGroupAlive(pid, { fresh: true })).toBe(false);
 	});
+
+	it("tells when a process started the same each time, and nothing once it has exited", async () => {
+		// Busy a moment first, then idle: what it has used by then, unlike when it started, differs between the reads.
+		const child = spawn(
+			process.execPath,
+			["-e", "const t = Date.now(); while (Date.now() - t < 300); setInterval(() => {}, 1 << 30)"],
+			{ stdio: "ignore" },
+		);
+		const { pid } = child;
+		if (pid === undefined) throw new Error("node did not start");
+		started.push(pid);
+		const start = processStarted(pid);
+		expect(start).toMatch(/\S/);
+		await new Promise((resolve) => setTimeout(resolve, 500));
+		expect(processStarted(pid)).toBe(start);
+		const exited = new Promise((resolve) => child.once("exit", resolve));
+		child.kill("SIGKILL");
+		await exited;
+		expect(processStarted(pid)).toBeUndefined();
+	});
 });
 
 /** The states of the members of group `pid` that are no zombie, as `ps` lists them. */
@@ -150,5 +170,18 @@ describe("what probing a process costs, and what it trusts", () => {
 	it("takes a process signal 0 reaches for running when ps does not list it", () => {
 		fakePs("exit 1");
 		expect(processAlive(running())).toBe(true);
+	});
+
+	it.skipIf(process.platform === "linux")("tells no start of a process when ps fails", () => {
+		fakePs("exit 1");
+		expect(processStarted(running())).toBeUndefined();
+	});
+
+	// The host stores its start, and a pi or the daemon, in another locale or zone, compares it.
+	it.skipIf(process.platform === "linux")("asks ps for a process's start in one locale and zone", () => {
+		fakePs('echo "$LC_ALL $TZ"');
+		vi.stubEnv("LC_ALL", "id_ID.UTF-8");
+		vi.stubEnv("TZ", "Asia/Jakarta");
+		expect(processStarted(running())).toBe("C UTC");
 	});
 });
