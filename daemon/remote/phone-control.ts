@@ -136,8 +136,16 @@ export function phoneSession(
 	if (!found) return undefined;
 	const report = deps.report(id);
 	const outcomes = deps.outcomes?.(id);
-	const actions = chatActions(found.verdict, deps.terminalOpen());
-	return { ...found, id, actions, ...(report ? { report } : {}), ...(outcomes ? { outcomes } : {}) };
+	return {
+		...found,
+		id,
+		// Only for an action that changes something: the terminal's check may ask tmux, which a read must not wait on.
+		get actions() {
+			return chatActions(found.verdict, deps.terminalOpen());
+		},
+		...(report ? { report } : {}),
+		...(outcomes ? { outcomes } : {}),
+	};
 }
 
 /** The command a "/" line names, as pi reads one (`/compact`, `/skill:pdf …`); none for text such as a path. */

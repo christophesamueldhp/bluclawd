@@ -106,6 +106,7 @@ describe("the Chat verdict on each kind of action", () => {
 	let base: string;
 	let token: string;
 	let terminalOpen = true;
+	let terminalAsked = 0;
 
 	beforeAll(async () => {
 		dir = mkdtempSync(join(tmpdir(), "bluclawd-chat-verdict-"));
@@ -121,7 +122,10 @@ describe("the Chat verdict on each kind of action", () => {
 				claimStart: () => ({ ok: true, id: "pi-new" }),
 				paneStarting: () => {},
 				startFailed: () => {},
-				terminalOpen: () => terminalOpen,
+				terminalOpen: () => {
+					terminalAsked++;
+					return terminalOpen;
+				},
 				report: () => report,
 				renameInstance: () => true,
 				setPinned: () => true,
@@ -203,6 +207,15 @@ describe("the Chat verdict on each kind of action", () => {
 				code ? [code === "unknown_task" ? 404 : 409, code] : true,
 			);
 		});
+	});
+
+	it("never asks whether a terminal shows pi for a read, which may wait on tmux", async () => {
+		terminalAsked = 0;
+		for (const path of ["/status", "/commands", "/messages", "/tasks/f2/output"]) {
+			const res = await fetch(`${base}/api/sessions/live${path}`, { headers: { authorization: `Bearer ${token}` } });
+			expect(res.status, path).not.toBe(409);
+		}
+		expect(terminalAsked).toBe(0);
 	});
 
 	describe("built on the phone only when allowed", () => {
