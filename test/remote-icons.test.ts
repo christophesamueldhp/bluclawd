@@ -5,8 +5,8 @@ import photon from "@silvia-odwyer/photon-node";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { type RemoteServer, startRemoteServer } from "../daemon/remote/http.ts";
 import { RemoteStore } from "../daemon/remote/pairing.ts";
-import { BODY_COLOR, EYE_COLOR } from "../ext/_shared/mascot.ts";
-import { ICONS, renderIcon, WEB_DIR } from "../scripts/pwa-icons.ts";
+import { BODY_COLOR } from "../ext/_shared/mascot.ts";
+import { BACKGROUND, ICONS, renderIcon, WEB_DIR } from "../scripts/pwa-icons.ts";
 
 function decode(bytes: Buffer): { width: number; height: number; pixels: Uint8Array } {
 	const image = photon.PhotonImage.new_from_byteslice(bytes);
@@ -29,18 +29,18 @@ describe("PWA icons", () => {
 		expect(committed.pixels).toEqual(decode(renderIcon(size)).pixels);
 	});
 
-	it("draws the mascot centred on white, a whole pixel square per grid block", () => {
+	it("draws the mascot centred on a dark tile, a whole pixel square per grid block", () => {
 		const icon = decode(renderIcon(180));
-		// 7 px blocks: the 20×15 grid is 140×105, from (20, 37).
-		expect(colorAt(icon, 0, 0)).toBe("#ffffff");
-		expect(colorAt(icon, 179, 179)).toBe("#ffffff");
-		// Row 4, column 5: the left eye's top-left pixel and block.
-		expect(colorAt(icon, 20 + 5 * 7, 37 + 4 * 7)).toBe(EYE_COLOR);
-		expect(colorAt(icon, 20 + 5 * 7 - 1, 37 + 4 * 7)).toBe(BODY_COLOR);
+		// 6 px blocks: the 20×15 grid is 120×90, from (30, 45).
+		expect(colorAt(icon, 0, 0)).toBe(BACKGROUND);
+		expect(colorAt(icon, 179, 179)).toBe(BACKGROUND);
+		// Row 4, column 5: the left eye's top-left pixel and block, the tile showing through.
+		expect(colorAt(icon, 30 + 5 * 6, 45 + 4 * 6)).toBe(BACKGROUND);
+		expect(colorAt(icon, 30 + 5 * 6 - 1, 45 + 4 * 6)).toBe(BODY_COLOR);
 		// The head's top row (columns 8–11), and the gap left of it.
-		expect(colorAt(icon, 20 + 8 * 7, 37)).toBe(BODY_COLOR);
-		expect(colorAt(icon, 20 + 8 * 7 - 1, 37)).toBe("#ffffff");
-		expect(colorAt(icon, 20 + 8 * 7, 36)).toBe("#ffffff");
+		expect(colorAt(icon, 30 + 8 * 6, 45)).toBe(BODY_COLOR);
+		expect(colorAt(icon, 30 + 8 * 6 - 1, 45)).toBe(BACKGROUND);
+		expect(colorAt(icon, 30 + 8 * 6, 44)).toBe(BACKGROUND);
 	});
 
 	it("is linked from the page, the manifest and the offline shell", () => {

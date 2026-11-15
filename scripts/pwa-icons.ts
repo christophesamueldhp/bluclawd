@@ -1,14 +1,14 @@
-// The phone app's icons, drawn from the mascot's pixel grid: `node scripts/pwa-icons.ts` writes
+// The phone app's icons, the mascot's pixel grid on a dark tile: `node scripts/pwa-icons.ts` writes
 // them into daemon/remote/web/. test/remote-icons.test.ts checks the committed files against this.
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { crc32, deflateSync } from "node:zlib";
-import { BODY_COLOR, EYE_COLOR, SOURCE } from "../ext/_shared/mascot.ts";
+import { BODY_COLOR, SOURCE } from "../ext/_shared/mascot.ts";
 
-/** White, opaque: iOS fills a touch icon's transparency with black. */
-const BACKGROUND = "#ffffff";
+/** The tile, edge to edge and opaque: the home screen rounds its corners. The eyes show it through. */
+export const BACKGROUND = "#0a0a0a";
 /** The mascot's width as a share of the icon's, in whole pixels per grid block so it stays crisp. */
-const SCALE = 0.75;
+const SCALE = 0.7;
 
 export const ICONS: Record<string, number> = {
 	"apple-touch-icon.png": 180,
@@ -21,7 +21,7 @@ function rgb(hex: string): number[] {
 	return [1, 3, 5].map((i) => Number.parseInt(hex.slice(i, i + 2), 16));
 }
 
-const COLORS: Record<string, number[]> = { ".": rgb(BACKGROUND), "#": rgb(BODY_COLOR), o: rgb(EYE_COLOR) };
+const COLORS: Record<string, number[]> = { ".": rgb(BACKGROUND), "#": rgb(BODY_COLOR), o: rgb(BACKGROUND) };
 
 function chunk(type: string, data: Buffer): Buffer {
 	const length = Buffer.alloc(4);
@@ -32,7 +32,7 @@ function chunk(type: string, data: Buffer): Buffer {
 	return Buffer.concat([length, body, crc]);
 }
 
-/** A `size`×`size` opaque RGB PNG: the mascot centred, each grid block a square of whole pixels. */
+/** A `size`×`size` opaque RGB PNG: the mascot centred on the tile, each grid block a square of whole pixels. */
 export function renderIcon(size: number): Buffer {
 	const columns = SOURCE[0]!.length;
 	const block = Math.max(1, Math.round((size * SCALE) / columns));

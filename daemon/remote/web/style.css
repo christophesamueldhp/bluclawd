@@ -1,23 +1,25 @@
-/* bluclawd's palettes (themes/bluclawd.json, bluclawd-light.json), following the phone's appearance:
-   its panel and message greys on a plain page, parts set apart by hairlines rather than fills.
+/* T3 Code's neutral greys (MIT), following the phone's appearance, around bluclawd's own accent:
+   `--panel` fills a field or a group, `--card` what is raised off the page, `--message` the user's bubble.
    `--accent` fills; `--link` is the accent as text, dark enough to read on white. */
 :root {
-	--bg: #ffffff;
-	--panel: #f5f5f5;
-	--message: #f0f0f0;
-	--text: #000000;
-	--secondary: #505050;
-	--muted: #666666;
-	--dim: #afafaf;
-	--line: #e4e4e4;
+	--bg: #fcfcfc;
+	--panel: #f4f4f5;
+	--card: #ffffff;
+	--message: #efeff1;
+	--text: #27272a;
+	--secondary: #52525c;
+	--muted: #6f6f79;
+	--dim: #a1a1aa;
+	--line: #e4e4e7;
 	--accent: #00c0e8;
 	--link: #007c99;
-	/* Inline code, as pi's mdCode. */
-	--code: #5769f7;
-	--red: #ab2b3f;
-	--green: #2c7a39;
-	--yellow: #966c1e;
-	--shadow: rgb(0 0 0 / .18);
+	--red: #c10007;
+	--green: #007a55;
+	--yellow: #bb4d00;
+	/* What stops or deletes, filled. */
+	--danger: #fb2c36;
+	--shadow: rgb(0 0 0 / .15);
+	--scrim: rgb(0 0 0 / .22);
 	--thinking-minimal: #466fa5;
 	--thinking-low: #467a36;
 	--thinking-medium: #946500;
@@ -37,20 +39,22 @@
 }
 @media (prefers-color-scheme: dark) {
 	:root {
-		--bg: #000000;
-		--panel: #262626;
-		--message: #373737;
-		--text: #ffffff;
-		--secondary: #c7c7c7;
-		--muted: #999999;
-		--dim: #505050;
-		--line: #2a2a2a;
+		--bg: #0a0a0a;
+		--panel: #1a1b1b;
+		--card: #111111;
+		--message: #1e1e1e;
+		--text: #f5f5f5;
+		--secondary: #c4c4c4;
+		--muted: #8e8e8e;
+		--dim: #52525b;
+		--line: rgb(255 255 255 / .08);
 		--link: #33cdee;
-		--code: #b1b9f9;
-		--red: #ff6b80;
-		--green: #4eba65;
-		--yellow: #ffc107;
-		--shadow: rgb(0 0 0 / .5);
+		--red: #ff6467;
+		--green: #5ee9b5;
+		--yellow: #ffb900;
+		--danger: #fb414a;
+		--shadow: rgb(0 0 0 / .35);
+		--scrim: rgb(0 0 0 / .48);
 		--thinking-minimal: #82aadc;
 		--thinking-low: #91c882;
 		--thinking-medium: #fac35f;
@@ -60,33 +64,33 @@
 	}
 }
 * { box-sizing: border-box; }
-html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); font: 16px/1.4 -apple-system, BlinkMacSystemFont, system-ui, sans-serif; -webkit-text-size-adjust: 100%; overscroll-behavior: none; -webkit-tap-highlight-color: transparent; }
+html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); font: 16px/1.4 -apple-system, BlinkMacSystemFont, system-ui, sans-serif; -webkit-font-smoothing: antialiased; -webkit-text-size-adjust: 100%; overscroll-behavior: none; -webkit-tap-highlight-color: transparent; }
 #app { height: var(--app-h, 100dvh); display: flex; flex-direction: column; background: var(--bg); padding: calc(env(safe-area-inset-top) + var(--s2)) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); }
 /* The keyboard covers the home indicator's inset. */
 .keyboard #app { padding-bottom: 0; }
 button { -webkit-user-select: none; user-select: none; }
-.mono, .t { font-family: var(--mono); }
+.mono { font-family: var(--mono); }
 /* icons.js: a button's icon in its text colour; the button carries the name. */
 .icon { display: block; width: 22px; height: 22px; flex: none; }
-.icon-btn { flex: none; display: flex; align-items: center; justify-content: center; width: 44px; height: 44px; padding: 0; border: 0; background: none; color: var(--link); }
+.icon-btn { flex: none; display: flex; align-items: center; justify-content: center; width: 44px; height: 44px; padding: 0; border: 0; background: none; color: var(--text); }
 .icon-btn.on { color: var(--accent); }
 .icon-btn[hidden] { display: none; }
 .icon-btn:disabled { opacity: .4; }
 .busy { animation: pulse 1s ease-in-out infinite; }
 /* The header: opaque and on whole pixels, under the status bar's safe area (see #app), so its text is never drawn over anything. */
 .bar { position: relative; z-index: 1; flex: none; display: flex; align-items: center; gap: var(--s1); min-height: 52px; padding: var(--s1) var(--s2) var(--s1) var(--s4); background: var(--bg); }
-.bar h1 { font-size: 24px; line-height: 1.2; font-weight: 700; letter-spacing: -.01em; margin: 0; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bar h1 { font-size: 21px; line-height: 1.2; font-weight: 700; letter-spacing: -.5px; margin: 0; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* Online, pi closed or offline: a dot, named for a screen reader and in its tooltip. */
 .dot { flex: none; width: 8px; height: 8px; margin: 0 var(--s2); border-radius: 50%; background: var(--dim); }
 .dot.on { background: var(--green); }
 /* A header's mascot (app.js's showAvatar), and a Chat's name over its state. */
 .avatar { flex: none; display: flex; margin-right: var(--s2); }
 .title { flex: 1; min-width: 0; min-height: 44px; display: flex; flex-direction: column; justify-content: center; padding: 0; border: 0; background: none; color: inherit; font: inherit; text-align: left; }
-.title .name { font-weight: 600; line-height: 1.25; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.title .name { font-size: 17px; font-weight: 700; letter-spacing: -.01em; line-height: 1.25; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .title .name::after { content: " ›"; color: var(--muted); font-weight: 400; }
-.title small { color: var(--muted); font-size: 12px; line-height: 1.3; }
+.title small { color: var(--muted); font-size: 13px; line-height: 1.3; }
 .bar .back { margin-left: calc(-1 * var(--s3)); }
-.muted { color: var(--muted); font-size: 15px; }
+.muted { color: var(--muted); font-size: 14px; }
 /* One small grey line (statusbar.js's barHtml), cut short rather than wrapped; the branch, or the directory, gives way first.
    A tap opens the status sheet. */
 .statusbar { position: relative; z-index: 1; flex: none; display: flex; flex-direction: column; gap: 2px; width: 100%; padding: 4px var(--s4); border: 0; border-bottom: 1px solid var(--line); background: var(--bg); color: var(--muted); font: 12px/1.35 -apple-system, BlinkMacSystemFont, system-ui, sans-serif; font-variant-numeric: tabular-nums; text-align: left; }
@@ -118,22 +122,28 @@ button { -webkit-user-select: none; user-select: none; }
 /* The list's search, as iOS's: its own clear button, and Cancel while it has the focus. */
 .search { flex: none; display: flex; align-items: center; gap: var(--s2); margin: 0; padding: var(--s2) var(--s4); }
 .search .field { position: relative; flex: 1; min-width: 0; }
-.search input { display: block; width: 100%; height: 36px; border: 1px solid var(--line); border-radius: 10px; padding: 0 36px 0 var(--s3); background: var(--panel); color: var(--text); font: inherit; -webkit-appearance: none; appearance: none; }
+.search input { display: block; width: 100%; height: 36px; border: 0; border-radius: 10px; padding: 0 36px 0 var(--s3); background: var(--panel); color: var(--text); font: inherit; -webkit-appearance: none; appearance: none; }
 .search input::-webkit-search-cancel-button { -webkit-appearance: none; display: none; }
+::placeholder { color: var(--muted); opacity: 1; }
 .clear { position: absolute; top: 0; right: 0; width: 36px; height: 36px; padding: 0; border: 0; background: none; color: var(--muted); font: inherit; font-size: 20px; line-height: 36px; }
 .clear[hidden], .cancel[hidden] { display: none; }
 .cancel { flex: none; min-height: 44px; margin: -4px 0; padding: 0 var(--s1); border: 0; background: none; color: var(--link); font: inherit; }
-.view-mode { flex: none; display: flex; align-items: center; gap: var(--s2); padding: 0 var(--s4); color: var(--muted); font-size: 13px; }
-.view-mode select { min-height: 44px; border: 0; background: var(--bg); color: var(--link); font: inherit; }
-.band { font-size: 13px; color: var(--muted); margin: var(--s4) var(--s4) var(--s1); font-weight: 600; overflow-wrap: anywhere; }
-.row { display: flex; gap: var(--s3); align-items: center; min-height: 60px; padding: var(--s2) var(--s4); color: inherit; text-decoration: none; position: relative; }
-/* A hairline between rows, inset to the text as iOS's. */
-.row + .row::before { content: ""; position: absolute; top: 0; left: calc(var(--s4) + 20px + var(--s3)); right: 0; border-top: 1px solid var(--line); }
+.view-mode { flex: none; display: flex; align-items: center; gap: var(--s1); padding: 0 var(--s4); color: var(--muted); font-size: 13px; }
+/* A filter chip, drawn 32 px tall inside a transparent border and tapped as 44. */
+.view-mode select { height: 44px; padding: 0 var(--s3); border: 6px solid transparent; border-radius: 20px; background: var(--panel) padding-box; color: var(--text); font: inherit; font-size: 14px; font-weight: 500; }
+/* A shelf of the list: its name, then a rule to the edge. */
+.band { display: flex; align-items: center; gap: 9px; font-size: 13px; color: var(--muted); margin: 14px var(--s4) 5px; font-weight: 500; overflow-wrap: anywhere; }
+.band::after { content: ""; flex: 1; min-width: var(--s4); height: 1px; background: var(--line); }
+.row { display: flex; gap: var(--s3); align-items: center; min-height: 60px; padding: 9px var(--s4); color: inherit; text-decoration: none; position: relative; }
+/* A hairline between rows, inset from the left edge. */
+.row + .row::before { content: ""; position: absolute; top: 0; left: var(--s4); right: 0; border-top: 1px solid var(--line); }
 .row:active { background: var(--panel); }
 .row.closed .name, .row.closed .glyph { opacity: 0.55; }
-.row .name { flex: 1; min-width: 0; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.row small { display: block; color: var(--muted); font-size: 15px; font-weight: 400; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.age { flex: none; align-self: flex-start; padding-top: 2px; color: var(--muted); font-size: 15px; font-variant-numeric: tabular-nums; }
+.row .name { flex: 1; min-width: 0; font-weight: 500; line-height: 23px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.row small { display: block; color: var(--muted); font-size: 13px; line-height: 17px; font-weight: 400; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* A row's trailing end: its state in its colour, unless it is only idle, over its age. */
+.age { flex: none; align-self: flex-start; display: flex; flex-direction: column; align-items: flex-end; padding-top: 3px; color: var(--muted); font-size: 13px; line-height: 17px; font-variant-numeric: tabular-nums; }
+.age .session-state { font-weight: 700; }
 .row .glyph { flex: none; width: 20px; font-size: 20px; line-height: 1; text-align: center; color: var(--muted); }
 /* Unseen: it finished a turn since its Chat was last open here. */
 .row.unseen .name { font-weight: 700; }
@@ -168,119 +178,118 @@ button { -webkit-user-select: none; user-select: none; }
 .older { height: 32px; line-height: 32px; margin-top: var(--s2); color: var(--muted); font-size: 13px; text-align: center; }
 /* Messages are text: a long press selects and copies them, as anywhere on iOS. */
 .u, .a, .t pre, .think pre, .marker { -webkit-user-select: text; user-select: text; -webkit-touch-callout: default; }
-.u { align-self: flex-end; max-width: 85%; background: var(--message); border-radius: 18px 18px 6px 18px; padding: 10px 14px; font-size: 16px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.u { align-self: flex-end; max-width: 85%; background: var(--message); border-radius: 20px; padding: 9px var(--s3); font-size: 16px; line-height: 23px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .a { font-size: 16px; line-height: 1.45; overflow-wrap: anywhere; }
-/* A tool call and its result, as bluclawd shows them: "● Bash(npm test)" and "⎿ …" under it. */
-.t { font-size: 13px; line-height: 1.45; color: var(--secondary); overflow-wrap: anywhere; }
-.t .call { display: block; color: var(--text); }
-.t .call b { font-weight: 600; }
-/* Not .dot: that class is the header's online dot, whose box drew a grey bead around this glyph. */
-.t .bullet { color: var(--muted); }
-.t.ok .bullet { color: var(--green); }
-.t.err .bullet { color: var(--red); }
-.t.running .bullet { animation: pulse 1.2s ease-in-out infinite; }
+/* A tool call and its result: its tool's icon and "Bash npm test", and "⎿ …" under it. */
+.t { font-size: 14px; line-height: 20px; color: var(--muted); overflow-wrap: anywhere; }
+.t .call { display: flex; align-items: flex-start; gap: 6px; padding: 4px 0; }
+.t .call .said { flex: 1; min-width: 0; }
+/* The icon's slot: the output's hook and a group's rule line up under it. */
+.t .tool, .t .tool .icon, .hook, :is(.run, .think) > summary .icon { flex: none; width: 21px; height: 20px; }
+:is(.t .tool, .run > summary, .think > summary) .icon { padding: 3px 3.5px; opacity: .7; }
+.t .call b { font-weight: 500; color: var(--secondary); }
+.t.err .tool { color: var(--red); }
+.t.running .tool { animation: pulse 1.2s ease-in-out infinite; }
 /* A running tool's name: a light sweeping across it, in steps so it costs little. */
-.t.running .call b { background: linear-gradient(90deg, var(--text) 40%, var(--accent) 50%, var(--text) 60%) 0 0 / 300% 100%; -webkit-background-clip: text; background-clip: text; color: transparent; animation: shine 2.2s steps(30) infinite; }
+.t.running .call b { background: linear-gradient(90deg, var(--secondary) 40%, var(--accent) 50%, var(--secondary) 60%) 0 0 / 300% 100%; -webkit-background-clip: text; background-clip: text; color: transparent; animation: shine 2.2s steps(30) infinite; }
 @keyframes shine { from { background-position: 100% 0; } to { background-position: 0 0; } }
-@media (prefers-reduced-motion: reduce) { .t.running .call b { animation: none; color: var(--text); } }
-.out { display: flex; gap: var(--s2); padding-left: 2px; }
-.hook { flex: none; color: var(--muted); }
-.lines { min-width: 0; white-space: pre-wrap; }
+@media (prefers-reduced-motion: reduce) { .t.running .call b { animation: none; color: var(--secondary); } }
+.out { display: flex; gap: 6px; }
+.hook { color: var(--dim); text-align: center; }
+.lines { min-width: 0; white-space: pre-wrap; font: 12px/18px var(--mono); padding-top: 1px; }
 .t.err .lines, .t.interrupted .lines { color: var(--red); }
 /* Under the call the turn stopped at, as one block with it. */
 .t + .t.interrupted, .a + .t.interrupted { margin-top: calc(-1 * var(--s2)); }
 .t summary, .think summary { list-style: none; cursor: pointer; }
+/* What opens says so with a chevron at its end, turned down once open. */
+details.t > summary .call::after, :is(.run, .think) > summary::after { content: ""; flex: none; width: 6px; height: 6px; border: solid currentColor; border-width: 0 1.5px 1.5px 0; opacity: .6; transform: rotate(-45deg); transition: transform .18s; }
+details.t > summary .call::after { margin: 6px 4px 0 2px; }
+details.t[open] > summary .call::after, :is(.run, .think)[open] > summary::after { transform: rotate(45deg); }
 .t summary::-webkit-details-marker, .think summary::-webkit-details-marker { display: none; }
-.t pre, .think pre { white-space: pre-wrap; margin: 6px 0 0; padding: var(--s2) 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); color: var(--text); font: inherit; }
+.t pre, .think pre { white-space: pre-wrap; margin: 6px 0 0; padding: var(--s2) 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--card); color: var(--text); font: 12px/18px var(--mono); }
 /* A long output scrolls in its own box, so the log around it stays in reach. */
 .t pre { max-height: 24rem; overflow-y: auto; -webkit-overflow-scrolling: touch; overscroll-behavior-y: contain; }
-.think pre { font: 14px/1.45 -apple-system, BlinkMacSystemFont, system-ui, sans-serif; font-style: italic; color: var(--secondary); }
+.think pre { font: 14px/1.45 -apple-system, BlinkMacSystemFont, system-ui, sans-serif; color: var(--secondary); }
 /* An edit's diff (diff.js): its lines as pi shows them, scrolled sideways rather than wrapped. */
 .t pre.diff { white-space: pre; overflow-x: auto; -webkit-overflow-scrolling: touch; overflow-wrap: normal; color: var(--muted); }
 .diff .add { color: var(--green); }
 .diff .del { color: var(--red); }
 .t .note { margin: 6px 0 0; font-style: italic; }
-.full { display: block; min-height: 44px; margin-top: 6px; padding: 0 14px; border: 0; border-radius: 10px; background: var(--message); color: var(--link); font: 15px -apple-system, BlinkMacSystemFont, system-ui, sans-serif; font-weight: 600; }
+.full { display: block; min-height: 44px; margin-top: 6px; padding: 0 var(--s4); border: 0; border-radius: 22px; background: var(--panel); color: var(--text); font: 14px -apple-system, BlinkMacSystemFont, system-ui, sans-serif; font-weight: 500; }
 .full:disabled { opacity: .5; }
 .t .error { margin: 6px 0 0; font-size: 13px; min-height: 0; }
 .think { font-size: 14px; color: var(--muted); }
-.think summary { display: inline-flex; align-items: center; min-height: 32px; }
-.think summary::before { content: "▸"; display: inline-block; width: 28px; font-size: 24px; line-height: 1; }
-.think[open] summary::before { content: "▾"; }
+:is(.run, .think) > summary { display: inline-flex; align-items: center; gap: 6px; min-height: 32px; }
 /* A run of finished tool calls, one line until tapped (app.js's groupHtml); its calls along a rule. */
 .run { font-size: 14px; color: var(--muted); }
-.run > summary { list-style: none; cursor: pointer; display: inline-flex; align-items: center; min-height: 32px; }
+.run > summary { list-style: none; cursor: pointer; }
 .run > summary::-webkit-details-marker { display: none; }
-.run > summary::before { content: "▸"; display: inline-block; width: 28px; font-size: 24px; line-height: 1; }
-.run[open] > summary::before { content: "▾"; }
-.run .steps { display: flex; flex-direction: column; gap: var(--s3); margin: var(--s1) 0 0 5px; padding-left: var(--s3); border-left: 1px solid var(--line); }
+.run .steps { display: flex; flex-direction: column; gap: var(--s1); margin: var(--s1) 0 0 10px; padding-left: 10px; border-left: 1px solid var(--line); }
 .run + .t.interrupted { margin-top: calc(-1 * var(--s2)); }
-.marker { align-self: center; max-width: 85%; font-size: 13px; color: var(--muted); text-align: center; }
+/* A marker in the log, between two rules. */
+.marker { display: flex; align-items: center; gap: var(--s3); font-size: 13px; font-weight: 500; color: var(--muted); text-align: center; }
+.marker::before, .marker::after { content: ""; flex: 1; min-width: var(--s4); height: 1px; background: var(--line); }
 .queued { align-self: flex-end; font-size: 12px; color: var(--muted); margin-top: calc(-1 * var(--s2)); }
 /* The working line (app.js's workingHtml): the mascot at work, and what it does under a sweeping light. */
-.log .working { display: flex; align-items: center; gap: var(--s2); min-height: 36px; color: var(--muted); font-size: 15px; }
+.log .working { display: flex; align-items: center; gap: var(--s2); min-height: 36px; color: var(--muted); font-size: 14px; }
 .log .working .label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; background: linear-gradient(90deg, var(--secondary) 40%, var(--accent) 50%, var(--secondary) 60%) 0 0 / 300% 100%; -webkit-background-clip: text; background-clip: text; color: transparent; animation: shine 2.2s steps(30) infinite; }
 .log .working .elapsed { flex: none; font-size: 13px; font-variant-numeric: tabular-nums; }
 @media (prefers-reduced-motion: reduce) { .log .working .label { animation: none; color: var(--secondary); } }
 /* After an ended turn: how long it took. */
-.turn-time { padding-bottom: var(--s3); border-bottom: 1px solid var(--line); font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.turn-time { padding-bottom: var(--s3); border-bottom: 1px solid var(--line); font-size: 14px; font-weight: 500; color: var(--muted); font-variant-numeric: tabular-nums; }
 /* The status pill (app.js's updateFloat): over the log's end, out of the way of what is under it.
    The log fills the room left, so the pill sits right above the reply box however short the log is. */
 #scroll { display: flex; flex-direction: column; }
 #scroll > .log { flex: 1 0 auto; }
 .float { position: sticky; bottom: var(--s2); z-index: 1; display: flex; justify-content: center; flex-wrap: wrap; gap: var(--s1); padding: 0 var(--s4); pointer-events: none; }
 .float[hidden] { display: none; }
-.pill-item { pointer-events: auto; display: inline-flex; align-items: center; gap: 6px; min-height: 32px; padding: 0 var(--s3); border: 1px solid var(--line); border-radius: 16px; background: color-mix(in srgb, var(--panel) 78%, transparent); -webkit-backdrop-filter: blur(12px) saturate(1.14); backdrop-filter: blur(12px) saturate(1.14); color: var(--secondary); font: 13px -apple-system, BlinkMacSystemFont, system-ui, sans-serif; font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; box-shadow: 0 2px 8px var(--shadow); }
-button.pill-item { position: relative; color: var(--link); }
-/* Drawn 32 px tall, tapped as 44: the hit area reaches past its edge. */
-button.pill-item::after { content: ""; position: absolute; inset: -6px; }
+.pill-item { pointer-events: auto; display: inline-flex; align-items: center; gap: 6px; min-height: 36px; padding: 0 14px; border: 1px solid var(--line); border-radius: 18px; background: color-mix(in srgb, var(--card) 80%, transparent); -webkit-backdrop-filter: blur(12px) saturate(1.14); backdrop-filter: blur(12px) saturate(1.14); color: var(--text); font: 13px -apple-system, BlinkMacSystemFont, system-ui, sans-serif; font-weight: 500; font-variant-numeric: tabular-nums; white-space: nowrap; box-shadow: 0 4px 12px -2px var(--shadow); }
+button.pill-item { position: relative; }
+/* Drawn 36 px tall, tapped as 44: the hit area reaches past its edge. */
+button.pill-item::after { content: ""; position: absolute; inset: -4px; }
 .pill-item.off { color: var(--red); }
 .pill-item .icon { width: 14px; height: 14px; }
 .pill-item .session-spinner { width: 14px; height: 14px; line-height: 14px; color: var(--accent); text-align: center; }
-.pill-item.end { min-width: 32px; justify-content: center; padding: 0; font-size: 16px; }
-.banner { flex: none; margin: var(--s2) var(--s4) 0; padding: 10px var(--s3); border-radius: 10px; font-size: 15px; background: color-mix(in srgb, var(--yellow) 18%, var(--bg)); }
-.banner.off { background: color-mix(in srgb, var(--red) 16%, var(--bg)); }
-.banner.closed { background: var(--panel); color: var(--muted); }
+.pill-item.end { min-width: 36px; justify-content: center; padding: 0; font-size: 16px; }
+.banner { flex: none; margin: var(--s2) var(--s4) 0; padding: 10px var(--s3); border: 1px solid color-mix(in srgb, var(--yellow) 32%, transparent); border-radius: 14px; font-size: 14px; background: color-mix(in srgb, var(--yellow) 8%, var(--bg)); }
+.banner.off { border-color: color-mix(in srgb, var(--red) 32%, transparent); background: color-mix(in srgb, var(--red) 8%, var(--bg)); }
+.banner.closed { border-color: var(--line); background: var(--card); color: var(--muted); }
 /* In a chat, under the log and above the reply box, where the thumb answers. */
 .scroll + #banner .banner { margin: var(--s2) var(--s4); }
-.composer { flex: none; display: flex; gap: var(--s2); align-items: flex-end; padding: var(--s2) var(--s3); background: var(--bg); }
+.composer { flex: none; display: flex; gap: var(--s2); align-items: flex-end; padding: 6px var(--s3) var(--s2); background: var(--bg); }
 .composer textarea { flex: 1; min-height: 44px; resize: none; border: 1px solid var(--line); border-radius: 22px; padding: 10px var(--s4); background: var(--panel); color: var(--text); font: 16px/22px -apple-system, BlinkMacSystemFont, system-ui, sans-serif; max-height: 140px; }
-/* A Chat's reply box: one rounded card around the attach button, the text and the round button. */
-.composer:not(.new) { gap: 0; margin: var(--s1) var(--s3) var(--s2); padding: 3px; border: 1px solid var(--line); border-radius: 24px; background: var(--panel); box-shadow: 0 1px 2px rgb(0 0 0 / .05); }
-.composer:not(.new):focus-within { border-color: color-mix(in srgb, var(--accent) 60%, var(--line)); }
-.composer:not(.new) textarea { min-height: 40px; padding: 9px var(--s1); border: 0; outline: 0; background: none; }
-.composer:not(.new) :is(.send, .attach) { width: 40px; height: 40px; }
-.composer:not(.new) .attach { background: none; }
-/* Drawn 40 px, tapped as 44: the hit area reaches past the edge, as the pill's does. */
-.composer:not(.new) .send { position: relative; }
-.composer:not(.new) .send::after { content: ""; position: absolute; inset: -2px; }
-.composer:not(.new) .attach input { inset: -2px; width: 44px; height: 44px; }
-/* Round icon buttons: the accent one sends or starts, the grey one attaches. */
-.send, .start, .save, .attach { flex: none; display: flex; align-items: center; justify-content: center; width: 44px; height: 44px; padding: 0; border: 0; border-radius: 50%; background: var(--accent); color: #000; }
-.attach { position: relative; background: var(--panel); color: var(--link); }
+/* A Chat's reply box: one raised pill around the attach button, the text and the send button. */
+.composer:not(.new) { gap: 0; margin: 6px var(--s3); padding: 2px; border: 1px solid var(--line); border-radius: 27px; background: var(--panel); box-shadow: 0 6px 28px var(--shadow); }
+.composer:not(.new) textarea { padding: 10.5px 2px; border: 0; outline: 0; background: none; font: 16px/23px -apple-system, BlinkMacSystemFont, system-ui, sans-serif; }
+/* Round buttons, 44 px to tap: what sends, starts or saves draws its icon in a 30 px accent disc; attaching is plain. */
+.send, .start, .save, .attach { flex: none; display: flex; align-items: center; justify-content: center; width: 44px; height: 44px; padding: 0; border: 0; border-radius: 50%; background: none; color: var(--text); }
+:is(.send, .start, .save) .icon { width: 30px; height: 30px; padding: 7px; border-radius: 50%; background: var(--accent); color: #000; }
+.attach { position: relative; }
 /* The send button mid-turn: Queue with something typed, Stop with nothing. */
-.send.queue { background: var(--panel); color: var(--link); border: 1px solid var(--accent); }
-.send.stop { background: var(--red); color: #fff; }
+.send.queue .icon { background: none; color: var(--link); box-shadow: inset 0 0 0 1.5px var(--accent); }
+.send.stop .icon { background: var(--danger); color: #fff; }
 /* Safari anchors its native photo menu to the file input, so keep it over the plus button. */
 .attach input { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: pointer; }
 .attach:has(input:focus-visible) { outline: 2px solid var(--link); outline-offset: 2px; }
-.send:disabled, .start:disabled, .save:disabled, .attach:has(input:disabled) { opacity: .35; }
+:is(.send, .start, .save):disabled .icon { background: color-mix(in srgb, var(--text) 12%, transparent); color: color-mix(in srgb, var(--text) 38%, transparent); }
+.attach:has(input:disabled) { opacity: .4; }
 /* A pressed button gives a little. */
 :is(.send, .start, .save, .attach, .icon-btn, .answer, button.pill-item) { transition: transform .1s ease-out; }
 :is(.send, .start, .save, .attach, .icon-btn, .answer, button.pill-item):active { transform: scale(.94); }
-/* The session's commands for what the reply box starts with: a short list above it. */
-.commands { flex: none; max-height: 40vh; overflow-y: auto; -webkit-overflow-scrolling: touch; border-top: 1px solid var(--line); background: var(--bg); }
+/* The session's commands for what the reply box starts with: a short raised list above it. */
+.commands { flex: none; max-height: 40vh; margin: 0 var(--s3); overflow-y: auto; -webkit-overflow-scrolling: touch; border: 1px solid var(--line); border-radius: 16px; background: var(--card); box-shadow: 0 6px 28px var(--shadow); }
 .commands[hidden] { display: none; }
-.command { display: block; width: 100%; min-height: 44px; padding: var(--s2) var(--s4); border: 0; background: none; color: var(--text); font: inherit; font-size: 16px; text-align: left; }
+.command { display: block; width: 100%; min-height: 44px; padding: 9px var(--s3); border: 0; background: none; color: var(--text); font: inherit; font-size: 16px; text-align: left; }
 .command + .command { border-top: 1px solid var(--line); }
 .command:active { background: var(--panel); }
-.command b { font-family: var(--mono); font-size: 15px; font-weight: 600; }
+.command b { font-family: var(--mono); font-size: 14px; font-weight: 600; }
 .command small { display: block; color: var(--muted); font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .thumbs { flex: none; display: flex; gap: var(--s2); padding: var(--s2) var(--s3) 0; overflow-x: auto; }
 .thumbs[hidden] { display: none; }
 .thumb { position: relative; flex: none; }
-.thumb img { display: block; width: 72px; height: 72px; object-fit: cover; border-radius: 10px; }
-.remove { position: absolute; top: 2px; right: 2px; width: 28px; height: 28px; padding: 0; border: 0; border-radius: 50%; background: rgb(0 0 0 / .6); color: #fff; font-size: 14px; line-height: 1; }
+.thumb img { display: block; width: 72px; height: 72px; object-fit: cover; border-radius: 16px; }
+.remove { position: absolute; top: 4px; right: 4px; width: 22px; height: 22px; padding: 0; border: 0; border-radius: 50%; background: rgb(0 0 0 / .55); color: #fff; font-size: 12px; line-height: 1; }
+.remove::after { content: ""; position: absolute; inset: -11px; }
 .pictures { display: flex; flex-direction: column; gap: 6px; margin-bottom: 6px; }
 .composer.new { flex-direction: column; align-items: stretch; }
 .task-input { display: flex; gap: var(--s2); align-items: flex-end; }
@@ -288,8 +297,8 @@ button.pill-item::after { content: ""; position: absolute; inset: -6px; }
 /* Keep task options together, including after a picker dismisses the keyboard. */
 .composer.new:not(.expanded) :is(.pick, .where, .dirs) { display: none; }
 .where { display: flex; gap: var(--s2); align-items: center; }
-.where input { flex: 1; min-width: 0; height: 44px; border: 1px solid var(--line); border-radius: 12px; padding: 0 var(--s3); background: var(--panel); color: var(--text); font: inherit; font-size: 16px; }
-.empty { color: var(--muted); text-align: center; margin: 40px var(--s4); }
+.where input { flex: 1; min-width: 0; height: 44px; border: 1px solid var(--line); border-radius: 14px; padding: 0 var(--s3); background: var(--card); color: var(--text); font: inherit; font-size: 16px; }
+.empty { color: var(--muted); font-size: 15px; text-align: center; margin: 40px var(--s4); }
 .empty .mascot { margin: 0 auto var(--s3); }
 .empty p { margin: 0; }
 .loader { display: flex; justify-content: center; margin: 40px var(--s4); }
@@ -392,29 +401,31 @@ button.pill-item::after { content: ""; position: absolute; inset: -6px; }
 @keyframes cheer { 0% { transform: translate(0, -3px); } 100% { transform: none; } }
 @keyframes sparkle { 0%, 50% { opacity: 1; } 25%, 75%, 100% { opacity: 0; } }
 .pair { flex: 1; display: flex; flex-direction: column; justify-content: center; align-items: center; gap: var(--s3); padding: var(--s5); text-align: center; }
-.pair h1 { margin: 0; font-size: 28px; }
-.pair input { font: 28px var(--mono); letter-spacing: .3em; text-align: center; width: 11ch; padding: 10px; border-radius: 10px; border: 1px solid var(--dim); background: var(--panel); color: var(--text); }
-.pair button { min-height: 44px; background: var(--accent); color: #000; border: 0; border-radius: 12px; padding: 12px 40px; font: inherit; font-weight: 600; }
+.pair h1 { margin: 0; font-size: 26px; letter-spacing: -.02em; }
+.pair input { font: 28px var(--mono); letter-spacing: .3em; text-align: center; width: 11ch; padding: 10px; border-radius: 14px; border: 1px solid var(--line); background: var(--card); color: var(--text); }
+.pair button { min-height: 44px; background: var(--accent); color: #000; border: 0; border-radius: 22px; padding: 12px 40px; font: inherit; font-weight: 600; }
 .pair ol { margin: 0; padding-left: 1.4em; text-align: left; line-height: 1.6; }
-.pair button.link { background: none; color: var(--accent); font-weight: 400; padding: 12px; }
-.error { color: var(--red); font-size: 15px; min-height: 1.4em; }
-.backdrop { position: fixed; inset: 0; z-index: 10; background: rgb(0 0 0 / .35); }
-.sheet { position: fixed; left: 0; right: 0; bottom: var(--keyboard, 0px); z-index: 11; max-height: calc(var(--app-h, 100dvh) * .85); overflow-y: auto; background: var(--bg); border-radius: 14px 14px 0 0; box-shadow: 0 -4px 24px var(--shadow); padding: var(--s1) max(var(--s4), env(safe-area-inset-right)) calc(var(--s4) + env(safe-area-inset-bottom)) max(var(--s4), env(safe-area-inset-left)); }
+.pair button.link { background: none; color: var(--link); font-weight: 400; padding: 12px; }
+.error { color: var(--red); font-size: 14px; min-height: 1.4em; }
+.backdrop { position: fixed; inset: 0; z-index: 10; background: var(--scrim); }
+.sheet { position: fixed; left: 0; right: 0; bottom: var(--keyboard, 0px); z-index: 11; max-height: calc(var(--app-h, 100dvh) * .85); overflow-y: auto; background: var(--bg); border-radius: 24px 24px 0 0; box-shadow: 0 -4px 24px var(--shadow); padding: var(--s3) max(var(--s4), env(safe-area-inset-right)) calc(var(--s4) + env(safe-area-inset-bottom)) max(var(--s4), env(safe-area-inset-left)); }
+/* Its grabber. */
+.sheet::before { content: ""; position: absolute; top: 6px; left: calc(50% - 16px); width: 32px; height: 4px; border-radius: 2px; background: var(--dim); opacity: .6; }
 .sheet[hidden], .backdrop[hidden] { display: none; }
 /* With the keyboard up (app.js's fitViewport) the home indicator is hidden, and a sheet's text
    field stays in view above it. */
 .keyboard #app { padding-bottom: 0; }
 .keyboard .sheet { max-height: calc(var(--app-h) - env(safe-area-inset-top) - 8px); padding-bottom: var(--s4); }
 .sheet-bar { display: flex; align-items: center; justify-content: space-between; min-height: 52px; }
-.sheet-bar h2 { font-size: 17px; font-weight: 600; margin: 0; }
+.sheet-bar h2 { font-size: 17px; font-weight: 700; margin: 0; }
 .sheet-bar .close { margin-right: calc(-1 * var(--s3)); color: var(--muted); }
 .sheet-tools { display: flex; align-items: center; }
 .version { margin: var(--s4) 0 0; color: var(--muted); font-size: 13px; text-align: center; }
-/* The status sheet: its settings as one grouped list, as iOS's Settings, then its numbers in grey. */
-.settings, .options { border: 1px solid var(--line); border-radius: 12px; background: var(--panel); overflow: hidden; }
+/* The status sheet: its settings as one grouped list, then its numbers in grey. */
+.settings, .options { border-radius: 20px; background: var(--panel); overflow: hidden; }
 .setting, .option { position: relative; display: flex; align-items: center; gap: var(--s3); width: 100%; min-height: 48px; padding: 0 var(--s4); border: 0; background: none; color: var(--text); font: inherit; text-align: left; }
 .setting + .setting::before, .option + .option::before { content: ""; position: absolute; top: 0; left: var(--s4); right: 0; border-top: 1px solid var(--line); }
-button.setting:active, .option:active { background: var(--message); }
+button.setting:active, .option:active { background: color-mix(in srgb, var(--text) 6%, transparent); }
 .setting .label { flex: 1; }
 .setting .value { min-width: 0; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .setting .chevron { margin-right: -4px; color: var(--dim); font-size: 22px; line-height: 1; }
@@ -424,7 +435,7 @@ button.setting:active, .option:active { background: var(--message); }
 .slider .ticks { display: flex; flex-basis: 100%; justify-content: space-between; padding: 0 14px; }
 .slider .ticks button { display: flex; justify-content: center; width: 0; min-height: 36px; padding: 0; border: 0; background: none; color: var(--muted); font: inherit; font-size: 12px; white-space: nowrap; }
 .numbers { display: flex; flex-direction: column; gap: 6px; margin: var(--s5) 0 var(--s4); }
-.context { display: flex; justify-content: space-between; gap: var(--s2); font-size: 15px; }
+.context { display: flex; justify-content: space-between; gap: var(--s2); font-size: 14px; }
 .context span + span { color: var(--muted); font-variant-numeric: tabular-nums; }
 .context-used.normal, .context .context-used.normal { color: var(--green); }
 .context-used.high, .context .context-used.high { color: var(--yellow); }
@@ -443,7 +454,7 @@ button.setting:active, .option:active { background: var(--message); }
 /* A choice (picker.js), over everything but the image viewer. */
 .picker-backdrop { z-index: 12; }
 .sheet.picker { z-index: 13; max-height: calc(var(--app-h, 100dvh) * .7); }
-.picker .group { margin: var(--s3) var(--s1) 6px; color: var(--muted); font-size: 13px; font-weight: 600; }
+.picker .group { margin: 14px var(--s2) var(--s2); color: var(--muted); font-size: 14px; font-weight: 500; }
 .option span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .option[aria-selected="true"] { color: var(--link); font-weight: 600; }
 .option .icon { width: 20px; height: 20px; }
@@ -457,31 +468,31 @@ button.setting:active, .option:active { background: var(--message); }
 .p0 { width: 0; } .p10 { width: 10%; } .p20 { width: 20%; } .p30 { width: 30%; } .p40 { width: 40%; } .p50 { width: 50%; }
 .p60 { width: 60%; } .p70 { width: 70%; } .p80 { width: 80%; } .p90 { width: 90%; } .p100 { width: 100%; }
 .actions { display: flex; flex-direction: column; gap: var(--s2); margin-top: var(--s2); }
-.action { width: 100%; min-height: 44px; padding: 10px 14px; border: 0; border-radius: 12px; background: var(--panel); color: var(--link); font: inherit; font-weight: 600; text-align: left; }
+.action { width: 100%; min-height: 44px; padding: 10px 14px; border: 0; border-radius: 14px; background: var(--panel); color: var(--text); font: inherit; font-weight: 500; text-align: left; }
 .action small { display: block; margin-top: 2px; color: var(--muted); font-size: 13px; font-weight: 400; }
 .action:disabled { opacity: .5; }
 .action.danger { color: var(--red); }
 /* The status sheet's session part: its name, pin and delete. */
 .rename { display: flex; align-items: center; gap: var(--s2); margin: 20px 0 0; padding-top: var(--s4); border-top: 1px solid var(--line); }
-.rename label { color: var(--muted); font-size: 15px; }
-.rename input { flex: 1; min-width: 0; height: 44px; border: 1px solid var(--line); border-radius: 12px; padding: 0 var(--s3); background: var(--panel); color: var(--text); font: inherit; }
+.rename label { color: var(--muted); font-size: 14px; }
+.rename input { flex: 1; min-width: 0; height: 44px; border: 1px solid var(--line); border-radius: 14px; padding: 0 var(--s3); background: var(--card); color: var(--text); font: inherit; }
 #sheet-manage .actions { margin-top: var(--s3); }
-.confirm-delete { display: flex; align-items: center; gap: var(--s1); padding: 6px var(--s1) 6px 14px; border-radius: 12px; background: var(--panel); font-size: 15px; }
+.confirm-delete { display: flex; align-items: center; gap: var(--s1); padding: 6px var(--s1) 6px 14px; border-radius: 14px; background: var(--panel); font-size: 14px; }
 .confirm-delete span { flex: 1; min-width: 0; }
 /* The background tasks sheet: each task's kind and running time, its label, Output and Stop. */
 .tasks { list-style: none; margin: var(--s2) 0 0; padding: 0; display: flex; flex-direction: column; gap: var(--s2); }
-.task { padding: 10px 14px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); }
+.task { padding: 10px 14px; border: 1px solid var(--line); border-radius: 16px; background: var(--card); }
 .task-head { display: flex; justify-content: space-between; gap: var(--s2); color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; }
 .task-label { margin-top: 2px; font: 14px/1.4 var(--mono); overflow-wrap: anywhere; }
 .task-actions { display: flex; align-items: center; gap: var(--s2); margin-top: var(--s1); }
 .task-actions .confirm-delete { flex: 1; padding: 0 0 0 var(--s1); background: none; }
-.task-btn { min-height: 44px; padding: 0 var(--s1); border: 0; background: none; color: var(--link); font: inherit; font-size: 15px; font-weight: 600; }
+.task-btn { min-height: 44px; padding: 0 var(--s1); border: 0; background: none; color: var(--link); font: inherit; font-size: 14px; font-weight: 600; }
 .task-btn.danger { color: var(--red); }
 .task-btn:disabled { opacity: .5; }
 .task-out { margin: var(--s1) 0 0; padding: var(--s2) 10px; max-height: 40vh; overflow: auto; -webkit-overflow-scrolling: touch; border-radius: 8px; background: var(--bg); font: 11px/1.4 var(--mono); white-space: pre; -webkit-user-select: text; user-select: text; }
 .task .error { margin: var(--s1) 0 0; font-size: 13px; min-height: 0; }
 /* The new session's model, on its own line: its names are long. */
-.pick { flex: none; display: flex; align-items: center; justify-content: space-between; gap: var(--s2); height: 44px; border: 1px solid var(--line); border-radius: 12px; padding: 0 var(--s3); background: var(--panel); color: var(--text); font: inherit; font-size: 16px; text-align: left; }
+.pick { flex: none; display: flex; align-items: center; justify-content: space-between; gap: var(--s2); height: 44px; border: 1px solid var(--line); border-radius: 14px; padding: 0 var(--s3); background: var(--card); color: var(--text); font: inherit; font-size: 16px; text-align: left; }
 .pick[hidden] { display: none; }
 .pick span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pick .icon { width: 18px; height: 18px; color: var(--muted); }
@@ -490,7 +501,7 @@ button.setting:active, .option:active { background: var(--message); }
    down to the field, right above the keyboard. */
 #app:has(#cwd:focus) :is(#rows, #banner, .search) { display: none; }
 #app:has(#cwd:focus) .composer.new { flex: 1; min-height: 0; }
-.composer .dirs { flex: 1 1 auto; min-height: 0; max-height: none; margin: 0 calc(-1 * var(--s3)); }
+.composer .dirs { flex: 1 1 auto; min-height: 0; max-height: none; margin: 0; }
 .dirs .command b { font-family: inherit; font-size: 16px; }
 .banner.hint { display: flex; align-items: center; gap: 10px; }
 .banner.hint span { flex: 1; min-width: 0; }
@@ -503,20 +514,20 @@ button.setting:active, .option:active { background: var(--message); }
 .a h1, .a h2, .a h3, .a h4, .a h5, .a h6 { margin: 14px 0 6px; line-height: 1.25; font-weight: 600; }
 .a > :first-child { margin-top: 0; }
 .a > :last-child { margin-bottom: 0; }
-.a h1 { font-size: 20px; }
-.a h2 { font-size: 18px; }
+.a h1 { font-size: 21px; }
+.a h2 { font-size: 19px; }
 .a h3 { font-size: 17px; }
-.a h4, .a h5, .a h6 { font-size: 16px; color: var(--muted); }
+.a h4, .a h5, .a h6 { font-size: 15px; }
 .a ul, .a ol { padding-left: 22px; }
 .a li + li { margin-top: 2px; }
 .a li > ul, .a li > ol, .a li > .code, .a li > .table { margin: var(--s1) 0; }
 .a li.task { list-style: none; }
 .a li.task input { margin: 0 2px 0 -20px; vertical-align: -2px; }
-.a blockquote { padding-left: 10px; margin-left: 0; margin-right: 0; border-left: 3px solid var(--line); color: var(--muted); }
-.a code { font: 14px var(--mono); color: var(--code); background: var(--panel); border-radius: 4px; padding: 1px 4px; }
-.a .code { border: 1px solid var(--line); background: var(--panel); border-radius: 8px; }
-.a .lang { padding: 6px 10px 0; color: var(--muted); font: 11px var(--mono); }
-.a pre { margin: 0; padding: var(--s2) 10px; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+.a blockquote { padding-left: var(--s3); margin-left: 0; margin-right: 0; border-left: 2px solid var(--line); color: var(--muted); }
+.a code { font: .875em var(--mono); background: color-mix(in srgb, var(--text) 10%, transparent); border-radius: 4px; padding: .1em .35em; }
+.a .code { border: 1px solid var(--line); background: var(--card); border-radius: 8px; overflow: hidden; }
+.a .lang { padding: 7px var(--s3); border-bottom: 1px solid var(--line); color: var(--muted); font: 500 12px -apple-system, BlinkMacSystemFont, system-ui, sans-serif; text-transform: capitalize; }
+.a pre { margin: 0; padding: var(--s3); overflow-x: auto; -webkit-overflow-scrolling: touch; }
 .a pre code { padding: 0; color: inherit; background: none; font-size: 13px; line-height: 1.45; }
 .a hr { border: 0; border-top: 1px solid var(--line); margin: var(--s3) 0; }
 .a .table { overflow-x: auto; -webkit-overflow-scrolling: touch; }
@@ -525,10 +536,10 @@ button.setting:active, .option:active { background: var(--message); }
 .a th { background: var(--panel); font-weight: 600; }
 .a th.c, .a td.c { text-align: center; }
 .a th.r, .a td.r { text-align: right; }
-.a a { color: var(--link); }
+.a a { color: var(--link); text-decoration: none; }
 /* A message's images, as wide as its bubble, and full screen when tapped. A placeholder holds an
    image's place until it is in (app.js keeps the log where it was as it changes size). */
-.pic { display: block; width: 100%; min-height: 160px; padding: 0; border: 0; border-radius: 12px; overflow: hidden; background: var(--panel); color: var(--muted); font-size: 11px; }
+.pic { display: block; width: 100%; min-height: 160px; padding: 0; border: 0; border-radius: 14px; overflow: hidden; background: var(--panel); color: var(--muted); font-size: 11px; }
 /* Once loaded, never past its own size: a small picture is not blown up into a blur. */
 .pic.loaded { width: auto; max-width: 100%; min-height: 0; background: none; }
 .pic img { display: block; width: 100%; height: auto; max-height: 60vh; object-fit: contain; }
@@ -543,7 +554,7 @@ button.setting:active, .option:active { background: var(--message); }
 .viewer[hidden] { display: none; }
 .viewer img { max-width: 100%; max-height: 100%; object-fit: contain; }
 
-.selected-skill { position: relative; border: 1px solid var(--accent); border-radius: 8px; padding: 8px 36px 8px 10px; margin: 4px 12px; }
+.selected-skill { position: relative; border: 1px solid color-mix(in srgb, var(--accent) 42%, transparent); border-radius: 14px; background: var(--panel); padding: 8px 36px 8px 12px; margin: 4px 12px; }
 .selected-skill small { display: block; overflow-wrap: anywhere; opacity: .75; }
 .selected-skill button { position: absolute; right: 4px; top: 4px; background: transparent; color: inherit; border: 0; font-size: 22px; }
 .command small { overflow-wrap: anywhere; white-space: normal; }
