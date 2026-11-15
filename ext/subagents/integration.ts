@@ -391,6 +391,8 @@ async function unsettled(
 	if (run.status !== "closed") {
 		return `${label} ended ${run.status}${reason ? ` (${reason})` : ""}. Its worktree keeps its partial work for you to inspect; it is not ready to integrate.`;
 	}
+	// Its latest Report of any Generation, not its last Generation's: a Resume left idle, or one that did not start,
+	// closes with no Report of its own and did no work, so the work before it can still be integrated (#455).
 	const report = readRunReports(runDir, -1).at(-1);
 	if (report?.outcome?.status !== "completed") {
 		return `${label}'s last work did not complete (${report?.outcome?.error ?? reason ?? "no outcome was stored"}). Its worktree keeps its partial work for you to inspect; it is not ready to integrate.`;
