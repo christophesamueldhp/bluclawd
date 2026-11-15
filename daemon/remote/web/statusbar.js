@@ -130,19 +130,20 @@ function thinkingHtml(levels, level) {
 
 /**
  * The sheet's settings, as one grouped list: the model, the thinking level among those pi offers
- * for it, and the trust mode when the pane reports one.
- * @param {Report} report
+ * for it, and the trust mode when the pane reports one. `pickable`: the Chat verdict allows the
+ * settings; else each is only shown.
+ * @param {Report} report @param {boolean} pickable
  */
-export function settingsHtml(report) {
+export function settingsHtml(report, pickable) {
 	const model = report.model ? (report.model.name ?? report.model.id) : "None selected";
 	const levels = report.thinkingLevels ?? [];
 	const level = report.thinkingLevel ?? "off";
 	const rows = [
-		settingHtml("model", "Model", model, report.models.length > 0),
-		levels.length > 1 ? thinkingHtml(levels, level) : settingHtml("thinking", "Thinking", level, false),
+		settingHtml("model", "Model", model, pickable && report.models.length > 0),
+		pickable && levels.length > 1 ? thinkingHtml(levels, level) : settingHtml("thinking", "Thinking", level, false),
 	];
 	const trust = TRUST.find(([value]) => value === report.trust);
-	if (trust) rows.push(settingHtml("trust", "Trust", trust[2], true));
+	if (trust) rows.push(settingHtml("trust", "Trust", trust[2], pickable));
 	return `<div class="settings">${rows.join("")}</div>`;
 }
 

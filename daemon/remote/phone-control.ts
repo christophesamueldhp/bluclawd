@@ -14,12 +14,25 @@ import {
 	phoneMayRun,
 } from "../ipc/protocol.ts";
 import type { StatusSpan } from "./pistatusline.ts";
-import { findSession, type ListedSession } from "./sessions.ts";
+import {
+	type ActionVerdict,
+	type ChatAction,
+	type ChatActions,
+	chatActions,
+	findSession,
+	type ListedSession,
+} from "./sessions.ts";
 import type { GitInfo } from "./statusline.ts";
 
-/** A listed session, as one lookup per request finds it, with its pane's latest report and the
- *  outcomes of the prompts sent to it, as the daemon's delivery module has them. */
-export type PhoneSession = ListedSession & { id: string; report?: PaneReport; outcomes?: PromptOutcome[] };
+/** A listed session, as one lookup per request finds it, with the Chat verdict on each kind of
+ *  action, its pane's latest report and the outcomes of the prompts sent to it, as the daemon's
+ *  delivery module has them. */
+export type PhoneSession = ListedSession & {
+	id: string;
+	actions: ChatActions;
+	report?: PaneReport;
+	outcomes?: PromptOutcome[];
+};
 
 /** What a Chat asks of a session. A body's fields are `unknown` until the rule for them checks them. */
 export type PhoneAction =
@@ -51,6 +64,7 @@ export type TranscriptRead =
 	| { type: "message_output"; transcript: Transcript; entryId: string };
 
 export type PhoneError =
+	| "pi_not_open"
 	| "session_not_running"
 	| "session_silent"
 	| "session_running"
@@ -114,6 +128,7 @@ export function phoneSession(
 		listInstances(): InstanceSummary[];
 		report(sessionId: string): PaneReport | undefined;
 		outcomes?(sessionId: string): PromptOutcome[];
+		terminalOpen(): boolean;
 	},
 	id: string,
 ): PhoneSession | undefined {
@@ -121,7 +136,16 @@ export function phoneSession(
 	if (!found) return undefined;
 	const report = deps.report(id);
 	const outcomes = deps.outcomes?.(id);
-	return { ...found, id, ...(report ? { report } : {}), ...(outcomes ? { outcomes } : {}) };
+	return {
+		...found,
+		id,
+		// Only for an action that changes something: the terminal's check may ask tmux, which a read must not wait on.
+		get actions() {
+			return chatActions(found.verdict, deps.terminalOpen());
+		},
+		...(report ? { report } : {}),
+		...(outcomes ? { outcomes } : {}),
+	};
 }
 
 /** The command a "/" line names, as pi reads one (`/compact`, `/skill:pdf …`); none for text such as a path. */
@@ -135,19 +159,29 @@ export function shellLine(text: string): boolean {
 	return /^!+\s*\S/.test(text.trimStart());
 }
 
-/** Why the row's verdict refuses its pi a message: a Silent pane's takes nothing until it answers. */
-function refusal({ verdict }: PhoneSession): PhoneOutcome | undefined {
-	if (verdict.act) return undefined;
-	return { error: verdict.reason === "silent" ? "session_silent" : "session_not_running" };
+/** The error each of the Chat verdict's refusals answers with. The HTTP gate answers `no_terminal`'s. */
+export const REFUSED: Record<Extract<ActionVerdict, { act: false }>["reason"], PhoneError> = {
+	no_terminal: "pi_not_open",
+	silent: "session_silent",
+	starting: "session_not_running",
+	not_running: "session_not_running",
+	running: "session_running",
+};
+
+/** Why the Chat verdict on the row refuses this kind of action, as the phone's list says. */
+function refusal(session: PhoneSession, kind: ChatAction): PhoneOutcome | undefined {
+	const verdict = session.actions[kind];
+	return verdict.act ? undefined : { error: REFUSED[verdict.reason] };
 }
 
-/** Whether a pane's pi is listed as the row, live or silent: a stored or starting row has none. */
+/** Whether a pane's pi is listed as the row, live or silent, for the reads of its report: a stored
+ *  or starting row has none. */
 function hasPane({ verdict }: PhoneSession): boolean {
 	return verdict.act || verdict.reason === "silent";
 }
 
 function toPane(session: PhoneSession, message: PaneMessage): PhoneOutcome {
-	return refusal(session) ?? { message };
+	return refusal(session, "message") ?? { message };
 }
 
 export function decide(session: PhoneSession, action: PhoneAction): PhoneOutcome {
@@ -199,14 +233,14 @@ export function decide(session: PhoneSession, action: PhoneAction): PhoneOutcome
 			const { provider, id } = action;
 			if (typeof provider !== "string" || typeof id !== "string" || !provider || !id)
 				return { error: "invalid_model" };
-			const refused = refusal(session);
+			const refused = refusal(session, "settings");
 			if (refused) return refused;
 			// Only a model the pane offered: the phone picks from that list, nothing else reaches the pane.
 			if (!report?.models.some((m) => m.provider === provider && m.id === id)) return { error: "invalid_model" };
 			return { message: { type: "set_model", provider, id } };
 		}
 		case "thinking": {
-			const refused = refusal(session);
+			const refused = refusal(session, "settings");
 			if (refused) return refused;
 			// Only a level the pane offered for its model: none when the model does not reason.
 			const { level } = action;
@@ -215,7 +249,7 @@ export function decide(session: PhoneSession, action: PhoneAction): PhoneOutcome
 			return { message: { type: "set_thinking", level } };
 		}
 		case "trust": {
-			const refused = refusal(session);
+			const refused = refusal(session, "settings");
 			if (refused) return refused;
 			const trust = TRUST.find((value) => value === action.trust);
 			if (!trust) return { error: "invalid_trust" };
@@ -226,21 +260,24 @@ export function decide(session: PhoneSession, action: PhoneAction): PhoneOutcome
 		case "rename": {
 			const name = typeof action.name === "string" ? action.name.trim() : "";
 			if (!name || name.length > NAME_MAX || CONTROL.test(name)) return { error: "invalid_name" };
-			// A pane's pi names its session, as agent view's rename does; a stored row is the daemon's.
-			return hasPane(session) ? toPane(session, { type: "rename", name }) : { operation: { type: "rename", name } };
+			// A live pane's pi names its session, as agent view's rename does; a stored row is the daemon's.
+			return (
+				refusal(session, "rename") ??
+				(session.verdict.act ? { message: { type: "rename", name } } : { operation: { type: "rename", name } })
+			);
 		}
 		case "pin":
 			if (typeof action.pinned !== "boolean") return { error: "invalid_pinned" };
-			return { operation: { type: "pin", pinned: action.pinned } };
+			return refusal(session, "pin") ?? { operation: { type: "pin", pinned: action.pinned } };
 		case "delete":
-			// A pane's row comes back with its next heartbeat: its pi has to quit first.
-			return hasPane(session) ? { error: "session_running" } : { operation: { type: "delete" } };
+			return refusal(session, "delete") ?? { operation: { type: "delete" } };
 		case "stop_task":
 		case "task_output": {
 			// Only a task the pane reported: stopping it as /tasks' `x` does, or the tail of its output.
 			const known = hasPane(session) ? report?.tasks?.find((t) => t.id === action.taskId) : undefined;
 			if (!known) return { error: "unknown_task" };
-			if (action.type === "stop_task") return toPane(session, { type: "stop_task", id: known.id });
+			if (action.type === "stop_task")
+				return refusal(session, "tasks") ?? { message: { type: "stop_task", id: known.id } };
 			return known.outputFile ? { read: { type: "task_output", file: known.outputFile } } : { error: "no_output" };
 		}
 		case "image":

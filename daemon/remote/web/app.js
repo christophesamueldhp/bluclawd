@@ -8,6 +8,7 @@
 import { api, clearToken, getToken, pairLink, setToken, Unauthorized } from "./api.js";
 import { applyLatest, applyOlder, arrive, listed, nextGiveUp, openChat, promptSent, replyEndedAt } from "./chat.js";
 import { setNewOptions } from "./composer.js";
+import { allows, deleteHtml, pinHtml, renameHtml } from "./controls.js";
 import { diffCounts, diffHtml } from "./diff.js";
 import { ICONS, toolIcon } from "./icons.js";
 import { dataUrl, isImageFile, readImage } from "./image.js";
@@ -50,9 +51,11 @@ import { composerAction, duration, STOP_GUARD_MS, turnSince, turnTimes } from ".
 /**
  * `dialog`: the one it waits on, while it needs input. `silent`: its pane stopped answering the
  * Mac, which still has it (asleep or blocked), and may come back. `verdict`: the daemon's, on
- * whether a Chat may act on it, and why not.
+ * whether a Chat may send its pi a message, and why not. `actions`: its verdict on each kind of
+ * action (controls.js), which a daemon from before lists none of.
  * @typedef {{ act: true } | { act: false, reason: "silent" | "starting" | "not_running" }} Verdict
- * @typedef {{ id: string, label: string, cwd: string, band: string, state: string, alive: boolean, detail: string, createdAt?: string, finishedAt?: string, turnStartedAt?: string, dialog?: { kind: string, title?: string }, livePanes?: number, starting?: true, silent?: true, verdict: Verdict }} Session
+ * @typedef {{ act: true } | { act: false, reason: string }} ActionVerdict
+ * @typedef {{ id: string, label: string, cwd: string, band: string, state: string, alive: boolean, detail: string, createdAt?: string, finishedAt?: string, turnStartedAt?: string, dialog?: { kind: string, title?: string }, livePanes?: number, starting?: true, silent?: true, verdict: Verdict, actions?: Record<import("./controls.js").ChatAction, ActionVerdict> }} Session
  */
 /** `aborted`: a reply its turn was stopped in, empty when stopped before it said anything. `at`: when pi wrote it. @typedef {{ kind: string, id: string, at?: string, text?: string, thinking?: string, tools?: {id: string, name: string, summary: string}[], error?: string, aborted?: boolean, toolCallId?: string, toolName?: string, command?: string, ok?: boolean, truncated?: boolean, diff?: string, diffTruncated?: boolean, images?: {index: number, mimeType: string}[] }} Message */
 /** @typedef {{ text: string, thinking?: string, tools: {id: string, name: string, summary: string, running: boolean}[] }} LiveSnapshot */
@@ -61,7 +64,7 @@ import { composerAction, duration, STOP_GUARD_MS, turnSince, turnTimes } from ".
 /** @typedef {import("./statusbar.js").Report} Report */
 
 /** This build's version, as sw.js caches it (a test keeps the two the same). */
-const VERSION = "0.0.61";
+const VERSION = "0.0.62";
 const VIEW_MODE_KEY = "bluclawd-view-mode";
 /** Each chat's pending prompts and unsent text, kept for when it opens again. */
 const keptPending = pendingStore(() => localStorage);
@@ -1173,11 +1176,7 @@ function usageHtml(usage) {
 /** @param {Session | undefined} session */
 function sheetHtml(session) {
 	const report = state.chat.report;
-	const pinned = session?.band === "pinned";
-	const pin = session
-		? `<button class="icon-btn${pinned ? " on" : ""}" id="pin" aria-label="${pinned ? "Unpin" : "Pin to the top"}" aria-pressed="${pinned}">${pinned ? ICONS.pinned : ICONS.pin}</button>`
-		: "";
-	const head = `<header class="sheet-bar"><h2>Status</h2><span class="sheet-tools">${pin}<button class="icon-btn close" id="sheet-close" aria-label="Close">${ICONS.close}</button></span></header>
+	const head = `<header class="sheet-bar"><h2>Status</h2><span class="sheet-tools">${pinHtml(session, state.terminalOpen)}<button class="icon-btn close" id="sheet-close" aria-label="Close">${ICONS.close}</button></span></header>
 ${state.error ? `<p class="error">${esc(state.error)}</p>` : ""}`;
 	if (report === undefined) return `${head}${loaderHtml()}`;
 	// A silent one's last report is not its status, and the Mac refuses its settings meanwhile.
@@ -1185,25 +1184,8 @@ ${state.error ? `<p class="error">${esc(state.error)}</p>` : ""}`;
 		const why = session && !session.alive ? "session_not_running" : session?.silent ? "session_silent" : "no_status";
 		return `${head}<p class="muted">${esc(errorText(why))}</p>`;
 	}
-	return `${head}${settingsHtml(report)}
+	return `${head}${settingsHtml(report, allows(session, state.terminalOpen, "settings"))}
 <div class="numbers">${contextHtml(report.context)}${usageHtml(report.usage)}${runUsageHtml(report.subagentUsage)}${whereHtml(report, session && shortPath(session.cwd))}</div>`;
-}
-
-/** Built once each time the sheet opens, so what is typed stays while the rest refreshes. @param {Session | undefined} session */
-function renameHtml(session) {
-	return `<form class="rename" id="rename-form"><label for="rename">Name</label>
-<input id="rename" value="${esc(session?.label ?? "")}" maxlength="100" autocomplete="off" enterkeyhint="done">
-<button class="save" id="rename-save" aria-label="Save name">${ICONS.check}</button></form>`;
-}
-
-/** For a stored session (none runs it), Delete, which asks first. @param {Session | undefined} session */
-function manageHtml(session) {
-	if (!session || session.alive) return "";
-	const remove = state.chat.confirmDelete
-		? `<div class="confirm-delete"><span>Delete it from the list? Its session file stays on the Mac.</span>
-<button class="unpair cancel" id="delete-cancel">Cancel</button><button class="unpair" id="delete-confirm">Delete</button></div>`
-		: `<button class="action danger" id="delete">Delete<small>Off the list; its session file stays on the Mac.</small></button>`;
-	return `<div class="actions">${remove}</div>`;
 }
 
 const TASK_KINDS = { shell: "Shell", monitor: "Monitor", agent: "Agent" };
@@ -1211,7 +1193,11 @@ const TASK_KINDS = { shell: "Shell", monitor: "Monitor", agent: "Agent" };
 /** The pane's background tasks, as /tasks lists them: each one's output a tap away, and Stop, confirmed in place. */
 function tasksHtml() {
 	const tasks = state.chat.report?.tasks ?? [];
-	const closed = !canAct(state.sessions.find((s) => s.id === state.chat.id));
+	const closed = !allows(
+		state.sessions.find((s) => s.id === state.chat.id),
+		state.terminalOpen,
+		"tasks",
+	);
 	const now = Date.now();
 	const rows = tasks.map((task) => {
 		const id = esc(task.id);
@@ -1291,6 +1277,8 @@ function updateList() {
 	updateNewCommands();
 	const start = $("#start");
 	start.disabled = state.starting !== undefined || !state.terminalOpen;
+	// The Mac refuses a resume too while no terminal there shows pi.
+	$("#new-resume").hidden = !state.terminalOpen;
 	start.classList.toggle("busy", state.starting !== undefined);
 	$("#new-task").classList.toggle("starting", state.starting !== undefined);
 	updatePhoneSheet();
@@ -1421,9 +1409,14 @@ const NEW_COMMANDS = [
 	{ name: "resume", description: "Resume a past session" },
 ];
 
+/** The new task's commands offered now: no resume while no terminal on the Mac shows pi. */
+function newCommands() {
+	return state.terminalOpen ? NEW_COMMANDS : NEW_COMMANDS.filter((c) => c.name !== "resume");
+}
+
 function updateNewCommands() {
 	const value = $("#task").value;
-	const commands = value.startsWith("/") ? matchCommands(NEW_COMMANDS, value) : [];
+	const commands = value.startsWith("/") ? matchCommands(newCommands(), value) : [];
 	const list = $("#new-commands");
 	list.innerHTML = commands
 		.map(
@@ -1757,15 +1750,22 @@ function updateSheet(session) {
 		return;
 	}
 	// The status, then the session's name, pin and delete: each part replaced only when it changes,
-	// and the name's field not at all, so it keeps what is typed in it.
+	// and the name's field only when a rename is allowed or refused anew, so it keeps what is typed in it.
 	if (sheet.dataset.html !== "status") {
-		sheet.innerHTML = `<div class="part" id="sheet-status"></div>${renameHtml(session)}<div class="part" id="sheet-manage"></div>`;
+		sheet.innerHTML = `<div class="part" id="sheet-status"></div><div class="part" id="sheet-rename"></div><div class="part" id="sheet-manage"></div>`;
 		sheet.dataset.html = "status";
 	}
 	// Not under a finger on the thinking slider: a new one would drop the drag.
 	if (!sliding) updatePart($("#sheet-status"), sheetHtml(session));
-	updatePart($("#sheet-manage"), manageHtml(session));
-	$("#rename-save").disabled = state.chat.saving;
+	const rename = $("#sheet-rename");
+	const renaming = String(allows(session, state.terminalOpen, "rename"));
+	if (rename.dataset.allowed !== renaming) {
+		rename.innerHTML = renameHtml(session, state.terminalOpen);
+		rename.dataset.allowed = renaming;
+	}
+	updatePart($("#sheet-manage"), deleteHtml(session, state.terminalOpen, state.chat.confirmDelete));
+	const save = $("#rename-save");
+	if (save) save.disabled = state.chat.saving;
 }
 
 /** @param {{ code: string } | { secret: string }} credential */
@@ -1949,7 +1949,7 @@ function bindList() {
 async function startTask() {
 	const task = $("#task");
 	const value = task.value.trim();
-	if (NEW_COMMANDS.some((c) => value === `/${c.name}`)) {
+	if (newCommands().some((c) => value === `/${c.name}`)) {
 		runNewCommand(value.slice(1));
 		return;
 	}

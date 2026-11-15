@@ -16,7 +16,8 @@
 // working until it ends, as a pane mid-turn is. While
 // `<dir>/held` exists Gamma's heartbeat takes nothing, and creating `<dir>/restart` then starts
 // prompt delivery afresh, as a daemon restart does: the app, asking about the prompts it still
-// waits on, is answered lost (daemon_restarted).
+// waits on, is answered lost (daemon_restarted). While `<dir>/closed` exists no terminal on the Mac
+// shows pi: every change is refused (409 `pi_not_open`) and the app only reads.
 import { appendFileSync, existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -135,7 +136,7 @@ server = await startRemoteServer(
 		claimStart: () => ({ ok: true, id: "pi-new" }),
 		paneStarting: () => {},
 		startFailed: () => {},
-		terminalOpen: () => true,
+		terminalOpen: () => !existsSync(join(dir, "closed")),
 		report: (id) =>
 			id === gamma.id && !quit
 				? {

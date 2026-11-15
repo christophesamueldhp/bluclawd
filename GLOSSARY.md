@@ -123,7 +123,7 @@ The rules that decide, for one session, whether a Chat's action is allowed and w
 _Avoid_: admission (a run's launch checks), validation
 
 **Chat verdict**:
-Whether a Chat may act on a listed row, and why not, as the daemon lists it with each row: only a live pane's row takes a message for its pi; a Silent pane's, a starting one's or a stored one's does not. Phone control and the phone's list both read it, so the phone never offers what the daemon would refuse.
+Whether a Chat may take each kind of action on a listed row, and why not, as the daemon lists it with each row. The kinds are a message, the settings (model, thinking level, trust), a rename, a pin, a delete, and stopping its tasks; a read is none. While no terminal on the Mac shows pi, every kind is refused. Otherwise only a live pane's row takes a message, a setting or a task's stop; a Silent pane's, a starting one's or a stored one's does not. A rename is refused only on a Silent pane's row, a delete on a live or Silent pane's row (its pi has to quit first) and on a starting one (its pane would list it again), and a pin never. Phone control, the HTTP gate and the phone's list all read it, so the phone never offers what the daemon would refuse.
 _Avoid_: running, alive (a row's pane, not what it takes)
 
 **Unseen**:

@@ -96,8 +96,8 @@ describe("the chat's status bar", () => {
 				thinkingLevels: ["off", "minimal", "low", "medium", "high", "xhigh", "max"],
 			};
 			expect(barHtml(colored, undefined)).toContain(`class="thinking-level" data-thinking="${level}"`);
-			expect(settingsHtml(colored)).toContain(`class="setting slider" data-thinking="${level}"`);
-			expect(settingsHtml({ models: [], thinkingLevel: level })).toContain(
+			expect(settingsHtml(colored, true)).toContain(`class="setting slider" data-thinking="${level}"`);
+			expect(settingsHtml({ models: [], thinkingLevel: level }, true)).toContain(
 				`class="setting" data-thinking="${level}"`,
 			);
 		},
@@ -127,7 +127,7 @@ describe("the status sheet's settings and where it is", () => {
 	const models = [{ provider: "anthropic", id: "claude-opus", name: "Opus" }];
 
 	it("lists the model and trust as rows a tap picks another value for, and thinking as a slider", () => {
-		const html = settingsHtml({ ...report, models });
+		const html = settingsHtml({ ...report, models }, true);
 		expect(text(html)).toBe("Model Opus › Thinking high off low medium high Trust Always ›");
 		expect(html.match(/<button type="button" class="setting" data-pick="(\w+)"/g)).toHaveLength(2);
 		expect(html).toContain('<input type="range" id="thinking" min="0" max="3" step="1" value="3"');
@@ -137,9 +137,16 @@ describe("the status sheet's settings and where it is", () => {
 	});
 
 	it("shows a value no tap changes as a plain row, and no trust row for a pane without one", () => {
-		const html = settingsHtml({ models: [] });
+		const html = settingsHtml({ models: [] }, true);
 		expect(text(html)).toBe("Model None selected Thinking off");
 		expect(html).not.toContain("data-pick");
+	});
+
+	it("shows each value with no picker or slider while the Chat verdict refuses the settings", () => {
+		const html = settingsHtml({ ...report, models }, false);
+		expect(text(html)).toBe("Model Opus Thinking high Trust Always");
+		expect(html).not.toContain("data-pick");
+		expect(html).not.toContain('type="range"');
 	});
 
 	it("says where the session is in two grey lines, and no plan usage", () => {
