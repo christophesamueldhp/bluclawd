@@ -98,6 +98,10 @@ _Avoid_: timer, reminder, cron job, sleep, scheduled task
 
 ### Agent view
 
+**Roster**:
+The rows agent view lists now: the daemon's list as last read, with what this view just did (a delete, a Manual order) shown ahead of the daemon confirming it.
+_Avoid_: list (the daemon's, before this view's changes), cache
+
 **Manual order**:
 The place the user gives a row in its band in agent view, in the Pinned band or a directory's band. Needs input, Working and Idle always list by recency. Pinning or unpinning a row clears it, and a filter hides rows without moving them.
 _Avoid_: sort order, position

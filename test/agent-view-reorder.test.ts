@@ -51,6 +51,8 @@ function world() {
 		);
 	};
 	const metaCalls: string[] = [];
+	/** How many of the client's writes the daemon has. */
+	let landed = 0;
 	const client = {
 		list: async () => listSummaries(sup),
 		ensureDaemon: async () => true,
@@ -60,14 +62,15 @@ function world() {
 			await wait(5);
 			const res = await handleIpcRequest(sup, { type: "meta", instanceId: id, ...meta } as never);
 			if (!res.ok) throw new Error((res as { error: string }).error);
+			landed++;
 		},
 	};
-	return { dir, sup, beat, client, metaCalls };
+	return { dir, sup, beat, client, metaCalls, landed: () => landed };
 }
 
 const views: AgentView[] = [];
 afterEach(() => {
-	for (const v of views.splice(0)) (v as unknown as { teardown(): void }).teardown();
+	for (const v of views.splice(0)) v.close();
 });
 
 function view(
@@ -105,9 +108,8 @@ function view(
 	return v;
 }
 
-/** Every press's writes landed and the daemon's order is what shows. */
-const saved = (v: AgentView) =>
-	waitFor(() => (v as unknown as { pendingOrder: Map<string, number> }).pendingOrder.size === 0);
+/** The daemon has `writes` of the client's writes: every press's, when that is all of them. */
+const saved = (w: ReturnType<typeof world>, writes: number) => waitFor(() => w.landed() === writes);
 
 const NAMES = /\b(pa|pb|pc|me|!ls)\b/;
 const order = (v: AgentView) =>
@@ -132,7 +134,7 @@ describe("agent view: shift+↑/↓", () => {
 		expect(order(v)).toEqual(["pb", "pa", "pc"]);
 		v.handleInput(SHIFT_DOWN);
 		expect(order(v)).toEqual(["pb", "pc", "pa"]);
-		await saved(v);
+		await saved(w, 6);
 		expect(order(v)).toEqual(["pb", "pc", "pa"]);
 		expect(listSummaries(w.sup).find((i) => i.id === "pa")?.sortOrder).toBe(2);
 	});
@@ -158,7 +160,7 @@ describe("agent view: shift+↑/↓", () => {
 		await v.onShow();
 		expect(order(v)).toEqual(["me", "pa"]);
 		v.handleInput(SHIFT_DOWN);
-		await saved(v);
+		await saved(w, 2);
 		expect(order(v)).toEqual(["pa", "me"]);
 		expect(w.metaCalls).toContain("self");
 	});
@@ -173,7 +175,7 @@ describe("agent view: shift+↑/↓", () => {
 		for (const ch of "n:x") v.handleInput(ch);
 		expect(order(v)).toEqual(["pa", "pc"]);
 		v.handleInput(SHIFT_DOWN);
-		await saved(v);
+		await saved(w, 3);
 		for (let i = 0; i < 3; i++) v.handleInput("\x7f");
 		expect(order(v)).toEqual(["pc", "pb", "pa"]);
 	});
@@ -187,7 +189,8 @@ describe("agent view: shift+↑/↓", () => {
 		await v.onShow();
 		expect(order(v)).toEqual(["pa", "pb"]);
 		v.handleInput(SHIFT_DOWN);
-		await saved(v);
+		// Two more, after the two that pinned them.
+		await saved(w, 4);
 		expect(order(v)).toEqual(["pb", "pa"]);
 		expect(
 			listSummaries(w.sup)
@@ -226,7 +229,7 @@ describe("agent view: shift+↑/↓", () => {
 		const v = view(w, { shells });
 		await v.onShow();
 		v.handleInput(SHIFT_DOWN);
-		await saved(v);
+		await saved(w, 2);
 		expect(w.metaCalls.sort()).toEqual(["pa", "pb"]);
 		expect(v.render(100).map(plain).join("\n")).not.toContain("Couldn't save order");
 	});

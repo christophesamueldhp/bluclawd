@@ -41,7 +41,6 @@ import {
 	type AgentRow,
 	type Band,
 	buildBands,
-	collectRows,
 	collectRuns,
 	compactAge,
 	countRows,
@@ -50,18 +49,17 @@ import {
 	queryFilter,
 	type RowState,
 	rowAge,
-	rowFromShell,
 	STATE_WORDS,
 	stateBandOf,
 	type ViewMode,
 } from "../../daemon/rows.ts";
-import type { ShellInfo } from "../../daemon/tmux.ts";
 import { mascotGlyphs, REST, renderMascot } from "../_shared/mascot.ts";
 import { PasteTokens, shouldCollapse } from "../_shared/paste-tokens.ts";
 import { resolveToCwd } from "../_shared/path-resolve.ts";
 import { theme } from "../_shared/theme.ts";
 import { wakeupClock } from "../background-bash/wakeups.ts";
 import { type AgentClipboard, readAgentClipboard } from "./clipboard.ts";
+import { Roster } from "./roster.ts";
 import { bandTargets, deletable, type OpenOutcome, type PaneOps, RowActions, stoppable } from "./row-actions.ts";
 
 export type { PaneOps } from "./row-actions.ts";
@@ -150,8 +148,6 @@ type Completion = { value: string; label: string };
 const MENU_ROWS = 8;
 /** Bare words that quit. */
 export const EXIT_WORDS = new Set(["exit", "quit", ":q", ":q!", ":wq", ":wq!"]);
-/** A pane heartbeats every 3s (self-registration.ts), so a restarted daemon has them all back by this. */
-const RESTART_GRACE_MS = 5000;
 
 type Color = Parameters<typeof theme.fg>[0];
 
@@ -247,8 +243,7 @@ export class AgentView implements Component, Focusable {
 	private composerLines: string[] = [];
 	/** The composer's paste tokens, as bluclawd's: `[Pasted text #N +L lines]` and `[Image #N]`. */
 	private readonly pastes = new PasteTokens();
-	/** The `!` commands the tmux server runs or ran: rows of their own. */
-	private shells: ShellInfo[] = [];
+	private readonly roster: Roster;
 	/** The Input's own paste: one line at the cursor. */
 	private readonly insertIntoComposer: (text: string) => void;
 	private pasting = false;
@@ -259,7 +254,6 @@ export class AgentView implements Component, Focusable {
 	private readonly renameInput = new Input();
 	private readonly modelSearch = new Input();
 	private modelPicker: SelectList | undefined;
-	private instances: InstanceSummary[] = [];
 	private rows: AgentRow[] = [];
 	/** Every listed session, before the composer's filter: what the counts and title report. */
 	private allRows: AgentRow[] = [];
@@ -293,7 +287,6 @@ export class AgentView implements Component, Focusable {
 	/** The focus before a filter was typed, restored when it is cleared. */
 	private beforeFilter: string | undefined;
 	private daemonNotice = "";
-	private connectionLost = false;
 	private opening: string | undefined;
 	private dispatchModel: { provider: string; id: string } | undefined;
 	/** `/cd`: where new sessions start, over the focus in the directory view. */
@@ -308,25 +301,13 @@ export class AgentView implements Component, Focusable {
 	private pastError = false;
 	private frame = 0;
 	private spinTimer: ReturnType<typeof setInterval> | undefined;
-	private pollTimer: ReturnType<typeof setInterval> | undefined;
-	private refreshing: Promise<void> | undefined;
-	private refreshAgain: Promise<void> | undefined;
 	/** The peeked `!` command's output, read outside render(), which runs no tmux. */
 	private peekOutput: { shell: string; lines: string[] } | undefined;
-	/** shift+↑/↓'s order: shown at once, and over any list read before its writes landed. */
-	private pendingOrder = new Map<string, number>();
-	private ordering: Promise<void> = Promise.resolve();
-	/** Rows this view deleted, and when the delete landed. */
-	private deleted = new Map<string, number>();
-	/** Rows whose delete is under way: out of the list until it lands, back if it fails. */
-	private deleting = new Set<string>();
 	/** The `n:` search the focus last jumped to the best match of. */
 	private searchedFor: string | undefined;
 	private closed = false;
 	/** Set once the first roster is in; the next frame drawn is reported to onDrawn. */
 	private loaded = false;
-	/** When this view restarted an older daemon, which lost every pane's registration. */
-	private restartedAt = Number.NEGATIVE_INFINITY;
 	private drawn = false;
 	/** This terminal is moving to another pane: keys wait for it. */
 	private leaving = false;
@@ -347,14 +328,25 @@ export class AgentView implements Component, Focusable {
 		const insert = composer.handlePaste.bind(this.composer);
 		this.insertIntoComposer = insert;
 		composer.handlePaste = (text) => this.pasteIntoComposer(text, insert);
-		if (opts.instances) {
-			this.instances = opts.instances.filter((inst) => inst.id !== opts.hide);
-			try {
-				this.shells = opts.panes.listShells();
-			} catch {
-				// listed by the first refresh
-			}
-		}
+		this.roster = new Roster({
+			client: opts.client,
+			shells: {
+				list: () => opts.panes.listShells(),
+				// The peeked `!` command's output is read with them: the frame that follows shows both.
+				listAsync: async () => {
+					const [shells] = await Promise.all([opts.panes.listShellsAsync().catch(() => []), this.loadPeek()]);
+					return shells;
+				},
+			},
+			hide: opts.hide,
+			seed: opts.instances,
+			changed: () => {
+				this.recompute();
+				this.render_();
+			},
+			orderFailed: (error) =>
+				this.say(`Couldn't save order — ${error instanceof Error ? error.message : String(error)}`, "error"),
+		});
 		// This window's own row shows at once, before the daemon (maybe cold-starting) answers.
 		this.recompute();
 	}
@@ -409,7 +401,7 @@ export class AgentView implements Component, Focusable {
 			if (info.running && info.buildId !== currentDaemonBuildId()) {
 				const result = await this.opts.client.restartDaemon();
 				if (this.closed) return;
-				if (result.restarted) this.restartedAt = Date.now();
+				if (result.restarted) this.roster.daemonRestarted();
 				this.daemonNotice = result.restarted
 					? ""
 					: `background service is an older build — not restarted: ${result.reason ?? "unknown reason"}`;
@@ -419,7 +411,7 @@ export class AgentView implements Component, Focusable {
 		if (this.closed) return;
 		this.loaded = true;
 		this.opts.ui.requestRender();
-		this.pollTimer = setInterval(() => void this.refresh(), 1000);
+		this.roster.watch();
 	}
 
 	/** Leave the view (also used when another terminal takes this session over). */
@@ -432,10 +424,10 @@ export class AgentView implements Component, Focusable {
 	private teardown(): void {
 		this.closed = true;
 		this.opening = undefined;
-		if (this.pollTimer) clearInterval(this.pollTimer);
+		this.roster.stop();
 		if (this.spinTimer) clearInterval(this.spinTimer);
 		if (this.armed) clearTimeout(this.armed.timer);
-		this.pollTimer = this.spinTimer = undefined;
+		this.spinTimer = undefined;
 		this.opts.setTitle?.(undefined);
 	}
 
@@ -539,50 +531,9 @@ export class AgentView implements Component, Focusable {
 
 	// ---- data ----------------------------------------------------------------------------
 
-	/** A refresh asked for while one is in flight runs again once that one lands: its list may
-	 *  predate what was just done. */
-	private refresh(): Promise<void> {
-		if (this.closed) return Promise.resolve();
-		if (this.refreshing) {
-			this.refreshAgain ??= this.refreshing.then(() => {
-				this.refreshAgain = undefined;
-				return this.refresh();
-			});
-			return this.refreshAgain;
-		}
-		this.refreshing = this.load().finally(() => {
-			this.refreshing = undefined;
-		});
-		return this.refreshing;
-	}
-
-	private async load(): Promise<void> {
-		const askedAt = Date.now();
-		try {
-			// A list asked for before a delete landed still has its row.
-			const listed = (await this.opts.client.list()).filter(
-				(inst) => inst.id !== this.opts.hide && !((this.deleted.get(inst.id) ?? -1) >= askedAt),
-			);
-			// A restarted daemon knows a pane only from its next heartbeat: until then its row stays as it
-			// was, over the stopped row the daemon stored for it.
-			const carried =
-				Date.now() - this.restartedAt < RESTART_GRACE_MS
-					? this.instances.filter(
-							(inst) =>
-								inst.pane && !this.deleted.has(inst.id) && !listed.some((l) => l.id === inst.id && l.external),
-						)
-					: [];
-			this.instances = [...listed.filter((l) => !carried.some((c) => c.id === l.id)), ...carried];
-			this.connectionLost = false;
-		} catch {
-			this.connectionLost = true;
-		} finally {
-			const [shells] = await Promise.all([this.opts.panes.listShellsAsync().catch(() => []), this.loadPeek()]);
-			this.shells = shells;
-		}
-		if (this.closed) return; // Its self callback may already belong to a disposed session.
-		this.recompute();
-		this.render_();
+	/** Reads the roster again now, as its poll does every second. */
+	refresh(): Promise<void> {
+		return this.roster.refresh();
 	}
 
 	/** Reads the peeked `!` command's output, if a peek at one is open. */
@@ -606,13 +557,8 @@ export class AgentView implements Component, Focusable {
 	}
 
 	private recompute(): void {
-		const order = this.pendingOrder;
-		const instances = order.size
-			? this.instances.map((i) => (order.has(i.id) ? { ...i, sortOrder: order.get(i.id) } : i))
-			: this.instances;
-		this.allRows = [...collectRows(instances, this.opts.self?.()), ...this.shells.map(rowFromShell)].filter(
-			(r) => !this.deleting.has(r.id),
-		);
+		const { instances, rows } = this.roster.listed(this.opts.self?.());
+		this.allRows = rows;
 		this.runs = collectRuns(instances, this.allRows, this.opts.self?.());
 		// Opened in a run, its orchestrator's runs show at first, with it among them.
 		if (!this.ownRunShown)
@@ -970,7 +916,7 @@ export class AgentView implements Component, Focusable {
 			if (this.armed?.key === item.key) {
 				this.disarm();
 				const gone = await this.actions.deleteAll(targets);
-				this.forget(gone);
+				this.roster.deleted(gone);
 				const left = targets.length - gone.length;
 				if (left > 0) this.say(`Couldn't delete ${left} of ${targets.length} sessions`, "error");
 				await this.refresh();
@@ -985,9 +931,7 @@ export class AgentView implements Component, Focusable {
 			// A run is closed, never deleted: its row goes with its orchestrator's.
 			if (item.run) return;
 			this.disarm();
-			this.deleting.add(row.id);
-			this.recompute();
-			this.render_();
+			this.roster.startDelete(row.id);
 			const outcome = await this.actions
 				.delete(row, {
 					leaving: () => {
@@ -996,13 +940,13 @@ export class AgentView implements Component, Focusable {
 					},
 					left: () => this.teardown(),
 				})
-				.finally(() => this.deleting.delete(row.id));
+				.finally(() => this.roster.endDelete(row.id));
 			if (outcome.kind === "left") return;
 			this.leaving = false;
 			if (outcome.kind === "failed") this.say(outcome.text, "error");
 			else {
 				if (this.mode === "peek") this.mode = "list";
-				this.forget([row.id]);
+				this.roster.deleted([row.id]);
 			}
 			await this.refresh();
 			return;
@@ -1013,14 +957,6 @@ export class AgentView implements Component, Focusable {
 		this.justKilled = row.id;
 		if (outcome.kind === "failed") this.say(outcome.text, "error");
 		await this.refresh();
-	}
-
-	/** Deleted rows leave the list at once: a refresh just after a daemon restart would carry them. */
-	private forget(ids: string[]): void {
-		for (const id of ids) this.deleted.set(id, Date.now());
-		this.instances = this.instances.filter((i) => !ids.includes(i.id));
-		this.recompute();
-		this.render_();
 	}
 
 	private async togglePin(): Promise<void> {
@@ -1057,26 +993,7 @@ export class AgentView implements Component, Focusable {
 		const rows = orderedRows(band);
 		const [from, to] = [item.row, other].map((row) => rows.findIndex((r) => r.id === row.id));
 		[rows[from], rows[to]] = [rows[to], rows[from]];
-		for (const [i, r] of rows.entries()) this.pendingOrder.set(r.id, i);
-		this.recompute();
-		this.render_();
-		const writes = rows.map((r, i) => [r.id, i] as const);
-		const saved = this.ordering.then(async () => {
-			try {
-				await Promise.all(writes.map(([id, sortOrder]) => this.opts.client.setMeta(id, { sortOrder })));
-			} catch (error) {
-				this.say(`Couldn't save order — ${error instanceof Error ? error.message : String(error)}`, "error");
-			}
-			await this.refresh();
-		});
-		this.ordering = saved;
-		void saved.then(() => {
-			// The last press's list is in: the daemon's order is what shows from here.
-			if (this.ordering !== saved) return;
-			this.pendingOrder.clear();
-			this.recompute();
-			this.render_();
-		});
+		this.roster.reorder(rows.map((r, i) => [r.id, i] as const));
 	}
 
 	private startRename(): void {
@@ -2203,7 +2120,7 @@ export class AgentView implements Component, Focusable {
 		}
 		const service =
 			this.daemonNotice ||
-			(this.connectionLost ? "lost connection to the background service — showing the last known list" : "");
+			(this.roster.connectionLost ? "lost connection to the background service — showing the last known list" : "");
 		if (service) return truncateToWidth(`  ${cc.fg("warning", service)}`, width, "…");
 		return this.listHints(width);
 	}
