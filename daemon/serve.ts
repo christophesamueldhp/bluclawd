@@ -3,15 +3,7 @@ import { existsSync, unlinkSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { Collaborations } from "./collaborations.ts";
 import { getServerDir, getSocketPath } from "./config.ts";
-import {
-	handleIpcRequest,
-	listSummaries,
-	setCollaborations,
-	setRemoteControl,
-	setRunQueue,
-	setShutdownHook,
-	setWakeupKeeper,
-} from "./handler.ts";
+import { type HandlerParts, handleIpcRequest, listSummaries } from "./handler.ts";
 import { startIpcServer } from "./ipc/server.ts";
 import { resumePane } from "./pane-start.ts";
 import { daemonAgentDir, ensureServerDir } from "./paths.ts";
@@ -63,68 +55,65 @@ export async function serve(): Promise<void> {
 		reopen,
 	});
 	const supervisor = new ServerSupervisor({ now: Date.now, tmux, dir: getServerDir(), wakeups });
-	setWakeupKeeper(wakeups);
+	const parts: HandlerParts = { wakeups };
 	/** Sweeps of what ended runs' commands left running, by host pid: one at a time each, off the event loop. */
 	const sweeps = new Map<number, "running" | "done">();
-	setRunQueue(
-		new RunQueue({
-			now: Date.now,
-			store: { load: () => loadActiveRuns(getServerDir()), save: (runs) => saveActiveRuns(getServerDir(), runs) },
-			capacity: () => maxActiveRuns(daemonAgentDir()),
-			// Detached, so a run's host leads a process group of its own and outlives the daemon.
-			spawn: ({ runDir, env, pane }) => {
-				// In a pane, so the user can watch and type in it: the host takes the run's environment from the queue.
-				if (pane)
-					return tmux.startRunHost(pane, runDir, [process.execPath, "--import", RESOLVE_HOOK, RUN_HOST, runDir]);
-				const root = process.env.PI_PACKAGE_ROOT;
-				const kept = Object.entries(env).filter(([key]) => !LOADER_ENV.includes(key) && key !== "PI_PACKAGE_ROOT");
-				const host = spawn(process.execPath, ["--import", RESOLVE_HOOK, RUN_HOST, runDir], {
-					cwd: runDir,
-					env: { ...Object.fromEntries(kept), ...(root ? { PI_PACKAGE_ROOT: root } : {}) },
-					detached: true,
-					stdio: "ignore",
+	parts.runQueue = new RunQueue({
+		now: Date.now,
+		store: { load: () => loadActiveRuns(getServerDir()), save: (runs) => saveActiveRuns(getServerDir(), runs) },
+		capacity: () => maxActiveRuns(daemonAgentDir()),
+		// Detached, so a run's host leads a process group of its own and outlives the daemon.
+		spawn: ({ runDir, env, pane }) => {
+			// In a pane, so the user can watch and type in it: the host takes the run's environment from the queue.
+			if (pane)
+				return tmux.startRunHost(pane, runDir, [process.execPath, "--import", RESOLVE_HOOK, RUN_HOST, runDir]);
+			const root = process.env.PI_PACKAGE_ROOT;
+			const kept = Object.entries(env).filter(([key]) => !LOADER_ENV.includes(key) && key !== "PI_PACKAGE_ROOT");
+			const host = spawn(process.execPath, ["--import", RESOLVE_HOOK, RUN_HOST, runDir], {
+				cwd: runDir,
+				env: { ...Object.fromEntries(kept), ...(root ? { PI_PACKAGE_ROOT: root } : {}) },
+				detached: true,
+				stdio: "ignore",
+			});
+			host.on("error", () => {});
+			host.unref();
+			if (host.pid === undefined) throw new Error("the run's host did not start");
+			return host.pid;
+		},
+		running: (pid, marker) => {
+			if (processGroupAlive(pid)) return true;
+			// Its host and pi are gone, maybe killed: whatever its commands left running is ended, and counted until it is.
+			if (!marker) return false;
+			const sweep = sweeps.get(pid);
+			if (sweep === "done") {
+				sweeps.delete(pid);
+				return false;
+			}
+			if (!sweep) {
+				sweeps.set(pid, "running");
+				const helper = nativeHelperPath("run-members", daemonAgentDir()).path;
+				execFile(helper, ["end", marker], { timeout: 10_000 }, (error) => {
+					if (error) sweeps.delete(pid);
+					else sweeps.set(pid, "done");
 				});
-				host.on("error", () => {});
-				host.unref();
-				if (host.pid === undefined) throw new Error("the run's host did not start");
-				return host.pid;
-			},
-			running: (pid, marker) => {
-				if (processGroupAlive(pid)) return true;
-				// Its host and pi are gone, maybe killed: whatever its commands left running is ended, and counted until it is.
-				if (!marker) return false;
-				const sweep = sweeps.get(pid);
-				if (sweep === "done") {
-					sweeps.delete(pid);
-					return false;
-				}
-				if (!sweep) {
-					sweeps.set(pid, "running");
-					const helper = nativeHelperPath("run-members", daemonAgentDir()).path;
-					execFile(helper, ["end", marker], { timeout: 10_000 }, (error) => {
-						if (error) sweeps.delete(pid);
-						else sweeps.set(pid, "done");
-					});
-				}
-				return true;
-			},
-		}),
-	);
-	setCollaborations(
-		new Collaborations({
-			// Orchestrators' sessions in live panes: a run's row names its orchestrator's pane as its parent.
-			sessions: () =>
-				supervisor
-					.listExternalInstances()
-					.flatMap(({ record, silent }) =>
-						record.sessionId && !record.parent && !silent
-							? [{ instanceId: record.id, sessionId: record.sessionId, label: record.label, pane: record.pane }]
-							: [],
-					),
-			deliver: (instanceId, message) => supervisor.sendExternal(instanceId, message),
-		}),
-	);
-	const server = await startIpcServer((request) => handleIpcRequest(supervisor, request));
+			}
+			return true;
+		},
+	});
+	parts.collaborations = new Collaborations({
+		// Orchestrators' sessions in live panes: a run's row names its orchestrator's pane as its parent.
+		sessions: () =>
+			supervisor
+				.listExternalInstances()
+				.flatMap(({ record, silent }) =>
+					record.sessionId && !record.parent && !silent
+						? [{ instanceId: record.id, sessionId: record.sessionId, label: record.label, pane: record.pane }]
+						: [],
+				),
+		deliver: (instanceId, message) => supervisor.sendExternal(instanceId, message),
+	});
+	// Remote control and the shutdown are given once they exist, below: a request before then finds none.
+	const server = await startIpcServer((request) => handleIpcRequest(supervisor, request, parts));
 
 	try {
 		supervisor.recoverAfterRestart();
@@ -153,7 +142,7 @@ export async function serve(): Promise<void> {
 		renderStatusline: pistatusline(),
 		tmux,
 	});
-	setRemoteControl(remote);
+	parts.remote = remote;
 	await remote.apply();
 	// Those due while the daemon was down fire now, late.
 	wakeups.check();
@@ -179,9 +168,9 @@ export async function serve(): Promise<void> {
 		process.exit(exitCode);
 	};
 
-	setShutdownHook(() => {
+	parts.shutdown = () => {
 		void shutdown(0);
-	});
+	};
 	process.on("SIGINT", () => {
 		void shutdown(0);
 	});

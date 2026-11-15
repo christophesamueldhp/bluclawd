@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { handleIpcRequest, setRunQueue } from "../daemon/handler.ts";
+import { handleIpcRequest } from "../daemon/handler.ts";
 import type { RunQueueRequest } from "../daemon/ipc/protocol.ts";
 import { maxActiveRuns, RUN_CLAIM_WAIT_MS, type RunHostLaunch, RunQueue } from "../daemon/run-queue.ts";
 import { testRegistry } from "./helpers/registry.ts";
@@ -241,27 +241,22 @@ describe("the daemon's queue of runs", () => {
 
 	it("answers a request it does not know with an error, never as a launch", async () => {
 		const f = fixture(() => 1);
-		setRunQueue(f.queue);
-		try {
-			const supervisor = testRegistry();
-			const unknown = { type: "run_queue", action: "claim_later", run: "k/1", parent: "beta" };
-			// As a client built after this daemon would send it.
-			expect(await handleIpcRequest(supervisor, unknown as unknown as RunQueueRequest)).toMatchObject({
-				ok: false,
-				error: expect.stringMatching(/unknown run_queue action "claim_later"/),
-			});
+		const supervisor = testRegistry();
+		const parts = { runQueue: f.queue };
+		const unknown = { type: "run_queue", action: "claim_later", run: "k/1", parent: "beta" };
+		// As a client built after this daemon would send it.
+		expect(await handleIpcRequest(supervisor, unknown as unknown as RunQueueRequest, parts)).toMatchObject({
+			ok: false,
+			error: expect.stringMatching(/unknown run_queue action "claim_later"/),
+		});
 
-			expect(f.queue.claimNow("k/1", "beta")).toMatchObject({ granted: true });
-			const launched = await handleIpcRequest(supervisor, {
-				type: "run_queue",
-				action: "launch",
-				run: "k/1",
-				host: host("k/1"),
-			});
-			expect(launched).toMatchObject({ ok: true, hostPid: 100 });
-		} finally {
-			setRunQueue(undefined);
-		}
+		expect(f.queue.claimNow("k/1", "beta")).toMatchObject({ granted: true });
+		const launched = await handleIpcRequest(
+			supervisor,
+			{ type: "run_queue", action: "launch", run: "k/1", host: host("k/1") },
+			parts,
+		);
+		expect(launched).toMatchObject({ ok: true, hostPid: 100 });
 	});
 });
 

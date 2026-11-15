@@ -5,21 +5,21 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { AgentActivity } from "./activity.ts";
 import type { Collaboration, CollaborationMember } from "./collaborations.ts";
-import type {
-	CollaborationRequest,
-	EndReason,
-	InstanceSummary,
-	LiveSnapshot,
-	PaneLaunch,
-	PaneMessage,
-	PaneReport,
-	RegisterRequest,
-	RemoteResponse,
-	RunQueueRequest,
-	StartFailedRequest,
-	StartRequest,
-	StartSpec,
-	WakeupsRequest,
+import {
+	type CollaborationRequest,
+	type EndReason,
+	type InstanceSummary,
+	type LiveSnapshot,
+	type PaneLaunch,
+	type PaneMessage,
+	type PaneReport,
+	RESPONSE_TYPE,
+	type RegisterRequest,
+	type RemoteResponse,
+	type ResponseTo,
+	type SaveRequest,
+	type ServerRequest,
+	type StartSpec,
 } from "./ipc/protocol.ts";
 import { daemonBuildId, getSocketPath } from "./paths.ts";
 import type { RunHostLaunch, SlotClaim } from "./run-queue.ts";
@@ -38,52 +38,6 @@ export type RemoteAction =
 	| { action: "off" | "pair" | "devices" }
 	| { action: "on"; port?: number }
 	| { action: "revoke"; deviceId: string };
-
-type Request =
-	| { type: "list" }
-	| RegisterRequest
-	| { type: "unregister"; instanceId: string; reason?: EndReason }
-	| { type: "wait"; instanceId: string }
-	| { type: "send"; instanceId: string; message: PaneMessage }
-	| { type: "shutdown" }
-	| { type: "delete"; instanceId: string }
-	| { type: "rename"; instanceId: string; name: string }
-	| { type: "meta"; instanceId: string; pinned?: boolean; sortOrder?: number }
-	| { type: "save"; cwd: string; label?: string; sessionFile: string; sessionId?: string }
-	| StartRequest
-	| StartFailedRequest
-	| ({ type: "remote" } & RemoteAction)
-	| { type: "remote_live"; instanceId: string; live: LiveSnapshot | null; entryId?: string }
-	| { type: "remote_report"; instanceId: string; report: PaneReport }
-	| WakeupsRequest
-	| RunQueueRequest
-	| CollaborationRequest;
-
-interface AnyResponse {
-	type: string;
-	ok?: boolean;
-	error?: string;
-	instances?: InstanceSummary[];
-	instance?: InstanceSummary;
-	version?: string;
-	buildId?: string;
-	pid?: number;
-	messages?: PaneMessage[];
-	watched?: boolean;
-	wantReport?: boolean;
-	queued?: boolean;
-	superseded?: boolean;
-	id?: string;
-	granted?: boolean;
-	claimed?: true;
-	active?: number;
-	capacity?: number;
-	hostPid?: number;
-	env?: Record<string, string>;
-	collaboration?: Collaboration;
-	to?: CollaborationMember;
-	current?: boolean;
-}
 
 /** Path to the daemon's CLI entry, for the ensureDaemon() auto-start. */
 function daemonCliPath(): string {
@@ -154,8 +108,16 @@ export class OrchestratorClient {
 		this.socketPath = socketPath;
 	}
 
-	private request(req: Request, timeoutMs = 2000, signal?: AbortSignal): Promise<AnyResponse> {
-		return new Promise<AnyResponse>((resolve, reject) => {
+	/**
+	 * The daemon's answer to `req`, or undefined when the answer is not that request's: a daemon that predates the
+	 * request answers it with no type. Rejects with the daemon's reason when it refuses.
+	 */
+	private ask<R extends ServerRequest>(
+		req: R,
+		timeoutMs = 2000,
+		signal?: AbortSignal,
+	): Promise<ResponseTo<R> | undefined> {
+		return new Promise<ResponseTo<R> | undefined>((resolve, reject) => {
 			if (signal?.aborted) {
 				reject(new Error("orchestrator request aborted"));
 				return;
@@ -192,14 +154,14 @@ export class OrchestratorClient {
 				const line = buffer.slice(0, nl).trim();
 				if (!line) return;
 				try {
-					const parsed = JSON.parse(line) as AnyResponse;
+					const parsed = JSON.parse(line) as { type?: string; ok?: boolean; error?: string };
 					// Every response carries ok/error; reject here so a daemon-side rejection
 					// (e.g. an unknown instance id) does not resolve like success.
 					if (parsed.ok === false) {
 						done(() => reject(new Error(parsed.error ?? `orchestrator request failed: ${req.type}`)));
 						return;
 					}
-					done(() => resolve(parsed));
+					done(() => resolve(parsed.type === RESPONSE_TYPE[req.type] ? (parsed as ResponseTo<R>) : undefined));
 				} catch (error) {
 					done(() => reject(error instanceof Error ? error : new Error(String(error))));
 				}
@@ -207,6 +169,13 @@ export class OrchestratorClient {
 			socket.on("error", (error) => done(() => reject(error)));
 			socket.on("end", () => done(() => reject(new Error("orchestrator socket closed before a response"))));
 		});
+	}
+
+	/** The daemon's answer to `req`, from a daemon that has to know the request: one that does not is out of date. */
+	async request<R extends ServerRequest>(req: R, timeoutMs?: number, signal?: AbortSignal): Promise<ResponseTo<R>> {
+		const res = await this.ask(req, timeoutMs, signal);
+		if (!res) throw new Error(OUT_OF_DATE);
+		return res;
 	}
 
 	async isRunning(): Promise<boolean> {
@@ -218,47 +187,47 @@ export class OrchestratorClient {
 	 *  case from "not running" for a caller that wants to warn about a stale daemon. */
 	async getDaemonInfo(): Promise<{ running: boolean; version?: string; buildId?: string; pid?: number }> {
 		try {
-			const res = await this.request({ type: "list" }, 500);
-			return { running: true, version: res.version, buildId: res.buildId, pid: res.pid };
+			const res = await this.ask({ type: "list" }, 500);
+			return { running: true, version: res?.version, buildId: res?.buildId, pid: res?.pid };
 		} catch {
 			return { running: false };
 		}
 	}
 
 	async list(): Promise<InstanceSummary[]> {
-		const res = await this.request({ type: "list" });
-		return res.instances ?? [];
+		const res = await this.ask({ type: "list" });
+		return res?.instances ?? [];
 	}
 
 	/** List a session as a stopped row without starting it; it resumes when opened. */
-	async save(session: { cwd: string; label?: string; sessionFile: string; sessionId?: string }): Promise<void> {
-		const { cwd, label, sessionFile, sessionId } = session;
-		await this.request({ type: "save", cwd, label, sessionFile, sessionId });
+	async save(session: Omit<SaveRequest, "type">): Promise<void> {
+		// Only what a save carries: a caller may hand over more than that (hand-off.ts).
+		const { cwd, label, sessionFile, sessionId, parent } = session;
+		await this.ask({ type: "save", cwd, label, sessionFile, sessionId, parent });
 	}
 
 	/** The id of the row listed as starting (see StartRequest); rejects with why it was refused. */
 	async start(start: StartSpec): Promise<string> {
 		const res = await this.request({ type: "start", ...start });
-		if (res.type !== "start_result" || !res.id)
-			throw new Error("The agent daemon is out of date — restart pi to update it");
+		if (!res.id) throw new Error(OUT_OF_DATE);
 		return res.id;
 	}
 
 	/** The pane `start` was claimed for could not be started. */
 	async startFailed(instanceId: string): Promise<void> {
-		await this.request({ type: "start_failed", instanceId });
+		await this.ask({ type: "start_failed", instanceId });
 	}
 
 	async delete(instanceId: string): Promise<void> {
-		await this.request({ type: "delete", instanceId }, 10_000);
+		await this.ask({ type: "delete", instanceId }, 10_000);
 	}
 
 	async rename(instanceId: string, name: string): Promise<void> {
-		await this.request({ type: "rename", instanceId, name });
+		await this.ask({ type: "rename", instanceId, name });
 	}
 
 	async setMeta(instanceId: string, meta: { pinned?: boolean; sortOrder?: number }): Promise<void> {
-		await this.request({ type: "meta", instanceId, ...meta });
+		await this.ask({ type: "meta", instanceId, ...meta });
 	}
 
 	/** Register/heartbeat a pane's pi. Its timeout is long: the messages a response drains are lost
@@ -266,8 +235,8 @@ export class OrchestratorClient {
 	async register(
 		instance: RegisterRequest["instance"],
 	): Promise<{ messages: PaneMessage[]; watched: boolean; wantReport: boolean }> {
-		const res = await this.request({ type: "register", instance }, 3000);
-		return { messages: res.messages ?? [], watched: res.watched === true, wantReport: res.wantReport === true };
+		const res = await this.ask({ type: "register", instance }, 3000);
+		return { messages: res?.messages ?? [], watched: res?.watched === true, wantReport: res?.wantReport === true };
 	}
 
 	/**
@@ -276,37 +245,34 @@ export class OrchestratorClient {
 	 * predates the request, which answers it with no type.
 	 */
 	async wait(instanceId: string, signal: AbortSignal): Promise<boolean | undefined> {
-		const res = await this.request({ type: "wait", instanceId }, 30_000, signal);
-		return res.type === "wait_result" && !res.superseded ? res.queued === true : undefined;
+		const res = await this.ask({ type: "wait", instanceId }, 30_000, signal);
+		return res && !res.superseded ? res.queued === true : undefined;
 	}
 
 	/** Queue a message for a pane's pi; it acts on it within a heartbeat. */
 	async send(instanceId: string, message: PaneMessage): Promise<void> {
-		const res = await this.request({ type: "send", instanceId, message });
-		if (res.type !== "ack") throw new Error(res.error ?? "The agent daemon is out of date — restart pi to update it");
+		await this.request({ type: "send", instanceId, message });
 	}
 
 	/** Remote control's switch, pairing codes and devices (daemon/remote/). */
 	async remote(action: RemoteAction): Promise<RemoteResult> {
-		const res = await this.request({ type: "remote", ...action }, 5000);
-		if (res.type !== "remote_result") throw new Error("The agent daemon is out of date — restart pi to update it");
-		return res as unknown as RemoteResult;
+		return this.request({ type: "remote", ...action }, 5000);
 	}
 
 	/** The reply this pane is streaming, for the phones watching it; null once it is finished, with
 	 *  the transcript entry it became when known. */
 	async remoteLive(instanceId: string, live: LiveSnapshot | null, entryId?: string): Promise<void> {
-		await this.request({ type: "remote_live", instanceId, live, ...(entryId ? { entryId } : {}) }, 1000);
+		await this.ask({ type: "remote_live", instanceId, live, ...(entryId ? { entryId } : {}) }, 1000);
 	}
 
 	/** This pane's model, context and usage, for the phone's status sheet. */
 	async remoteReport(instanceId: string, report: PaneReport): Promise<void> {
-		await this.request({ type: "remote_report", instanceId, report }, 1000);
+		await this.ask({ type: "remote_report", instanceId, report }, 1000);
 	}
 
 	/** Hands the daemon a session's pending wake-ups, replacing what it held for that session. */
 	async holdWakeups(held: HeldWakeups): Promise<void> {
-		await this.request({ type: "wakeups", held });
+		await this.ask({ type: "wakeups", held });
 	}
 
 	/**
@@ -315,7 +281,6 @@ export class OrchestratorClient {
 	 */
 	async claimRun(run: string, parent: string, signal: AbortSignal): Promise<boolean> {
 		const res = await this.request({ type: "run_queue", action: "claim", run, parent }, 30_000, signal);
-		if (res.type !== "run_queue_result") throw new Error(OUT_OF_DATE);
 		return res.granted === true;
 	}
 
@@ -328,9 +293,7 @@ export class OrchestratorClient {
 				throw error;
 			},
 		);
-		if (res.type !== "run_queue_result" || res.active === undefined || res.capacity === undefined) {
-			throw new Error(OUT_OF_DATE);
-		}
+		if (res.active === undefined || res.capacity === undefined) throw new Error(OUT_OF_DATE);
 		return {
 			granted: res.granted === true,
 			...(res.claimed ? { claimed: true as const } : {}),
@@ -342,20 +305,20 @@ export class OrchestratorClient {
 	/** Has the daemon launch granted run `run`'s host; returns the host's pid. */
 	async launchRun(run: string, host: RunHostLaunch): Promise<number> {
 		const res = await this.request({ type: "run_queue", action: "launch", run, host });
-		if (res.type !== "run_queue_result" || res.hostPid === undefined) throw new Error(OUT_OF_DATE);
+		if (res.hostPid === undefined) throw new Error(OUT_OF_DATE);
 		return res.hostPid;
 	}
 
 	/** From a run's host in pane `pane`: the environment its run was launched with, which the daemon gives once. */
 	async takeRunEnv(pane: string): Promise<Record<string, string>> {
 		const res = await this.request({ type: "run_queue", action: "take_env", pane });
-		if (res.type !== "run_queue_result" || !res.env) throw new Error(OUT_OF_DATE);
+		if (!res.env) throw new Error(OUT_OF_DATE);
 		return res.env;
 	}
 
 	/** Gives up run `run`'s claim, or its slot before it launched. */
 	async releaseRun(run: string): Promise<void> {
-		await this.request({ type: "run_queue", action: "release", run });
+		await this.ask({ type: "run_queue", action: "release", run });
 	}
 
 	/** A request about session `sessionId`'s collaboration (daemon/collaborations.ts); rejects with why it is refused. */
@@ -363,12 +326,11 @@ export class OrchestratorClient {
 		request: CollaborationRequest extends infer R ? (R extends unknown ? Omit<R, "type"> : never) : never,
 	): Promise<{ collaboration?: Collaboration; to?: CollaborationMember; current?: boolean }> {
 		const res = await this.request({ type: "collaboration", ...request } as CollaborationRequest, 5000);
-		if (res.type !== "collaboration_result") throw new Error(OUT_OF_DATE);
 		return { collaboration: res.collaboration, to: res.to, current: res.current };
 	}
 
 	async unregister(instanceId: string, reason?: EndReason): Promise<void> {
-		await this.request({ type: "unregister", instanceId, ...(reason ? { reason } : {}) }, 1000);
+		await this.ask({ type: "unregister", instanceId, ...(reason ? { reason } : {}) }, 1000);
 	}
 
 	/**
@@ -378,10 +340,10 @@ export class OrchestratorClient {
 	async shutdownDaemon(): Promise<{ ok: true } | { ok: false; reason: string }> {
 		let pid: number | undefined;
 		try {
-			const res = await this.request({ type: "shutdown" }, 3000);
+			const res = await this.ask({ type: "shutdown" }, 3000);
 			// A daemon from before this verb answers an unknown request with no `type` at all —
 			// waiting for it to exit would only time out.
-			if (res.type !== "shutdown_result") {
+			if (!res) {
 				return {
 					ok: false,
 					reason:
