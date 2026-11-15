@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { allows, deleteHtml, pinHtml, renameHtml } from "#remote-web/controls.js";
+import { settingsHtml } from "#remote-web/statusbar.js";
 import type { InstanceSummary, PaneReport } from "../daemon/ipc/protocol.ts";
 import { type RemoteServer, startRemoteServer } from "../daemon/remote/http.ts";
 import { RemoteStore } from "../daemon/remote/pairing.ts";
@@ -149,6 +150,12 @@ describe("the Chat verdict on each kind of action", () => {
 		return ((await res.json()) as { sessions: RemoteSession[] }).sessions;
 	}
 
+	async function rowOf(state: State, open: boolean): Promise<RemoteSession> {
+		const row = (await listed(open)).find((s) => s.id === state);
+		if (!row) throw new Error(`no row ${state}`);
+		return row;
+	}
+
 	describe("listed with each row", () => {
 		it.each(cells.map((cell) => [name(cell), cell] as const))("%s", async (_, { state, open, kind }) => {
 			const row = (await listed(open)).find((s) => s.id === state);
@@ -173,7 +180,8 @@ describe("the Chat verdict on each kind of action", () => {
 				{ listInstances: () => instances, report: () => report, terminalOpen: () => open },
 				state,
 			);
-			const outcome = decide(session!, REQUESTS[kind].action);
+			if (!session) throw new Error(`no session ${state}`);
+			const outcome = decide(session, REQUESTS[kind].action);
 			const code = codeOf(state, open, kind, false);
 			if (code) expect(outcome).toEqual({ error: code });
 			else expect(outcome).not.toHaveProperty("error");
@@ -199,10 +207,16 @@ describe("the Chat verdict on each kind of action", () => {
 
 	describe("built on the phone only when allowed", () => {
 		it.each(cells.map((cell) => [name(cell), cell] as const))("%s", async (_, { state, open, kind }) => {
-			const row = (await listed(open)).find((s) => s.id === state)!;
+			const row = await rowOf(state, open);
 			const act = verdictOf(state, open, kind).act;
 			expect(allows(row, open, kind)).toBe(act);
-			const built = { pin: pinHtml(row, open), rename: renameHtml(row, open), delete: deleteHtml(row, open, false) };
+			const built = {
+				pin: pinHtml(row, open),
+				rename: renameHtml(row, open),
+				delete: deleteHtml(row, open, false),
+				// The sheet's pickers, as app.js builds them: plain values when refused.
+				settings: settingsHtml(report, allows(row, open, "settings")).includes("data-pick") ? "pickers" : "",
+			};
 			if (kind in built) expect(built[kind as keyof typeof built] !== "").toBe(act);
 		});
 
@@ -217,7 +231,7 @@ describe("the Chat verdict on each kind of action", () => {
 		it.each(cells.map((cell) => [name(cell), cell] as const))(
 			"falls back on today's rules for a daemon that lists no answers: %s",
 			async (_, { state, open, kind }) => {
-				const { actions: _actions, ...older } = (await listed(open)).find((s) => s.id === state)!;
+				const { actions: _actions, ...older } = await rowOf(state, open);
 				// No terminal: nothing reaches a pane's pi.
 				const expected = BEFORE[state][kind] && (open || (kind !== "message" && kind !== "tasks"));
 				expect(allows(older, open, kind)).toBe(expected);
