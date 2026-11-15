@@ -706,7 +706,8 @@ export async function executeRpcRun(
 	// Where it worked and what it changed there, as Git sees it rather than as the run says.
 	const workspaceLines = evidence.workspace?.lines ?? [];
 	const workspaceNote = workspaceLines.length ? `\n${workspaceLines.join("\n")}` : "";
-	// Its host says whether it stored one.
+	// Which Report is its own is the evidence's; whether it stored one at all is its host's to say, so a Report its host
+	// never confirmed is not delivered as if its work had settled.
 	const report = state?.reportSeq === undefined ? undefined : evidence.report;
 	if (!terminated) {
 		sealRunInbox(launch.runDir, record.generation);
@@ -763,11 +764,14 @@ export async function executeRpcRun(
 		"---",
 		`Outcome: ${outcome.status}${outcome.status === "completed" ? ": its pi settled its work without an error. What the run says above is its own claim; the runtime verified none of it." : `: ${cutReason(outcome.error)}.`}`,
 		`Process: exited with ${exited.exit.signal ? `signal ${exited.exit.signal}` : `code ${exited.exit.code}`}, after its Report was stored: ${NOTHING_TO_CLOSE}`,
-		// A transcript that cannot be read shows no command.
+		// Commands not known, its transcript unread, are listed as none, as they always were.
 		...checksLines(launch.tools, "ran" in evidence.commands ? evidence.commands.ran : []),
-		...(workspace ? workspaceLines : ["Changes: none: it had no tool that changes files."]),
+		...(evidence.workspace ? workspaceLines : ["Changes: none: it had no tool that changes files."]),
 		// A step of a chain is integrated with its chain, once the chain has completed.
-		...(workspace && outcome.status === "completed" && !launch.keepWorktree && existsSync(workspace.root)
+		...(evidence.workspace &&
+		outcome.status === "completed" &&
+		!launch.keepWorktree &&
+		existsSync(evidence.workspace.root)
 			? [
 					`Integration: once you have reviewed its changes, subagent_integrate "${launch.name}" applies them to your checkout.`,
 				]

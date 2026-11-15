@@ -1,5 +1,5 @@
 /**
- * What the runtime saw of a Generation (GLOSSARY: Evidence), from what it left on disk: its Report and outcome, the
+ * What the runtime saw of a Generation, its Evidence, from what it left on disk: its Report and outcome, the
  * commands its transcript shows it ran and how each ended, as its pi recorded them, never as the run's own text tells
  * it, and where it worked and what it changed there, as Git sees it. Facts only: each reader words them its own way.
  */
@@ -159,12 +159,12 @@ function endedBy(text: string): string {
  * One line for a run among others, as a batch or chain lists it: how many commands it ran, how many did not exit 0,
  * or why that is not known.
  */
-export function checksSummary({ tools, commands: checks }: Pick<GenerationEvidence, "tools" | "commands">): string {
-	if ("unknown" in checks && checks.unknown === "unreadable")
+export function checksSummary({ tools, commands: known }: Pick<GenerationEvidence, "tools" | "commands">): string {
+	if ("unknown" in known && known.unknown === "unreadable")
 		return "Checks: unknown: its transcript could not be read.";
 	if (!tools.includes("bash")) return "Checks: none ran: it had no tool that runs commands.";
-	if ("unknown" in checks) return "Checks: unknown: its run was resumed since.";
-	const commands = checks.ran;
+	if ("unknown" in known) return "Checks: unknown: its run was resumed since.";
+	const commands = known.ran;
 	if (commands.length === 0) return "Checks: its transcript shows it ran no commands.";
 	const failed = commands.filter(({ ended }) => !ended.startsWith("exit 0")).length;
 	return `Checks: its transcript shows ${commands.length} command${commands.length === 1 ? "" : "s"}, ${failed} not ending with exit 0.`;

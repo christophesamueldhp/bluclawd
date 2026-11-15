@@ -114,8 +114,8 @@ const closedRun = (runId: string, generation: number, extra: Partial<SubagentRun
 		...extra,
 	}) as SubagentRunRecord;
 
-describe("which Report is a Generation's, as today's readers tell it", () => {
-	it("disagree for a Resume that stored none: Integration takes the earlier Generation's, a member has none", async () => {
+describe("which Report is a Generation's, by Integration's rule and a member's", () => {
+	it("differs for a Resume that stored none: Integration's is the earlier Generation's, a member has none", async () => {
 		const { agentDir, runId, runDir, workspace } = await runWithWorktree();
 		admit(runDir, 0, { tools: ["edit"], workspace, admittedAt: at(0) });
 		storeRunReport(runDir, { text: "Done.", outcome: { status: "completed" }, generation: 0 });
@@ -264,7 +264,7 @@ describe("what the runtime saw of a Generation, as far as it can", () => {
 });
 
 describe("a single Run's checks", () => {
-	it("are the same counted from its Generation's admission as from when its run queued, as they were", async () => {
+	it("are the same counted from its Generation's admission as from when its run queued", async () => {
 		const { runDir, workspace } = await runWithWorktree();
 		admit(runDir, 0, { tools: ["edit", "bash"], workspace, admittedAt: at(0) });
 		admit(runDir, 1, { tools: ["edit", "bash"], workspace, admittedAt: at(30) });

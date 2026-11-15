@@ -563,8 +563,8 @@ export function resumeChains(deps: ChainDeps, parentSessionId: string): void {
 }
 
 /**
- * An earlier step of a chain taken over, which completed in generation `generation` of its run: settled as a step
- * not taken over is, even when a later generation of its run has run since.
+ * An earlier step of a chain taken over, which completed in Generation `generation` of its run: settled as a step
+ * not taken over is, even when a later Generation of its run has run since.
  */
 const completedMember = (agentDir: string, record: Readonly<SubagentRunRecord>, generation: number) =>
 	settledMember(agentDir, { ...record, status: "closed", generation });
