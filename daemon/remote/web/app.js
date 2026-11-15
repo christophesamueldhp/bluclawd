@@ -6,19 +6,7 @@
  * updates arrive.
  */
 import { api, clearToken, getToken, pairLink, setToken, Unauthorized } from "./api.js";
-import {
-	addPending,
-	applyLatest,
-	applyOlder,
-	checkPending,
-	forget,
-	listed,
-	openChat,
-	replyEndedAt,
-	restorePending,
-	settleOutcomes,
-	waitingOn,
-} from "./chat.js";
+import { applyLatest, applyOlder, arrive, listed, nextGiveUp, openChat, promptSent, replyEndedAt } from "./chat.js";
 import { setNewOptions } from "./composer.js";
 import { diffCounts, diffHtml } from "./diff.js";
 import { ICONS, toolIcon } from "./icons.js";
@@ -73,7 +61,7 @@ import { composerAction, duration, STOP_GUARD_MS, turnSince, turnTimes } from ".
 /** @typedef {import("./statusbar.js").Report} Report */
 
 /** This build's version, as sw.js caches it (a test keeps the two the same). */
-const VERSION = "0.0.60";
+const VERSION = "0.0.61";
 const VIEW_MODE_KEY = "bluclawd-view-mode";
 /** Each chat's pending prompts and unsent text, kept for when it opens again. */
 const keptPending = pendingStore(() => localStorage);
@@ -123,8 +111,6 @@ const WATCHDOG_MS = 35_000;
 const START_TIMEOUT_MS = 60_000;
 /** How long a finished reply stays on screen without a transcript fetch that has it. */
 const LIVE_CLEAR_MS = 3000;
-/** A sent prompt the session neither ran nor wrote by then never reached it (pi turns one away while compacting). */
-const PROMPT_GIVE_UP_MS = 20_000;
 /** An error shows this long, unless a tap or another screen ends it sooner. */
 const ERROR_MS = 6000;
 /** Less taken off the visible height than this is a toolbar, not the keyboard. */
@@ -466,7 +452,7 @@ function waitForPane(id) {
 		if (state.starting !== starting) return;
 		state.starting = undefined;
 		// What was sent reached no session.
-		if (state.chat) state.chat.pending = [];
+		if (state.chat) arrive(state.chat, { startTimedOut: true }, Date.now());
 		showError(errorText("start_timeout"));
 	}, START_TIMEOUT_MS);
 	void loadSessions();
@@ -533,10 +519,8 @@ async function loadStatus() {
 		report = null;
 	}
 	if (state.chat !== chat || request !== chat.statusRequest) return;
-	chat.report = report;
-	returned(chat, [...restore(chat), ...settleOutcomes(chat, report?.outcomes)]);
-	// Its pane's report is what the daemon answers for a restart by.
-	void askWaiting(chat);
+	// Its pane's report is what the daemon answers for a restart by: it is asked after it.
+	carryOut(chat, arrive(chat, { status: report }, Date.now()));
 	// A pane has them once it has reported.
 	if (report && !chat.commandsAsked) {
 		chat.commandsAsked = true;
@@ -694,7 +678,7 @@ function connect() {
 		const chat = state.chat;
 		if (!chat || sessionId !== chat.id) return;
 		// Carried here too, as the session may be gone, with no status left to fetch.
-		if (returned(chat, settleOutcomes(chat, outcomes))) render();
+		if (carryOut(chat, arrive(chat, { outcomes }, Date.now()))) render();
 		void loadStatus();
 	});
 	// Sent as the stream opens: every outcome the daemon knows for the session open.
@@ -703,10 +687,8 @@ function connect() {
 		const { sessionId, outcomes } = JSON.parse(event.data);
 		const chat = state.chat;
 		if (!chat || sessionId !== chat.id) return;
-		const failed = restore(chat, outcomes);
-		returned(chat, [...failed, ...settleOutcomes(chat, outcomes)]);
+		carryOut(chat, arrive(chat, { replay: outcomes }, Date.now()));
 		render();
-		void askWaiting(chat);
 	});
 	current.addEventListener("ping", alive);
 	current.onerror = () => {
@@ -2535,12 +2517,10 @@ async function send() {
 	keptPending.saveDraft(chat.id, "");
 	text.style.height = "auto";
 	chat.attachments = [];
-	const entry = addPending(chat, value, images, Date.now());
-	entry.skillDraft = skillDraft;
+	const entry = promptSent(chat, value, images, skillDraft, Date.now());
 	// The round button may become Stop only after a moment: see composerAction.
-	chat.sentAt = Date.now();
 	setTimeout(render, STOP_GUARD_MS);
-	setTimeout(() => checkSent(chat, entry), PROMPT_GIVE_UP_MS);
+	watchGiveUp();
 	render();
 	$("#scroll").scrollTop = $("#scroll").scrollHeight;
 	try {
@@ -2551,24 +2531,48 @@ async function send() {
 			entry.id,
 			submission?.skills,
 		);
-		entry.lifetime = lifetime;
+		arrive(chat, { accepted: entry, lifetime }, Date.now());
 		if (state.chat === chat) keptPending.save(chat);
 	} catch (error) {
-		forget(chat, entry);
-		putBack(chat, entry);
+		carryOut(chat, arrive(chat, { notSent: entry }, Date.now()));
 		handleError(error, "Not sent: ");
 	}
 }
 
 /**
- * Prompts refused by their pane, or lost, back in the reply box, the reason shown.
- * @param {Chat} chat @param {import("./chat.js").Failed[]} failed @returns {boolean} whether there were any
+ * Does what the chat asks for after an arrival (see arrive): the prompts refused by their pane, or lost, go back in
+ * the reply box, the last one's reason shown, and the daemon is asked about those still waiting.
+ * @param {Chat} chat @param {import("./chat.js").Next} next @returns {boolean} whether any prompt came back
  */
-function returned(chat, failed) {
-	for (const { entry } of failed) putBack(chat, entry);
-	const last = failed.at(-1);
-	if (last) showError(RETURNED[/** @type {keyof typeof RETURNED} */ (last.reason)] ?? errorText("not_delivered"));
-	return failed.length > 0;
+function carryOut(chat, next) {
+	for (const { entry } of next.returned) putBack(chat, entry);
+	const reason = next.returned.at(-1)?.reason;
+	if (reason) showError(RETURNED[/** @type {keyof typeof RETURNED} */ (reason)] ?? errorText("not_delivered"));
+	if (next.ask.length) void askWaiting(chat, next.ask);
+	watchGiveUp();
+	return next.returned.length > 0;
+}
+
+/** @type {ReturnType<typeof setTimeout> | undefined} */
+let giveUpTimer;
+
+/** The one timer that tells the open chat time has passed: set for its earliest give-up (see nextGiveUp). */
+function watchGiveUp() {
+	clearTimeout(giveUpTimer);
+	const chat = state.chat;
+	const at = chat && nextGiveUp(chat);
+	if (!chat || at === undefined) return;
+	giveUpTimer = setTimeout(
+		() => {
+			if (state.chat !== chat) return;
+			const session = state.sessions.find((s) => s.id === chat.id);
+			const row = { state: session?.state, silent: session?.silent, starting: state.starting !== undefined };
+			const next = arrive(chat, { time: row }, Date.now());
+			// carryOut sets the timer for the next one.
+			if (!carryOut(chat, next) && next.dropped) render();
+		},
+		Math.max(0, at - Date.now()),
+	);
 }
 
 /** @typedef {import("./chat.js").Chat} Chat @typedef {import("./chat.js").Pending} Pending */
@@ -2595,27 +2599,11 @@ function putBack(chat, entry) {
 }
 
 /**
- * The prompts the phone kept of the chat, back in once the daemon's replay and its pane's report
- * are (see restorePending).
- * @param {Chat} chat @param {import("./chat.js").PromptOutcome[]} [replay]
- * @returns {import("./chat.js").Failed[]} those refused or lost
+ * Asks the daemon about the prompts the chat still waits on, and puts back those it answers refused or lost. One it
+ * cannot answer yet waits for its give-up, or the next ask.
+ * @param {Chat} chat @param {import("./chat.js").Next["ask"]} waiting
  */
-function restore(chat, replay) {
-	const kept = chat.kept;
-	const failed = restorePending(chat, replay);
-	// Their give-up timers went with the page or the chat that sent them.
-	if (chat.restored) for (const entry of kept) setTimeout(() => checkSent(chat, entry), PROMPT_GIVE_UP_MS);
-	return failed;
-}
-
-/**
- * Asks the daemon about the prompts the chat still waits on (see waitingOn), and puts back those it
- * answers refused or lost. One it cannot answer yet waits for its give-up, or the next ask.
- * @param {Chat} chat
- */
-async function askWaiting(chat) {
-	const waiting = waitingOn(chat);
-	if (!waiting.length) return;
+async function askWaiting(chat, waiting) {
 	/** @type {import("./chat.js").PromptOutcome[]} */
 	let outcomes;
 	try {
@@ -2625,21 +2613,7 @@ async function askWaiting(chat) {
 		if (error instanceof Unauthorized) handleError(error);
 		return;
 	}
-	if (state.chat === chat && returned(chat, settleOutcomes(chat, outcomes))) render();
-}
-
-/** A sent prompt still waiting PROMPT_GIVE_UP_MS on (see giveUp). @param {Chat} chat @param {Pending} entry */
-function checkSent(chat, entry) {
-	if (state.chat !== chat || !chat.pending.includes(entry) || state.starting) return;
-	const session = state.sessions.find((s) => s.id === chat.id);
-	const verdict = checkPending(chat, entry, session?.state, session?.silent);
-	// Its pane may come back and never report it (another extension took it): asked again then.
-	if (verdict === "wait" && session?.silent) setTimeout(() => checkSent(chat, entry), PROMPT_GIVE_UP_MS);
-	else if (verdict === "drop") render();
-	else if (verdict === "fail") {
-		putBack(chat, entry);
-		showError(errorText("not_delivered"));
-	}
+	if (state.chat === chat && carryOut(chat, arrive(chat, { answer: outcomes }, Date.now()))) render();
 }
 
 // ---- this phone ----

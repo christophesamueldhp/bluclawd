@@ -1,7 +1,7 @@
 // @ts-check
 /**
  * Each chat's pending prompts, kept in browser storage so that a reload, or a return to the chat,
- * still settles them (see restorePending), and the text in its reply box not sent yet, a prompt put
+ * still settles them (see arrive in chat.js), and the text in its reply box not sent yet, a prompt put
  * back there too, until its row leaves the session list.
  */
 import { storedPending } from "./chat.js";

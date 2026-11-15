@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { addPending, openChat, restorePending } from "#remote-web/chat.js";
+import { arrive, openChat, promptSent } from "#remote-web/chat.js";
 import { pendingStore } from "#remote-web/pending.js";
+
+/** A prompt typed and sent at `at`. */
+const send = (chat: ReturnType<typeof openChat>, text: string, at: number) =>
+	promptSent(chat, text, [], { text, selections: [] }, at);
 
 /** Browser storage, in memory. */
 function memoryStorage(): Storage {
@@ -21,17 +25,18 @@ describe("pending prompts kept on the phone", () => {
 	it("survive a reload when sent before the pane's first report, and are settled by id", () => {
 		const storage = memoryStorage();
 		const before = openChat("a");
-		const queued = addPending(before, "queued", [], 100);
-		const refused = addPending(before, "refused", [], 110);
+		const queued = send(before, "queued", 100);
+		const refused = send(before, "refused", 110);
 		pendingStore(() => storage).save(before);
 
 		const store = pendingStore(() => storage);
 		const chat = openChat("a", store.load("a"));
-		chat.report = { models: [], outcomes: [] };
-		const failed = restorePending(chat, [
-			{ id: queued.id, outcome: "queued" },
-			{ id: refused.id, outcome: "refused", reason: "busy" },
-		]);
+		arrive(chat, { status: { models: [], outcomes: [] } }, 1000);
+		const replay = [
+			{ id: queued.id, outcome: "queued" as const },
+			{ id: refused.id, outcome: "refused" as const, reason: "busy" as const },
+		];
+		const failed = arrive(chat, { replay }, 1000).returned;
 		expect(failed.map(({ entry, reason }) => [entry.prompt, reason])).toEqual([["refused", "busy"]]);
 		expect(chat.pending.map((p) => [p.prompt, p.outcome])).toEqual([["queued", "queued"]]);
 		store.save(chat);
@@ -42,10 +47,10 @@ describe("pending prompts kept on the phone", () => {
 		const storage = memoryStorage();
 		const store = pendingStore(() => storage);
 		const a = openChat("a");
-		addPending(a, "for a", [], 100);
+		send(a, "for a", 100);
 		store.save(a);
 		const b = openChat("b");
-		addPending(b, "for b", [], 100);
+		send(b, "for b", 100);
 		store.save(b);
 		expect(store.load("a").map((p) => p.prompt)).toEqual(["for a"]);
 		a.pending = [];
@@ -60,7 +65,7 @@ describe("pending prompts kept on the phone", () => {
 		const store = pendingStore(() => storage);
 		for (const id of ["a", "b", "c"]) {
 			const chat = openChat(id);
-			addPending(chat, `for ${id}`, [], 100);
+			send(chat, `for ${id}`, 100);
 			store.save(chat);
 			store.saveDraft(id, `draft ${id}`);
 		}
@@ -78,7 +83,7 @@ describe("pending prompts kept on the phone", () => {
 		for (const storage of [() => throwing, fails]) {
 			const store = pendingStore(storage);
 			const chat = openChat("a");
-			addPending(chat, "hi", [], 100);
+			send(chat, "hi", 100);
 			expect(() => store.save(chat)).not.toThrow();
 			expect(store.load("a")).toEqual([]);
 			expect(() => store.saveDraft("a", "hi")).not.toThrow();
@@ -91,12 +96,12 @@ describe("pending prompts kept on the phone", () => {
 		const storage = memoryStorage();
 		const store = pendingStore(() => storage);
 		const chat = openChat("a");
-		addPending(chat, "first", [], 100);
+		send(chat, "first", 100);
 		store.save(chat);
 		storage.setItem = () => {
 			throw new Error("QuotaExceededError");
 		};
-		addPending(chat, "second", [], 110);
+		send(chat, "second", 110);
 		store.save(chat);
 		expect(store.load("a")).toEqual([]);
 	});
