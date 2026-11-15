@@ -156,13 +156,15 @@ export function generationState(runDir: string, generation: number, launched?: n
  */
 export function admitGeneration(runDir: string, generation: number, definition: RunDefinition): boolean {
 	const path = runDefinitionPath(runDir, generation);
+	// No command of the Generation runs before its admission, nor any of the one before after it (#436).
+	const stored = JSON.stringify({ ...definition, admittedAt: Date.now() }, null, 2);
 	if (!generation) {
-		writeAtomicPrivateFile(path, JSON.stringify(definition, null, 2));
+		writeAtomicPrivateFile(path, stored);
 		return true;
 	}
 	mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
 	const draft = `${path}.${randomUUID()}.tmp`;
-	writeFileSync(draft, JSON.stringify(definition, null, 2), { mode: 0o600 });
+	writeFileSync(draft, stored, { mode: 0o600 });
 	try {
 		// A link fails where a file exists, and gives it whole: a reader never sees one half written.
 		linkSync(draft, path);

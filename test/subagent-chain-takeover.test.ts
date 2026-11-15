@@ -1,11 +1,11 @@
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AdmissionContext } from "../ext/subagents/admission.ts";
 import { type ChainDeps, resumeChains } from "../ext/subagents/chains.ts";
-import { admitGeneration } from "../ext/subagents/generation-state.ts";
+import { admitGeneration, runDefinitionPath } from "../ext/subagents/generation-state.ts";
 import type { ChainStep } from "../ext/subagents/invocation.ts";
 import type { ParentScope } from "../ext/subagents/parent-scope.ts";
 import type { RunDefinition } from "../ext/subagents/rpc-runs.ts";
@@ -30,6 +30,7 @@ const at = (minute: number) => Date.parse(`2026-01-01T00:${String(minute).padSta
 
 let root: string | undefined;
 afterEach(() => {
+	vi.useRealTimers();
 	if (root) rmSync(root, { recursive: true, force: true });
 	root = undefined;
 });
@@ -94,14 +95,14 @@ async function chainWorktree(): Promise<{ agentDir: string; a: string; workspace
 }
 
 /**
- * Stores run `a` as it closed in its last generation: each generation's role with `tools`, and its Report; and its
- * transcript, with `transcript`'s entries.
+ * Stores run `a` as it closed in its last generation: each generation's role with `tools`, admitted at `admittedAt`
+ * when given, and its Report; and its transcript, with `transcript`'s entries.
  */
 function storeRun(
 	agentDir: string,
 	workspace: IsolatedWorkspace,
 	record: SubagentRunRecord,
-	generations: { tools: string[]; report: string }[],
+	generations: { tools: string[]; report: string; admittedAt?: number }[],
 	transcript: object[] = [],
 ): void {
 	const runDir = subagentRunDir(agentDir, SESSION, record.runId);
@@ -109,7 +110,8 @@ function storeRun(
 	writePersistedRunRecord(agentDir, { ...record, transcriptPath });
 	const header = { type: "session", version: 3, id: "a", timestamp: new Date(at(0)).toISOString(), cwd: record.cwd };
 	writeFileSync(transcriptPath, `${[header, ...transcript].map((entry) => JSON.stringify(entry)).join("\n")}\n`);
-	generations.forEach(({ tools, report }, generation) => {
+	generations.forEach(({ tools, report, admittedAt }, generation) => {
+		if (admittedAt !== undefined) vi.setSystemTime(admittedAt);
 		admitGeneration(runDir, generation, {
 			name: "writer",
 			description: "Edits files.",
@@ -121,8 +123,15 @@ function storeRun(
 			admitted: { provider: "faux", modelId: "faux-1", thinkingLevel: "off" },
 			workspace,
 		} as unknown as RunDefinition);
+		if (admittedAt === undefined) {
+			// As stored before Admission kept when it admitted each Generation.
+			const path = runDefinitionPath(runDir, generation);
+			const { admittedAt: _, ...stored } = JSON.parse(readFileSync(path, "utf8"));
+			writeFileSync(path, JSON.stringify(stored));
+		}
 		storeRunReport(runDir, { text: report, outcome: { status: "completed" }, generation });
 	});
+	vi.useRealTimers();
 }
 
 /**
@@ -208,17 +217,17 @@ describe("a chain taken over before its next step's run existed", () => {
 		);
 	}, 60_000);
 
-	it("says what it cannot tell of the checks of a step whose run a later step resumed", async () => {
+	/** Run `a`, whose generation 0 ran a command at minute 5 and whose generation 1, admitted at minute 20, ran none. */
+	const resumedRun = async (admittedAt: [number, number] | undefined) => {
 		const { agentDir, a, workspace } = await chainWorktree();
 		const tools = ["read", "write", "bash"];
-		// Generation 0 ran a command; generation 1, started at minute 20, none.
 		storeRun(
 			agentDir,
 			workspace,
 			closedRun(a, "a", workspace.root, { generation: 1, startedAt: at(20) }),
 			[
-				{ tools, report: "Checked v1." },
-				{ tools, report: "Checked again." },
+				{ tools, report: "Checked v1.", ...(admittedAt ? { admittedAt: admittedAt[0] } : {}) },
+				{ tools, report: "Checked again.", ...(admittedAt ? { admittedAt: admittedAt[1] } : {}) },
 			],
 			[
 				{
@@ -236,8 +245,7 @@ describe("a chain taken over before its next step's run existed", () => {
 				},
 			],
 		);
-
-		const { tasks, aggregate } = await takeOver(
+		return takeOver(
 			agentDir,
 			workspace,
 			[
@@ -251,16 +259,30 @@ describe("a chain taken over before its next step's run existed", () => {
 				{ runId: createRunId(), generation: 0 },
 			],
 		);
+	};
+
+	it("counts the checks of a step whose run a later step resumed, from its own Generation's admission", async () => {
+		const { tasks, aggregate } = await resumedRun([at(0), at(20)]);
+
+		expect(tasks).toHaveLength(1);
+		expect(tasks[0]).toContain("Checked again.");
+		expect(aggregate).toMatch(/Chain chain_t: 3 steps, all completed\./);
+		expect(aggregate).toMatch(
+			/### chain\[0\] "a" \(sub_[\w-]+\): completed\nChecks: its transcript shows 1 command, 0 not ending with exit 0\.\nChecked v1\./,
+		);
+		expect(aggregate).toMatch(
+			/### chain\[1\] "a" \(sub_[\w-]+\), resumed: completed\nChecks: its transcript shows it ran no commands\.\nChecked again\./,
+		);
+	}, 60_000);
+
+	it("says what it cannot tell of the checks of a step resumed since, its Generations stored without their admission", async () => {
+		const { tasks, aggregate } = await resumedRun(undefined);
 
 		expect(tasks).toHaveLength(1);
 		expect(tasks[0]).toContain("Checked again.");
 		expect(tasks[0]).toMatch(/^Changes since its baseline: A new\.txt$/m);
-		expect(aggregate).toMatch(/Chain chain_t: 3 steps, all completed\./);
 		expect(aggregate).toMatch(
 			/### chain\[0\] "a" \(sub_[\w-]+\): completed\nChecks: unknown: its run was resumed since\.\nChecked v1\./,
-		);
-		expect(aggregate).toMatch(
-			/### chain\[1\] "a" \(sub_[\w-]+\), resumed: completed\nChecks: its transcript shows it ran no commands\.\nChecked again\./,
 		);
 	}, 60_000);
 });

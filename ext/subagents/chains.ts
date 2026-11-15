@@ -571,11 +571,16 @@ async function completedMember(
 	record: Readonly<SubagentRunRecord>,
 	generation: number,
 ): Promise<BatchMember> {
-	const member = await settledMember(agentDir, { ...record, status: "closed", generation });
-	if (record.generation === generation || !member.checks) return member;
+	const closed = { ...record, status: "closed" as const, generation };
+	if (record.generation === generation) return settledMember(agentDir, closed);
+	// Its record's start is a later generation's: this one's commands run from its admission to the next one's.
 	const runDir = subagentRunDir(agentDir, record.parentSessionId, record.runId);
-	if (!generationDefinition(runDir, generation)?.tools.includes("bash")) return member;
-	// Its record's start is a later generation's: its transcript does not show where this one's commands end.
+	const from = generationDefinition(runDir, generation)?.admittedAt;
+	const until = generationDefinition(runDir, generation + 1)?.admittedAt;
+	if (from !== undefined && until !== undefined) return settledMember(agentDir, { ...closed, startedAt: from }, until);
+	const member = await settledMember(agentDir, closed);
+	if (!member.checks || !generationDefinition(runDir, generation)?.tools.includes("bash")) return member;
+	// Stored before Admission kept when it admitted each generation: where this one's commands end is not known.
 	return { ...member, checks: "Checks: unknown: its run was resumed since." };
 }
 

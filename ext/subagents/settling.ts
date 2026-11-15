@@ -276,8 +276,15 @@ export async function settleBatch(
 	);
 }
 
-/** A final run as a member: its generation's Report, where it worked and what it changed, and the checks it ran. */
-export async function settledMember(agentDir: string, record: Readonly<SubagentRunRecord>): Promise<BatchMember> {
+/**
+ * A final run as a member: its generation's Report, where it worked and what it changed, and the checks it ran, from
+ * its record's start until `until` when given: the next generation's admission, when its run was resumed since.
+ */
+export async function settledMember(
+	agentDir: string,
+	record: Readonly<SubagentRunRecord>,
+	until?: number,
+): Promise<BatchMember> {
 	const runDir = subagentRunDir(agentDir, record.parentSessionId, record.runId);
 	const report = readRunReports(runDir, 0)
 		.filter(({ generation }) => generation === record.generation)
@@ -290,7 +297,7 @@ export async function settledMember(agentDir: string, record: Readonly<SubagentR
 	const checks =
 		report &&
 		(entries
-			? checksSummary(definition?.tools ?? [], commandsRun(entries, record.startedAt ?? 0))
+			? checksSummary(definition?.tools ?? [], commandsRun(entries, record.startedAt ?? 0, until))
 			: "Checks: unknown: its transcript could not be read.");
 	return {
 		record,

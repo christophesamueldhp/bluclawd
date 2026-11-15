@@ -21,14 +21,20 @@ type Message = { role?: string; content?: unknown; toolCallId?: string; toolName
 type NestedCall = { name?: string; arguments?: { command?: unknown }; status?: string; error?: string };
 
 /**
- * The commands the run ran from `since` (ms) on: its pi's `bash` calls, those its codemode scripts made among them,
- * in order, with how each ended as its tool's result says.
+ * The commands the run ran from `since` (ms) on, and before `until` when given: its pi's `bash` calls, those its
+ * codemode scripts made among them, in order, with how each ended as its tool's result says.
  */
-export function commandsRun(entries: readonly SessionEntry[], since: number): RunCommand[] {
+export function commandsRun(
+	entries: readonly SessionEntry[],
+	since: number,
+	until = Number.POSITIVE_INFINITY,
+): RunCommand[] {
 	const asked = new Map<string, string>();
 	const commands: RunCommand[] = [];
 	for (const entry of entries) {
-		if (entry.type !== "message" || Date.parse(entry.timestamp) < since) continue;
+		if (entry.type !== "message") continue;
+		const at = Date.parse(entry.timestamp);
+		if (at < since || at >= until) continue;
 		const message = entry.message as Message;
 		if (message.role === "assistant" && Array.isArray(message.content)) {
 			for (const part of message.content as { type?: string; id?: string; name?: string; arguments?: unknown }[]) {

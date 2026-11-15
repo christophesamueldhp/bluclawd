@@ -162,6 +162,8 @@ export interface RunDefinition extends AgentDefinition {
 	workspace?: IsolatedWorkspace;
 	/** A run given `bash`: what its commands' sandbox is named after and kept out of (run-shell.ts). */
 	shell?: { runId: string; runDir: string };
+	/** When its Generation was admitted, which `admitGeneration` stamps; absent on one stored before it did. */
+	admittedAt?: number;
 }
 
 /**

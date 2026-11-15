@@ -84,6 +84,16 @@ describe("a Generation's state on disk", () => {
 		expect(generationState(runDir, 0)).toEqual({ at: "admitted", launch: spec(0) });
 	});
 
+	it("stamps each Generation's definition with when it was admitted, a Resume's with its own", () => {
+		const before = Date.now();
+		admitGeneration(runDir, 0, definition());
+		const launched = generationDefinition(runDir, 0)?.admittedAt ?? 0;
+		expect(launched).toBeGreaterThanOrEqual(before);
+		// A Resume's definition is the launch's, held as it is now: what it carries of the launch's time is not kept.
+		admitGeneration(runDir, 1, { ...definition(), admittedAt: 1 });
+		expect(generationDefinition(runDir, 1)?.admittedAt).toBeGreaterThanOrEqual(launched);
+	});
+
 	it("is hosted while the host that took it runs, ended once it stored how its pi exited", async () => {
 		admitGeneration(runDir, 0, definition());
 		storeLaunch(runDir, spec(0));
@@ -321,8 +331,15 @@ describe("a Generation's state on disk", () => {
 		seat?.save({ childPid: 7 });
 		seat?.saveChild({ awaiting: true });
 
-		expect(read(join(runDir, "definition.json"))).toBe(JSON.stringify(held, null, 2));
-		expect(read(join(runDir, "generations", "1.json"))).toBe(JSON.stringify(held, null, 2));
+		// Each with when it was admitted, last.
+		const stamped = (path: string) => {
+			const { admittedAt } = JSON.parse(read(path));
+			expect(admittedAt).toEqual(expect.any(Number));
+			return JSON.stringify({ ...held, admittedAt }, null, 2);
+		};
+		for (const path of [join(runDir, "definition.json"), join(runDir, "generations", "1.json")]) {
+			expect(read(path)).toBe(stamped(path));
+		}
 		expect(read(join(runDir, "rpc-spec.json"))).toBe(JSON.stringify(launched));
 		expect(read(join(runDir, "hosts", "1"))).toBe(String(process.pid));
 		expect(read(join(runDir, "rpc-host.json"))).toBe(`{"hostPid":${process.pid},"generation":1,"childPid":7}`);
