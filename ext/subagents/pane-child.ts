@@ -9,11 +9,11 @@
 
 import { dirname } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { PARENT_ENV, RUN_PANE_ENV, Tmux } from "../../daemon/tmux.ts";
+import { PARENT_ENV, RUN_HOST_ENV, RUN_PANE_ENV, Tmux } from "../../daemon/tmux.ts";
 import { BLOCKING_PROMPT_KINDS } from "../agent-view/self-registration.ts";
 import { startGeneration } from "./generation-protocol.ts";
 import { type HostSeat, hostGeneration } from "./generation-state.ts";
-import { PANE_ENDED } from "./rpc-host.ts";
+import { noteRunError, PANE_ENDED } from "./rpc-host.ts";
 import { paneApprovalsUnanswerable } from "./run-approvals.ts";
 
 /** How often it looks whether a terminal still shows the pane. */
@@ -26,20 +26,46 @@ const OPEN_GRACE_MS = 2000;
 /** How long an approval waits once its orchestrator is gone and no one watches its pane: as on pi's RPC. */
 const ORPHAN_BLOCK_MS = 5000;
 
-/** Its generation, which its host, the process that started it, holds; none where no run's spec is. */
-function seatOf(runDir: string): HostSeat | undefined {
+/** Its generation, which its host holds, found by the pid its host gave it; else why it is not found. */
+function seatOf(runDir: string): HostSeat | string {
+	const host = Number(process.env[RUN_HOST_ENV]);
+	if (!Number.isInteger(host) || host <= 0) return "its host gave it no pid";
 	try {
-		return hostGeneration(runDir, process.ppid);
-	} catch {
-		return undefined;
+		const seat = hostGeneration(runDir, host);
+		if (!seat) return `its host, pid ${host}, holds none of ${runDir}`;
+		return seat.spec.pane ? seat : `the one its host holds in ${runDir} runs on pi's RPC`;
+	} catch (error) {
+		return `its spec in ${runDir} cannot be read: ${error instanceof Error ? error.message : String(error)}`;
 	}
+}
+
+/**
+ * A run's pi with no Generation of its own does no work: it says why, in its pane and where its host's failure tells
+ * of it, and ends, rather than wait as a pi with no task. It stores no Report: the Generation may be another host's.
+ */
+function noGeneration(pi: ExtensionAPI, runDir: string, why: string): void {
+	const text = `it found no Generation of its own (${why})`;
+	try {
+		noteRunError(runDir, text);
+	} catch {
+		// Its pane still says it.
+	}
+	pi.on("session_start", (_event, ctx) => {
+		if (ctx.hasUI) ctx.ui.notify(text, "error");
+		ctx.shutdown();
+	});
 }
 
 export default function paneChild(pi: ExtensionAPI): void {
 	const runDir = process.env[RUN_PANE_ENV];
-	const seat = runDir ? seatOf(runDir) : undefined;
-	const pane = seat?.spec.pane;
-	if (!runDir || !seat || !pane) return;
+	if (!runDir) return;
+	const seat = seatOf(runDir);
+	if (typeof seat === "string") {
+		noGeneration(pi, runDir, seat);
+		return;
+	}
+	const pane = seat.spec.pane;
+	if (!pane) return;
 	const { spec } = seat;
 	/** Whether it waits on a blocking dialog of its own. */
 	let awaiting = false;

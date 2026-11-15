@@ -33,6 +33,8 @@ export const RUN_TASK_ENV = "BLUCLAWD_RUN_TASK";
 export const RUN_DIR_ENV = "BLUCLAWD_RUN_DIR";
 /** Set on a run's pi in a pane (ADR-0013), to its run directory: there it acts as a run, not as a session of its own. */
 export const RUN_PANE_ENV = "BLUCLAWD_RUN_PANE";
+/** Set with {@link RUN_PANE_ENV}: the pid of the run's host, which holds its Generation. */
+export const RUN_HOST_ENV = "BLUCLAWD_RUN_HOST_PID";
 /** The command ←← dispatches; not meant to be typed. */
 export const AGENT_VIEW_COMMAND = "agent-view";
 
