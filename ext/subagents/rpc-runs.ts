@@ -9,15 +9,10 @@
  * processes runs: its host's group, and every process its commands started (ext/sandbox/run-containment.ts).
  */
 
-import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import {
-	DefaultPackageManager,
-	parseSessionEntries,
-	type SessionEntry,
-	SettingsManager,
-} from "@earendil-works/pi-coding-agent";
+import { DefaultPackageManager, SettingsManager } from "@earendil-works/pi-coding-agent";
 import type { SessionMessage, SessionUsage } from "../../daemon/ipc/protocol.ts";
 import { OrchestratorClient } from "../../daemon/orchestrator-client.ts";
 import { processGroupAlive } from "../../daemon/processes.ts";
@@ -50,7 +45,7 @@ import {
 	type RunApprovalRequest,
 	runApprovalWithdrawn,
 } from "./run-approvals.ts";
-import { checksLines, commandsRun } from "./run-evidence.ts";
+import { checksLines, generationEvidence, sessionFileEntries } from "./run-evidence.ts";
 import {
 	markRunOutboxRelayed,
 	openRunInbox,
@@ -62,7 +57,6 @@ import {
 } from "./run-mailbox.ts";
 import { runShellTmp } from "./run-shell.ts";
 import {
-	describeWorkspace,
 	discardWorktree,
 	type IsolatedWorkspace,
 	materializeWorktree,
@@ -692,10 +686,6 @@ export async function executeRpcRun(
 			runDir: launch.runDir,
 		});
 	}
-	// Where it worked and what it changed there, as Git sees it rather than as the run says.
-	const workspaceLines = workspace ? await describeWorkspace(workspace, launch.runDir) : [];
-	const workspaceNote = workspaceLines.length ? `\n${workspaceLines.join("\n")}` : "";
-
 	// Whatever it sent before it ended reaches its recipients before its Report.
 	relay();
 	const final = now();
@@ -709,9 +699,15 @@ export async function executeRpcRun(
 		controller.updateUsage(usage);
 		deps.usage(state?.sessionId ?? record.runId, usage);
 	}
-	const report = readRunReports(launch.runDir, (state?.reportSeq ?? 0) - 1).find(
-		({ seq }) => seq === state?.reportSeq,
-	);
+	const evidence = await generationEvidence(launch.runDir, record.generation, {
+		transcript: state?.sessionFile,
+		startedAt: queuedAt,
+	});
+	// Where it worked and what it changed there, as Git sees it rather than as the run says.
+	const workspaceLines = evidence.workspace?.lines ?? [];
+	const workspaceNote = workspaceLines.length ? `\n${workspaceLines.join("\n")}` : "";
+	// Its host says whether it stored one.
+	const report = state?.reportSeq === undefined ? undefined : evidence.report;
 	if (!terminated) {
 		sealRunInbox(launch.runDir, record.generation);
 		return {
@@ -767,7 +763,8 @@ export async function executeRpcRun(
 		"---",
 		`Outcome: ${outcome.status}${outcome.status === "completed" ? ": its pi settled its work without an error. What the run says above is its own claim; the runtime verified none of it." : `: ${cutReason(outcome.error)}.`}`,
 		`Process: exited with ${exited.exit.signal ? `signal ${exited.exit.signal}` : `code ${exited.exit.code}`}, after its Report was stored: ${NOTHING_TO_CLOSE}`,
-		...checksLines(launch.tools, commandsRun(entries ?? [], queuedAt)),
+		// A transcript that cannot be read shows no command.
+		...checksLines(launch.tools, "ran" in evidence.commands ? evidence.commands.ran : []),
 		...(workspace ? workspaceLines : ["Changes: none: it had no tool that changes files."]),
 		// A step of a chain is integrated with its chain, once the chain has completed.
 		...(workspace && outcome.status === "completed" && !launch.keepWorktree && existsSync(workspace.root)
@@ -852,14 +849,4 @@ async function endHostGroup(hostPid: number, contained: RunContainment | undefin
 		if (!(await until(gone, AbortSignal.timeout(KILL_WAIT_MS)))) return false;
 	}
 	return contained ? endRunProcesses(contained) : true;
-}
-
-/** The entries of the run's session, from its file; none before its pi wrote one. */
-export function sessionFileEntries(sessionFile: string): SessionEntry[] | undefined {
-	try {
-		const entries = parseSessionEntries(readFileSync(sessionFile, "utf8"));
-		return entries.filter((entry): entry is SessionEntry => entry.type !== "session");
-	} catch {
-		return undefined;
-	}
 }

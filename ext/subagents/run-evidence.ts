@@ -1,10 +1,87 @@
 /**
- * What a run's transcript shows it did, for its Report: the commands it ran and how each ended, as its pi recorded
- * them, never as the run's own text tells it.
+ * What the runtime saw of a Generation (GLOSSARY: Evidence), from what it left on disk: its Report and outcome, the
+ * commands its transcript shows it ran and how each ended, as its pi recorded them, never as the run's own text tells
+ * it, and where it worked and what it changed there, as Git sees it. Facts only: each reader words them its own way.
  */
 
-import type { SessionEntry } from "@earendil-works/pi-coding-agent";
+import { readFileSync } from "node:fs";
+import { parseSessionEntries, type SessionEntry } from "@earendil-works/pi-coding-agent";
+import { generationDefinition } from "./generation-state.ts";
 import { sanitizeReportText, textOf, truncateUtf8Safe } from "./results.ts";
+import { describeWorkspace } from "./run-worktree.ts";
+import { readRunReports, type StoredRunReport, storedRunReportTextPath } from "./storage.ts";
+
+/** What the runtime saw of a Generation, apart from its Report's claim. */
+export interface GenerationEvidence {
+	/** Its Report, with its outcome: the last one stored with its number; none when it stored none. */
+	report?: StoredRunReport;
+	/** Where its Report's full text is, as its run stored it. */
+	reportFile?: string;
+	/** The tools it was held to, as its definition stored them; none when that cannot be read. */
+	tools: string[];
+	/**
+	 * The commands its transcript shows it ran, or why they are not known: its transcript could not be read, or its run
+	 * was resumed since, both Generations stored before Admission kept when it admitted each.
+	 */
+	commands: { ran: RunCommand[] } | { unknown: "unreadable" | "resumed" };
+	/** A Generation that edits: its worktree, and where it worked and what it changed there, as Git sees it. */
+	workspace?: { root: string; lines: string[] };
+}
+
+/** A Generation's Report: the last one stored with its number; none when it stored none. */
+export function generationReport(runDir: string, generation: number): StoredRunReport | undefined {
+	return readRunReports(runDir, 0)
+		.filter((report) => report.generation === generation)
+		.at(-1);
+}
+
+/**
+ * What generation `generation` of the run kept in `runDir` left on disk. Its commands are those from its admission to
+ * the next Generation's, or to the end of `transcript`, the run's session file. A Generation stored before Admission
+ * kept when it admitted it counts them from `startedAt`, its reader's own start for it.
+ */
+export async function generationEvidence(
+	runDir: string,
+	generation: number,
+	known: { transcript?: string; startedAt?: number },
+): Promise<GenerationEvidence> {
+	const report = generationReport(runDir, generation);
+	const definition = generationDefinition(runDir, generation);
+	const next = generationDefinition(runDir, generation + 1);
+	const isolated = definition?.workspace;
+	const workspace = isolated && { root: isolated.root, lines: await describeWorkspace(isolated, runDir) };
+	return {
+		...(report ? { report, reportFile: storedRunReportTextPath(runDir, report.seq) } : {}),
+		tools: definition?.tools ?? [],
+		commands: commandsOf(
+			known.transcript,
+			definition?.admittedAt ?? (next ? undefined : (known.startedAt ?? 0)),
+			next?.admittedAt,
+		),
+		...(workspace ? { workspace } : {}),
+	};
+}
+
+/** The commands in `transcript` from `since` on, before `until` when given; unknown when `since` is. */
+function commandsOf(
+	transcript: string | undefined,
+	since: number | undefined,
+	until: number | undefined,
+): GenerationEvidence["commands"] {
+	if (since === undefined) return { unknown: "resumed" };
+	const entries = transcript ? sessionFileEntries(transcript) : undefined;
+	return entries ? { ran: commandsRun(entries, since, until) } : { unknown: "unreadable" };
+}
+
+/** The entries of the run's session, from its file; none before its pi wrote one. */
+export function sessionFileEntries(sessionFile: string): SessionEntry[] | undefined {
+	try {
+		const entries = parseSessionEntries(readFileSync(sessionFile, "utf8"));
+		return entries.filter((entry): entry is SessionEntry => entry.type !== "session");
+	} catch {
+		return undefined;
+	}
+}
 
 /** A command the run's shell ran, and how it ended. */
 export interface RunCommand {
@@ -78,9 +155,16 @@ function endedBy(text: string): string {
 	return `failed: ${line(last) || "no output"}`;
 }
 
-/** One line for a run among others, as a batch or chain lists it: how many commands it ran, how many did not exit 0. */
-export function checksSummary(tools: readonly string[], commands: readonly RunCommand[]): string {
+/**
+ * One line for a run among others, as a batch or chain lists it: how many commands it ran, how many did not exit 0,
+ * or why that is not known.
+ */
+export function checksSummary({ tools, commands: checks }: Pick<GenerationEvidence, "tools" | "commands">): string {
+	if ("unknown" in checks && checks.unknown === "unreadable")
+		return "Checks: unknown: its transcript could not be read.";
 	if (!tools.includes("bash")) return "Checks: none ran: it had no tool that runs commands.";
+	if ("unknown" in checks) return "Checks: unknown: its run was resumed since.";
+	const commands = checks.ran;
 	if (commands.length === 0) return "Checks: its transcript shows it ran no commands.";
 	const failed = commands.filter(({ ended }) => !ended.startsWith("exit 0")).length;
 	return `Checks: its transcript shows ${commands.length} command${commands.length === 1 ? "" : "s"}, ${failed} not ending with exit 0.`;

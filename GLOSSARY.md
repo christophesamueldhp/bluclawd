@@ -34,6 +34,10 @@ _Avoid_: pipeline, batch (for independent runs)
 A run's account of its work, given to its orchestrator when that work settles. Further work in the same run can produce another report, including after resume.
 _Avoid_: result (as if it came once), final answer
 
+**Evidence**:
+What the runtime saw of a Generation, apart from its Report's claim: its outcome, the checks it ran, where it worked and what it changed. It comes from what the Generation left on disk (its transcript, its stored outcome and its worktree as Git sees it), never from the run's own text.
+_Avoid_: account (the Report's word), proof
+
 **Settled**:
 A Generation's work is settled when its pi is idle with nothing queued and its inbox is sealed; a Batch or Chain is settled when every member is.
 _Avoid_: idle (for a pi whose inbox is still open)

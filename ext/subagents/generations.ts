@@ -18,6 +18,7 @@ import { inParentScope, type ParentScope, type ParentScopeChecks, type ScopedRun
 import { buildSubagentResultEnvelope, MAX_PARENT_REPORT_BYTES, type SubagentResultDetails } from "./results.ts";
 import { executeRpcRun, type RunSlots } from "./rpc-runs.ts";
 import { NETWORK_ACCESS, type RunApprovalAnswer, type RunApprovalRequest } from "./run-approvals.ts";
+import { generationReport } from "./run-evidence.ts";
 import { userInstructionNote } from "./run-intervention.ts";
 import { postToRun, whenGiven } from "./run-mailbox.ts";
 import { formatRunLabel, isTerminalSubagentStatus, type SubagentRunRecord, SubagentRunScheduler } from "./runs.ts";
@@ -330,9 +331,7 @@ export function createGenerations(deps: GenerationDeps) {
 	 */
 	const retellReport = (run: Readonly<SubagentRunRecord>) => {
 		const agentDir = deps.agentDir();
-		const report = readRunReports(subagentRunDir(agentDir, run.parentSessionId, run.runId), 0)
-			.filter(({ generation }) => generation === run.generation)
-			.at(-1);
+		const report = generationReport(subagentRunDir(agentDir, run.parentSessionId, run.runId), run.generation);
 		if (report) deps.scope.notify(run, noticeOf(agentDir, run, report));
 	};
 
