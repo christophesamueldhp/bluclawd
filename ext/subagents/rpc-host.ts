@@ -57,6 +57,8 @@ export interface RpcHostState {
 	hostPid: number;
 	/** The run's generation it runs; absent in a state stored before hosts said. */
 	generation?: number;
+	/** When the host started (`processStarted`), which tells it from a process given its pid since; absent when unread. */
+	hostStarted?: string;
 	/** Stored as soon as the run's pi is spawned. */
 	childPid?: number;
 	/** The run's session; pi writes the file only once it holds a message. */

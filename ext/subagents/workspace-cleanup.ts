@@ -39,8 +39,14 @@ export function registerWorkspaceCleanup(
 			/** Why the run may not lose its worktree now: it, or a Resume of it, still runs. */
 			const busy = () => {
 				const now = deps.directory.find(scope, record.runId);
-				if (now?.state === "finished" && !runProcessesLeft(runDir)) return;
-				return `${label} is still ${now?.record.status ?? record.status}: stop it, or let it finish, before cleaning up its workspace.`;
+				if (now?.state !== "finished") {
+					return `${label} is still ${now?.record.status ?? record.status}: stop it, or let it finish, before cleaning up its workspace.`;
+				}
+				const left = runProcessesLeft(runDir);
+				return (
+					left &&
+					`processes of ${label} still run (process group ${left.group}): stop them, or wait for them to end, before cleaning up its workspace.`
+				);
 			};
 			const running = busy();
 			if (running) return tell(running, "warning");

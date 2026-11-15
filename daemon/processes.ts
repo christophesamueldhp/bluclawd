@@ -94,6 +94,29 @@ function runs(target: number, fresh: boolean, read: () => string[] | undefined):
 	return states.length === 0 && signalled(target);
 }
 
+/**
+ * When process `pid` started, as a token that tells it apart from a process given its pid later; none once it is gone,
+ * or when it cannot be read. Linux gives it in /proc, in clock ticks since boot. `ps` gives it to the second, in a
+ * locale and zone fixed so that a token stored by one process compares with another's reading.
+ */
+export function processStarted(pid: number): string | undefined {
+	if (PROC) {
+		try {
+			const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+			return stat.slice(stat.lastIndexOf(")") + 2).split(" ")[19] || undefined;
+		} catch {
+			return undefined;
+		}
+	}
+	const listed = spawnSync("ps", ["-o", "lstart=", "-p", String(pid)], {
+		encoding: "utf8",
+		timeout: 2000,
+		env: { ...process.env, LC_ALL: "C", TZ: "UTC" },
+	});
+	if (listed.error || listed.signal || listed.status !== 0 || listed.stderr) return undefined;
+	return listed.stdout.trim() || undefined;
+}
+
 /** Whether process `pid` runs: it exists, maybe another user's, and is no zombie. */
 export function processAlive(pid: number): boolean {
 	return runs(pid, false, () => processStates(pid));

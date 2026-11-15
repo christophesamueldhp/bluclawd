@@ -44,7 +44,8 @@ describe("workspace cleanup", () => {
 		const admitted = { provider: "faux", modelId: "faux", thinkingLevel: "off" };
 		const definition = { tools: [], deny: [], cwd: repo, instructions: "", admitted, workspace };
 		admitGeneration(runDir, 0, definition as unknown as RunDefinition);
-		hostEnded(runDir, await leaderlessGroup());
+		const group = await leaderlessGroup();
+		hostEnded(runDir, group);
 
 		let handler: ((args: string, ctx: unknown) => Promise<void>) | undefined;
 		const pi = {
@@ -62,7 +63,10 @@ describe("workspace cleanup", () => {
 		const notify = vi.fn();
 		await handler?.("w", { ui: { notify } });
 
-		expect(notify).toHaveBeenCalledWith(expect.stringMatching(/^"w" \(sub_left\) is still/), "warning");
+		expect(notify).toHaveBeenCalledWith(
+			`processes of "w" (sub_left) still run (process group ${group}): stop them, or wait for them to end, before cleaning up its workspace.`,
+			"warning",
+		);
 		expect(git("worktree", "list", "--porcelain")).toContain(`worktree ${workspace.root}\n`);
 	});
 });
