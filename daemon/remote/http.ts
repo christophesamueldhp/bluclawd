@@ -33,11 +33,12 @@ import {
 	type PhoneError,
 	type PhoneSession,
 	phoneSession,
+	REFUSED,
 	type StatusView,
 	type TranscriptRead,
 } from "./phone-control.ts";
 import type { StatuslineSession, StatusSpan } from "./pistatusline.ts";
-import { remoteSessions } from "./sessions.ts";
+import { chatActions, remoteSessions } from "./sessions.ts";
 import { launchUsable, type SessionSpec } from "./spawn.ts";
 import type { StatusLine } from "./statusline.ts";
 import { loadImage, loadOutput, loadTranscript } from "./transcript.ts";
@@ -278,6 +279,7 @@ function imagesIn(body: Record<string, unknown>): PaneImage[] | undefined {
 }
 
 const PHONE_STATUS: Record<PhoneError, number> = {
+	pi_not_open: 409,
 	session_not_running: 409,
 	session_silent: 409,
 	session_running: 409,
@@ -436,10 +438,12 @@ async function handle(
 		if (id !== device.id) return json(res, 403, { error: "forbidden" });
 		return deps.store.revoke(id) ? json(res, 200, { ok: true }) : json(res, 404, { error: "unknown_device" });
 	}
-	// The Mac is the root: with no terminal showing pi there, nothing changes from here. Before any
-	// body is read, so a photo is not read only to be refused.
+	// The Mac is the root: with no terminal showing pi there, nothing changes from here, as the Chat
+	// verdict refuses every action that changes something. Before any body is read, so a photo is not
+	// read only to be refused.
 	if (path.startsWith("/api/sessions") && req.method !== "GET" && !deps.terminalOpen()) {
-		return json(res, 409, { error: "pi_not_open" });
+		const error = REFUSED.no_terminal;
+		return json(res, PHONE_STATUS[error], { error });
 	}
 	if (path === "/api/sessions/past" && req.method === "GET") {
 		const cwd = expandHome(url.searchParams.get("cwd") ?? "");
@@ -477,7 +481,12 @@ async function handle(
 		return json(res, 201, { pane, id });
 	}
 	if (path === "/api/sessions" && req.method === "GET") {
-		return json(res, 200, { sessions: remoteSessions(deps.listInstances()), terminalOpen: deps.terminalOpen() });
+		const terminalOpen = deps.terminalOpen();
+		const sessions = remoteSessions(deps.listInstances()).map((s) => ({
+			...s,
+			actions: chatActions(s.verdict, terminalOpen),
+		}));
+		return json(res, 200, { sessions, terminalOpen });
 	}
 	if (path === "/api/sessions" && req.method === "POST") {
 		const body = await readJson(req);

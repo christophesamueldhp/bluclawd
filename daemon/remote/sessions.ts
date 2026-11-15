@@ -34,12 +34,50 @@ export interface RemoteSession {
 	/** Its pane's pi stopped beating while tmux still has its pane (the Mac slept, pi is held up):
 	 *  shown as it last beat, alive. */
 	silent?: true;
+	/** Kept as it was for an older phone: `actions.message` without the terminal. */
 	verdict: ChatVerdict;
+	/** Only in the phone's list (http.ts), which a phone from before it does without. */
+	actions?: ChatActions;
 }
 
 /** Whether a Chat may act on a row (its pane's pi takes a message), and why not: only a live pane's
  *  row may. A Silent pane's takes nothing until it answers. */
 export type ChatVerdict = { act: true } | { act: false; reason: "silent" | "starting" | "not_running" };
+
+/** The kinds of action a Chat takes on a row. A read (its transcript, status, a task's output) is none. */
+export type ChatAction = "message" | "settings" | "rename" | "pin" | "delete" | "tasks";
+
+/** Whether a Chat may take one kind of action on a row, and why not: the row's reason, `running`
+ *  (a pane's row is deleted only once its pi quits) or `no_terminal` (no terminal on the Mac shows pi). */
+export type ActionVerdict =
+	| { act: true }
+	| { act: false; reason: Extract<ChatVerdict, { act: false }>["reason"] | "running" | "no_terminal" };
+
+export type ChatActions = Record<ChatAction, ActionVerdict>;
+
+/**
+ * The Chat verdict on each kind of action, from the row's and whether a terminal on the Mac shows
+ * pi: what the phone's list says, and what phone control and the HTTP gate refuse.
+ */
+export function chatActions(verdict: ChatVerdict, terminalOpen: boolean): ChatActions {
+	if (!terminalOpen) {
+		const closed = { act: false, reason: "no_terminal" } as const;
+		return { message: closed, settings: closed, rename: closed, pin: closed, delete: closed, tasks: closed };
+	}
+	const allowed = { act: true } as const;
+	const silent = verdict.act === false && verdict.reason === "silent";
+	return {
+		// Each goes to the row's pi.
+		message: verdict,
+		settings: verdict,
+		tasks: verdict,
+		// A pane's pi names its session; a stored or starting row is the daemon's to name.
+		rename: silent ? verdict : allowed,
+		pin: allowed,
+		// A pane's row comes back with its next heartbeat: its pi has to quit first.
+		delete: verdict.act || silent ? { act: false, reason: "running" } : allowed,
+	};
+}
 
 function sessionRows(instances: InstanceSummary[]): AgentRow[] {
 	return collectRows(instances, undefined).filter((row) => !row.shell);

@@ -59,7 +59,7 @@ const reports = new Map<string, PaneReport>([
 	["busy", full],
 	["drafting", full],
 ]);
-const deps = { listInstances: () => instances, report: (id: string) => reports.get(id) };
+const deps = { listInstances: () => instances, report: (id: string) => reports.get(id), terminalOpen: () => true };
 
 function session(id: string): PhoneSession {
 	const found = phoneSession(deps, id);
@@ -334,7 +334,10 @@ describe("phone control", () => {
 			{ id: "starting", status: "starting", cwd: "/p", sessionFile: "/s/starting.jsonl" },
 		];
 		const at = (id: string) => {
-			const found = phoneSession({ listInstances: () => rowsByState, report: () => full }, id);
+			const found = phoneSession(
+				{ listInstances: () => rowsByState, report: () => full, terminalOpen: () => true },
+				id,
+			);
 			if (!found) throw new Error(`no session ${id}`);
 			return found;
 		};
