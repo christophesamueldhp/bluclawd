@@ -7,11 +7,25 @@
  * and process-wide like the jobs (`/tasks` is read from other extensions' module graphs).
  */
 
-import type { WakeupEnd } from "../../daemon/wakeups.ts";
+import type { SessionShutdownEvent, SessionStartEvent } from "@earendil-works/pi-coding-agent";
+import { piCommand } from "../../daemon/tmux.ts";
+import {
+	cancelledByDelete,
+	forgetCancelled,
+	type HeldWakeups,
+	type ProcessId,
+	pendingWakeups,
+	WAKEUP_END_ENTRY,
+	WAKEUP_ENTRY,
+	type WakeupEnd,
+	type WakeupEndRecord,
+	type WakeupRecord,
+} from "../../daemon/wakeups.ts";
 import { notifyListeners, sharedRef } from "../_shared/global-state.ts";
 import { turnOnHint } from "../_shared/notice-once.ts";
 import { randomTaskId } from "./background-bash.ts";
 import { escapeXml, notificationContent, type OutgoingMessage, taskNotification } from "./monitor-events.ts";
+import { deliverOrHold } from "./notification-hold.ts";
 
 const MINUTE_MS = 60_000;
 const MAX_AHEAD_MS = 24 * 60 * MINUTE_MS;
@@ -48,14 +62,7 @@ export function wakeupDue(input: { delay?: number; at?: string }, now: number): 
 	return { ok: true, dueAt };
 }
 
-export {
-	pendingWakeups,
-	WAKEUP_END_ENTRY,
-	WAKEUP_ENTRY,
-	type WakeupEnd,
-	type WakeupEndRecord,
-	type WakeupRecord,
-} from "../../daemon/wakeups.ts";
+export { WAKEUP_END_ENTRY, WAKEUP_ENTRY, type WakeupRecord } from "../../daemon/wakeups.ts";
 
 export function isWakeupTaskId(id: string): boolean {
 	return /^w[0-9a-z]{8}$/.test(id);
@@ -166,7 +173,7 @@ function wakeupDate(at: number): string {
 }
 
 /** The notice that starts a wake-up's turn at `now`: the agent's own, with its due time and prompt. */
-export function wakeupMessage(wakeup: Wakeup, now: number): OutgoingMessage<WakeupMessageDetails> {
+function wakeupMessage(wakeup: Wakeup, now: number): OutgoingMessage<WakeupMessageDetails> {
 	// One a minute or more past due is called late, whatever held it up: a closed session, or a long turn.
 	const when =
 		now - wakeup.dueAt < MINUTE_MS
@@ -195,4 +202,216 @@ export function wakeupToolOffNotice(count: number): string {
 /** What schedule_wakeup answers: the task id, and when it falls due. */
 export function wakeupScheduledText(wakeup: Wakeup): string {
 	return `Wake-up ${wakeup.id} scheduled for ${wakeupDate(wakeup.dueAt)}. It starts a turn with its prompt then; cancel it with task_stop.`;
+}
+
+/** The open session, as its wake-ups' lifecycle reads it: pi's extension context. */
+export interface WakeupSession {
+	mode: string;
+	isIdle(): boolean;
+	sessionManager: {
+		getSessionId(): string;
+		getSessionFile(): string | undefined;
+		getCwd(): string;
+		getSessionName(): string | undefined;
+		getEntries(): Parameters<typeof pendingWakeups>[0];
+	};
+}
+
+/** What a hand-off asks of the daemon's client. */
+export interface WakeupDaemon {
+	getDaemonInfo(): Promise<{ running: boolean; buildId?: string }>;
+	restartDaemon(): Promise<unknown>;
+	ensureDaemon(): Promise<unknown>;
+	holdWakeups(held: HeldWakeups): Promise<void>;
+}
+
+interface WakeupLifecycleDeps {
+	/** The open session; none before it starts or once it has shut down. */
+	session: () => WakeupSession | undefined;
+	/** Appends an entry to the session log. */
+	append: (customType: string, data: WakeupRecord | WakeupEndRecord) => void;
+	/** Sends the notice that starts a wake-up's turn. */
+	send: (message: OutgoingMessage<WakeupMessageDetails>) => void;
+	/** A client of the daemon, for one hand-off. */
+	daemon: () => WakeupDaemon;
+	/** This pi's build of the daemon: a running one of another build is replaced. */
+	buildId: () => string;
+	/** This pi's process, as the daemon tells it apart from a later one; undefined when it cannot be told. */
+	holder: () => ProcessId | undefined;
+	now: () => number;
+	/** Whether pi was ended by a signal nobody asked for, which ADR-0009 counts as a crash. Asked only of a quit. */
+	killedBySignal: () => Promise<boolean>;
+}
+
+type ShutdownOutcome = "keep" | "cancel";
+
+/**
+ * What each reason pi gives at shutdown does to the session's wake-ups (ADR-0009): those that end the session cancel
+ * them; a reload, a `/resume` of the session itself, and a crash leave them pending.
+ */
+const AT_SHUTDOWN: Record<
+	SessionShutdownEvent["reason"],
+	(shutdown: {
+		/** Whether a `/resume` opens the session itself. */
+		sameSession: boolean;
+		killedBySignal: () => Promise<boolean>;
+	}) => ShutdownOutcome | Promise<ShutdownOutcome>
+> = {
+	reload: () => "keep",
+	resume: ({ sameSession }) => (sameSession ? "keep" : "cancel"),
+	// The user's quit ends the session; a signal nobody sent is a crash.
+	quit: async ({ killedBySignal }) => ((await killedBySignal()) ? "keep" : "cancel"),
+	new: () => "cancel",
+	fork: () => "cancel",
+};
+
+/**
+ * The pi side of one session instance's wake-ups (ADR-0009): scheduling and recording one, firing it once due and the
+ * session idle, recording each end, restoring them from the log, handing the pending set to the daemon after every
+ * change, and keeping or cancelling them at shutdown. Each of the session's entries in the registry leaves it at
+ * shutdown, released or cancelled: it holds callbacks bound to this instance.
+ */
+export function wakeupLifecycle(deps: WakeupLifecycleDeps) {
+	const owner = () => deps.session()?.sessionManager.getSessionId();
+
+	const dueWakeup = () => {
+		const sessionId = owner();
+		return sessionId === undefined ? undefined : wakeups.list(sessionId).find((wakeup) => wakeup.dueAt <= deps.now());
+	};
+	/**
+	 * Starts the turn of the session's earliest due wake-up once the session is idle. Until then it stays pending,
+	 * listed and cancellable, rather than in pi's queue, which Esc clears. A send held by `/tasks` checks again when it
+	 * goes out.
+	 */
+	const fireDue = () => {
+		if (!dueWakeup()) return;
+		deliverOrHold(() => {
+			const due = dueWakeup();
+			if (!due || !deps.session()?.isIdle()) return;
+			wakeups.take(due.id, undefined, "fired");
+			deps.send(wakeupMessage(due, deps.now()));
+		});
+	};
+
+	let handing = Promise.resolve();
+	/**
+	 * Hands the daemon the session's pending wake-ups each time they change, so it can take one for the session once
+	 * this pi is gone. Sent in order; one lost on the way is made up for by the session log, which the daemon reads
+	 * again before it acts. Only pi's TUI hands off: the daemon reopens a session in it.
+	 */
+	const handOff = () => {
+		const session = deps.session();
+		const sessionFile = session?.sessionManager.getSessionFile();
+		const holder = deps.holder();
+		if (session?.mode !== "tui" || !sessionFile || holder === undefined) return;
+		// Taken now: by the time it is sent, a shutdown may have emptied the registry.
+		const held: HeldWakeups = {
+			sessionFile,
+			cwd: session.sessionManager.getCwd(),
+			label: session.sessionManager.getSessionName(),
+			holder,
+			launch: { command: piCommand() },
+			wakeups: wakeups
+				.list(session.sessionManager.getSessionId())
+				.map(({ id, prompt, dueAt, scheduledAt }) => ({ id, prompt, dueAt, scheduledAt })),
+		};
+		handing = handing
+			.then(async () => {
+				const client = deps.daemon();
+				// Scheduling one starts the daemon, as agent view does; one not running holds none to take back. One of an
+				// older build is replaced, as agent view replaces it: it would not know a hand-off.
+				const info = await client.getDaemonInfo();
+				if (!info.running && held.wakeups.length === 0) return;
+				if (info.running && info.buildId !== deps.buildId()) await client.restartDaemon();
+				else if (!info.running) await client.ensureDaemon();
+				await client.holdWakeups(held);
+			})
+			.catch(() => {});
+	};
+
+	const recordEnd = (wakeup: Pick<Wakeup, "id">, end: WakeupEnd) => {
+		deps.append(WAKEUP_END_ENTRY, { id: wakeup.id, end });
+		handOff();
+	};
+
+	const cancelAll = () => {
+		const sessionId = owner();
+		if (sessionId === undefined) return;
+		for (const wakeup of wakeups.list(sessionId)) wakeups.take(wakeup.id, sessionId);
+	};
+
+	return {
+		/** schedule_wakeup: schedules one, records it in the log and hands off; throws what the model is told. */
+		schedule(params: { prompt: string; delay?: number; at?: string }): Wakeup {
+			const prompt = params.prompt.trim();
+			if (!prompt) throw new Error("Missing required parameter: prompt");
+			const due = wakeupDue(params, deps.now());
+			if (!due.ok) throw new Error(due.error);
+			const wakeup = wakeups.schedule({
+				owner: owner(),
+				prompt,
+				dueAt: due.dueAt,
+				onDue: fireDue,
+				onEnd: recordEnd,
+			});
+			deps.append(WAKEUP_ENTRY, {
+				id: wakeup.id,
+				prompt,
+				dueAt: wakeup.dueAt,
+				scheduledAt: wakeup.scheduledAt,
+			});
+			handOff();
+			return wakeup;
+		},
+
+		/**
+		 * At session start: the session's pending wake-ups, rebuilt from its log; overdue ones fall due at once. A fork's
+		 * new session gets none: those it copied are recorded cancelled, so a later `/resume` of it revives none either.
+		 * Nor do those a Delete cancelled, which the log records now. This pi holds the rest, and says so to the daemon,
+		 * which leaves them to it while it runs. Returns how many it holds.
+		 */
+		restore(reason: SessionStartEvent["reason"]): number {
+			const session = deps.session();
+			if (!session) return 0;
+			const sessionId = session.sessionManager.getSessionId();
+			for (const record of pendingWakeups(session.sessionManager.getEntries())) {
+				const deleted = cancelledByDelete(record.id);
+				if (reason === "fork" || deleted) {
+					recordEnd(record, "cancelled");
+					// A fork records it in its own log, not in the deleted session's.
+					if (deleted && reason !== "fork") forgetCancelled(record.id);
+				} else {
+					wakeups.schedule({
+						owner: sessionId,
+						prompt: record.prompt,
+						dueAt: record.dueAt,
+						restore: record,
+						onDue: fireDue,
+						onEnd: recordEnd,
+					});
+				}
+			}
+			const stored = wakeups.list(sessionId).length;
+			if (stored > 0) handOff();
+			return stored;
+		},
+
+		/** The running turn has ended, and nothing else continues it: a due wake-up starts the next. */
+		settled: fireDue,
+
+		/** Cancels the session's wake-ups: tree navigation ends them. */
+		cancel: cancelAll,
+
+		/** At shutdown: keeps the session's wake-ups pending for the next instance, or cancels them, as AT_SHUTDOWN says. */
+		async shutdown(event: Pick<SessionShutdownEvent, "reason" | "targetSessionFile">): Promise<ShutdownOutcome> {
+			const sessionId = owner();
+			const outcome = await AT_SHUTDOWN[event.reason]({
+				sameSession: event.targetSessionFile === deps.session()?.sessionManager.getSessionFile(),
+				killedBySignal: deps.killedBySignal,
+			});
+			if (outcome === "cancel") cancelAll();
+			else if (sessionId !== undefined) wakeups.release(sessionId);
+			return outcome;
+		},
+	};
 }
