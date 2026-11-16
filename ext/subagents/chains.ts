@@ -50,6 +50,7 @@ import {
 	storeManifest,
 } from "./settling.ts";
 import {
+	chainResultPath,
 	getSubagentsRootDir,
 	readPersistedRunRecord,
 	storedRunReportTextPath,
@@ -66,11 +67,6 @@ const bytes = (text: string) => Buffer.byteLength(text, "utf8");
 /** Where a chain's manifest is kept: beside its steps' run directories. */
 function chainManifestPath(agentDir: string, parentSessionId: string, chain: string): string {
 	return join(getSubagentsRootDir(agentDir), parentSessionId, "chains", `${chain}.md`);
-}
-
-/** Where a settled chain's {@link ChainResultDetails} are kept. */
-export function chainResultPath(agentDir: string, parentSessionId: string, chain: string): string {
-	return join(getSubagentsRootDir(agentDir), parentSessionId, "chain-results", `${chain}.json`);
 }
 
 /** What became of a step: it ran, or was refused or stopped before it started, or never got its turn. */

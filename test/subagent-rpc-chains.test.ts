@@ -16,7 +16,7 @@ import {
 	systemPrompt,
 	toolNames,
 } from "./helpers/real-pi.ts";
-import { storedRuns } from "./helpers/run-files.ts";
+import { runDirOf, storedRuns } from "./helpers/run-files.ts";
 import { waitFor } from "./helpers/wait-for.ts";
 
 /** Every run the orchestrator stored, as its record. */
@@ -516,6 +516,164 @@ describe.skipIf(!hasTmux)("a chain of RPC runs", () => {
 			// Unchanged once the chain settled, it went, as any run's unchanged worktree does.
 			expect(aggregate).toMatch(/^Workspace: .+, removed: it held no change since its baseline/m);
 			expect(existsSync(String(w1?.cwd))).toBe(false);
+		},
+	);
+});
+
+describe.skipIf(!hasTmux)("a plain Resume of a step of a chain that settled", () => {
+	let pi: RealPi | undefined;
+	afterEach(async () => {
+		await pi?.stop();
+		pi = undefined;
+	});
+
+	/** A chain of two writers, "a" then "b", in pkg. */
+	const chainOfTwo = { chain: ["a", "b"].map((name) => ({ agent: writer, name, cwd: "pkg", task: "Do the step." })) };
+
+	// Four pis one after another (a, b, then b's two Resumes): a readiness bound for each to start, and one for the rest.
+	it(
+		"releases the chain's worktree when it ends unchanged, recorded by the first step, and a later Resume makes it again",
+		{ timeout: 5 * readinessMs },
+		async () => {
+			const real = await startOrchestrator();
+			pi = real;
+			repository(real.cwd, { "pkg/a.txt": "one\n" });
+			real.script("main", [
+				{ tool: "subagent", args: chainOfTwo },
+				{ text: "read the chain" },
+				{ tool: "subagent_resume", args: { agent: "b", task: "Look again." } },
+				{ text: "waiting" },
+				{ text: "noted" },
+				{ tool: "subagent_resume", args: { agent: "b", task: "Read a.txt." } },
+				{ text: "waiting" },
+				{ text: "noted" },
+			]);
+			real.script("a", [{ text: "Nothing to change." }]);
+			real.script("b", [
+				{ text: "Nothing to change." },
+				{ text: "Still nothing." },
+				{ tool: "read", args: { path: "a.txt" } },
+				{ text: "Read it." },
+			]);
+			const pane = real.start(["--", "delegate"]);
+			await started(real, "a");
+			await started(real, "b");
+			const settled = await real.waitForRequests("main", 2);
+			const [aggregate] = toolResults(settled[1]);
+			const root = /^Workspace: (.+?), removed: it held no change/m.exec(aggregate)?.[1] ?? "";
+			expect(root).not.toBe("");
+
+			real.tmux.sendKeys(pane, ["resume b", "Enter"]);
+			await started(real, "b", 1);
+			const resumed = await real.waitForRequests("main", 5);
+			const report = conversation(resumed[4]).at(-1)?.text ?? "";
+			expect(report).toContain(
+				`Workspace: ${root}, removed: it held no change since its baseline, from which a Resume makes it again.`,
+			);
+			expect(report).not.toContain("Integration:");
+			expect(existsSync(root)).toBe(false);
+			expect(existsSync(join(runDirOf(real.agentDir, "a"), "workspace-removed.json"))).toBe(true);
+			expect(existsSync(join(runDirOf(real.agentDir, "b"), "workspace-removed.json"))).toBe(false);
+
+			real.tmux.sendKeys(pane, ["again", "Enter"]);
+			await started(real, "b", 2);
+			await real.waitForRequests("main", 8);
+			expect(toolResults(real.requests("b")[3])).toEqual(["one\n"]);
+		},
+	);
+
+	// Three pis one after another (a, b, then b's Resume): a readiness bound for each to start, and one for the rest.
+	it(
+		"keeps the worktree it changed, and offers to integrate the chain, never the step alone",
+		{ timeout: 4 * readinessMs },
+		async () => {
+			const real = await startOrchestrator();
+			pi = real;
+			const repo = real.cwd;
+			repository(repo, { "pkg/a.txt": "one\n" });
+			const steps = (chain: string): FauxStep[] => [
+				{ tool: "subagent", args: chainOfTwo },
+				{ text: "read the chain" },
+				{ tool: "subagent_resume", args: { agent: "b", task: "Write new.txt." } },
+				{ text: "waiting" },
+				{ tool: "subagent_integrate", args: { agent: chain } },
+				{ text: "integrated" },
+			];
+			real.script("main", steps("unknown"));
+			real.script("a", [{ text: "Nothing to change." }]);
+			real.script("b", [
+				{ text: "Nothing to change." },
+				{ tool: "write", args: { path: "new.txt", content: "v1\n" } },
+				{ text: "Wrote v1." },
+			]);
+			const pane = real.start(["--", "delegate"]);
+			await started(real, "a");
+			await started(real, "b");
+			const settled = await real.waitForRequests("main", 2);
+			const [aggregate] = toolResults(settled[1]);
+			const chain = /Chain (chain_\w+):/.exec(aggregate)?.[1] ?? "";
+			real.script("main", steps(chain));
+
+			real.tmux.sendKeys(pane, ["resume b", "Enter"]);
+			await started(real, "b", 1);
+			const main = await real.waitForRequests("main", 6);
+			const report = conversation(main[4]).at(-1)?.text ?? "";
+			expect(report).toMatch(/^Changes since its baseline: A pkg\/new\.txt$/m);
+			expect(report).toMatch(
+				new RegExp(`^Integration: once you have reviewed its changes, subagent_integrate "${chain}" applies`, "m"),
+			);
+			expect(report).not.toContain('subagent_integrate "b"');
+
+			expect(toolResults(main[5]).at(-1)).toMatch(/^Integration: applied A pkg\/new\.txt to /m);
+			expect(readFileSync(join(repo, "pkg", "new.txt"), "utf8")).toBe("v1\n");
+		},
+	);
+
+	// Three pis one after another (a, b, then b's Resume): a readiness bound for each to start, and one for the rest.
+	it(
+		"offers no Integration for a step of a chain that halted, though the step's Resume completed",
+		{ timeout: 4 * readinessMs },
+		async () => {
+			const real = await startOrchestrator();
+			pi = real;
+			repository(real.cwd, { "pkg/a.txt": "one\n" });
+			const steps = (chain: string): FauxStep[] => [
+				{ tool: "subagent", args: { ...chainOfTwo, background: true } },
+				{ text: "waiting" },
+				{ tool: "subagent_stop", args: { agent: chain } },
+				{ text: "stopped the chain" },
+				{ text: "read the chain" },
+				{ tool: "subagent_resume", args: { agent: "b", task: "Write new.txt." } },
+				{ text: "waiting" },
+				{ text: "noted" },
+			];
+			real.script("main", steps("unknown"));
+			real.script("a", [{ text: "Nothing to change." }]);
+			real.script("b", [
+				{ text: "Never.", until: join(real.cwd, "..", "never") },
+				{ tool: "write", args: { path: "new.txt", content: "v1\n" } },
+				{ text: "Wrote v1." },
+			]);
+			const pane = real.start(["--", "delegate"]);
+			const [, launched] = await real.waitForRequests("main", 2);
+			const chain = /chain_\w+/.exec(toolResults(launched)[0])?.[0] ?? "";
+			real.script("main", steps(chain));
+			await started(real, "a");
+			await real.waitForRequests("b", 1);
+
+			real.tmux.sendKeys(pane, ["stop", "Enter"]);
+			const halted = await real.waitForRequests("main", 5);
+			expect(conversation(halted[4]).map(({ text }) => text)).toContainEqual(
+				expect.stringMatching(new RegExp(`Chain ${chain}: 2 steps, halted at chain\\[1\\] \\("b"\\), cancelled`)),
+			);
+
+			real.tmux.sendKeys(pane, ["resume b", "Enter"]);
+			await started(real, "b", 1);
+			const main = await real.waitForRequests("main", 8);
+			const report = conversation(main[7]).at(-1)?.text ?? "";
+			expect(report).toMatch(/^Outcome: completed/m);
+			expect(report).toMatch(/^Changes since its baseline: A pkg\/new\.txt$/m);
+			expect(report).not.toContain("Integration:");
 		},
 	);
 });
