@@ -12,6 +12,7 @@ import { spawnSync } from "node:child_process";
 import {
 	chmodSync,
 	closeSync,
+	existsSync,
 	lstatSync,
 	mkdirSync,
 	openSync,
@@ -53,7 +54,7 @@ import {
 } from "./run-worktree.ts";
 import { formatRunLabel, isLegacyRun, isTerminalSubagentStatus, type SubagentRunRecord } from "./runs.ts";
 import { memberOutcome } from "./settling.ts";
-import { chainResultPath, readRunReports, subagentRunDir, writeAtomicPrivateFile } from "./storage.ts";
+import { readChainResult, readRunReports, subagentRunDir, writeAtomicPrivateFile } from "./storage.ts";
 
 /** How long a call waits for another Integration into the same repository, its check included, before it gives up. */
 const CHECK_TIMEOUT_MS = 10 * 60_000;
@@ -327,14 +328,9 @@ async function integrate(
 	}
 }
 
-/** A settled chain of this session, as it stored when it settled; undefined while it has not. */
-function settledChain(agentDir: string, scope: ParentScope, chain: string): ChainResultDetails | undefined {
-	try {
-		return JSON.parse(readFileSync(chainResultPath(agentDir, scope.parentSessionId, chain), "utf8"));
-	} catch {
-		return undefined;
-	}
-}
+/** Whether a halted chain left a worktree that `halted: true` could integrate as it is. */
+const leftWork = (chain: ChainResultDetails | undefined) =>
+	chain !== undefined && !chain.completed && chain.workspace !== undefined && existsSync(chain.workspace.root);
 
 /**
  * The run or chain named `name` of this session, with its worktree; or why there is none to integrate. A halted
@@ -347,11 +343,11 @@ function resolveTarget(deps: IntegrationDeps, scope: ParentScope, name: string, 
 		return record && { record, runDir: subagentRunDir(agentDir, scope.parentSessionId, record.runId) };
 	};
 	if (name.startsWith(CHAIN_ID_PREFIX)) {
-		const chain = settledChain(agentDir, scope, name);
+		const chain = readChainResult(agentDir, scope.parentSessionId, name);
 		if (!chain) return `No settled chain "${name}" in this session: a chain is integrated once it has completed.`;
 		const halted = chain.runs.filter((run) => run.status !== "completed");
 		if (!chain.completed && !asIs) {
-			return `Not integrated: chain ${name} halted (${halted.map((run) => `chain[${run.step}] ${run.status}`).join(", ")}). Its worktree keeps the partial work for you to inspect; it is not ready to integrate.${chain.workspace ? ` ${haltedIntegration(name)}` : ""}`;
+			return `Not integrated: chain ${name} halted (${halted.map((run) => `chain[${run.step}] ${run.status}`).join(", ")}). Its worktree keeps the partial work for you to inspect; it is not ready to integrate.${leftWork(chain) ? ` ${haltedIntegration(name)}` : ""}`;
 		}
 		const runs = chain.runs.flatMap((run) => (run.runId ? [runOf(run.runId)] : []));
 		const owner = runs[0];
@@ -368,7 +364,7 @@ function resolveTarget(deps: IntegrationDeps, scope: ParentScope, name: string, 
 			runs: known,
 			outcome: chain.completed
 				? `Run: chain ${name}, ${chain.runs.length} step${chain.runs.length === 1 ? "" : "s"}, every one completed as its runtime saw it; what they claim to have checked is their own claim.`
-				: `Run: chain ${name}, halted, integrated as it is at your request: ${stepsNow(deps, scope, chain)}. What its steps claim to have checked is their own claim.`,
+				: `Run: chain ${name}, halted, integrated as it is at your request: ${haltedStepsText(deps, scope, chain)}. What its steps claim to have checked is their own claim.`,
 			asIs: !chain.completed,
 		};
 	}
@@ -377,10 +373,10 @@ function resolveTarget(deps: IntegrationDeps, scope: ParentScope, name: string, 
 	const { record, runDir } = run;
 	const label = formatRunLabel(record);
 	if (record.chain) {
-		const chain = settledChain(agentDir, scope, record.chain);
-		const halted =
-			chain && !chain.completed && chain.workspace ? ` It halted. ${haltedIntegration(record.chain)}` : "";
-		return `${label} is a step of chain ${record.chain}: integrate the chain, "${record.chain}", once it has completed.${halted}`;
+		if (leftWork(readChainResult(agentDir, scope.parentSessionId, record.chain))) {
+			return `${label} is a step of chain ${record.chain}, which halted: its work is integrated with its chain's. ${haltedIntegration(record.chain)}`;
+		}
+		return `${label} is a step of chain ${record.chain}: integrate the chain, "${record.chain}", once it has completed.`;
 	}
 	const workspace = isLegacyRun(record) ? undefined : runWorkspace(runDir);
 	if (!workspace) return `${label} has no worktree of its own: it worked in ${record.cwd}, where its changes are.`;
@@ -397,11 +393,9 @@ function resolveTarget(deps: IntegrationDeps, scope: ParentScope, name: string, 
 	};
 }
 
-/**
- * Each step of a halted chain: its status when the chain settled, and, on the last step its run went through, what a
- * Resume since made of it, by the same latest Report Integration goes by.
- */
-function stepsNow(deps: IntegrationDeps, scope: ParentScope, chain: ChainResultDetails): string {
+/** Each step of a halted chain: its status at the halt, and what a Resume of its run made of it since. */
+function haltedStepsText(deps: IntegrationDeps, scope: ParentScope, chain: ChainResultDetails): string {
+	// Only a run's last step in the chain can have been resumed since.
 	const last = new Map(chain.runs.map(({ runId }, i) => [runId, i]));
 	return chain.runs
 		.map(({ step, runId, name, status }, i) => {
@@ -414,10 +408,7 @@ function stepsNow(deps: IntegrationDeps, scope: ParentScope, chain: ChainResultD
 		.join("; ");
 }
 
-/**
- * Why the run's work has not settled: it still runs, did not complete, or something of it may still run. `asIs`, a
- * step of a halted chain asked for as it is, need not have completed.
- */
+/** Why the run's work has not settled: it still runs, did not complete (unless `asIs`), or something of it may still run. */
 async function unsettled(
 	deps: IntegrationDeps,
 	scope: ParentScope,

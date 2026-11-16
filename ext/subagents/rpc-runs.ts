@@ -9,7 +9,7 @@
  * processes runs: its host's group, and every process its commands started (ext/sandbox/run-containment.ts).
  */
 
-import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DefaultPackageManager, SettingsManager } from "@earendil-works/pi-coding-agent";
@@ -73,7 +73,7 @@ import {
 	type SubagentRunOutcome,
 	type SubagentRunRecord,
 } from "./runs.ts";
-import { chainResultPath, readRunReports, storedRunReportTextPath } from "./storage.ts";
+import { readChainResult, readRunReports, storedRunReportTextPath } from "./storage.ts";
 import { sessionUsage } from "./usage.ts";
 
 /**
@@ -760,7 +760,7 @@ export async function executeRpcRun(
 	// A step of a chain is integrated with its chain once the chain has completed, a Resume of the step as well, or as
 	// it is after a halt at the user's request; a step running in its chain keeps its worktree for the next one.
 	const reviewed = (how: string) => `Integration: once you have reviewed its changes, ${how} to your checkout.`;
-	const completed = record.chain && chainCompleted(launch.agentDir, record.parentSessionId, record.chain);
+	const completed = record.chain && readChainResult(launch.agentDir, record.parentSessionId, record.chain)?.completed;
 	const integration =
 		!evidence.workspace ||
 		outcome.status !== "completed" ||
@@ -817,15 +817,6 @@ function boundedClaim(text: string, room: number, fullReport: string): string {
 	if (bytes(text) <= room) return text;
 	const cut = `\n[Cut short; its full Report: ${fullReport}]`;
 	return `${truncateUtf8Safe(text, Math.max(0, room - bytes(cut))).text}${cut}`;
-}
-
-/** Whether the chain settled with every step completed, as it stored when it settled; undefined while it has not. */
-function chainCompleted(agentDir: string, parentSessionId: string, chain: string): boolean | undefined {
-	try {
-		return JSON.parse(readFileSync(chainResultPath(agentDir, parentSessionId, chain), "utf8")).completed === true;
-	} catch {
-		return undefined;
-	}
 }
 
 /** Why its work failed, as the runtime saw it: a pi's stderr can run long. */
