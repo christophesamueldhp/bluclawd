@@ -21,7 +21,7 @@ import {
 	nameTaken,
 	type RunAdmission,
 } from "./admission.ts";
-import { generationDefinition, runWorkspace } from "./generation-state.ts";
+import { runWorkspace } from "./generation-state.ts";
 import type { ChainStep } from "./invocation.ts";
 import { GROUP_PROGRESS, NOT_APPROVAL, NOTHING_TO_CLOSE, type RunReports, whileRunning } from "./messages.ts";
 import type { ParentScopeChecks } from "./parent-scope.ts";
@@ -563,26 +563,11 @@ export function resumeChains(deps: ChainDeps, parentSessionId: string): void {
 }
 
 /**
- * An earlier step of a chain taken over, which completed in generation `generation` of its run: settled as a step
- * not taken over is.
+ * An earlier step of a chain taken over, which completed in Generation `generation` of its run: settled as a step
+ * not taken over is, even when a later Generation of its run has run since.
  */
-async function completedMember(
-	agentDir: string,
-	record: Readonly<SubagentRunRecord>,
-	generation: number,
-): Promise<BatchMember> {
-	const closed = { ...record, status: "closed" as const, generation };
-	if (record.generation === generation) return settledMember(agentDir, closed);
-	// Its record's start is a later generation's: this one's commands run from its admission to the next one's.
-	const runDir = subagentRunDir(agentDir, record.parentSessionId, record.runId);
-	const from = generationDefinition(runDir, generation)?.admittedAt;
-	const until = generationDefinition(runDir, generation + 1)?.admittedAt;
-	if (from !== undefined && until !== undefined) return settledMember(agentDir, { ...closed, startedAt: from }, until);
-	const member = await settledMember(agentDir, closed);
-	if (!member.checks || !generationDefinition(runDir, generation)?.tools.includes("bash")) return member;
-	// Stored before Admission kept when it admitted each generation: where this one's commands end is not known.
-	return { ...member, checks: "Checks: unknown: its run was resumed since." };
-}
+const completedMember = (agentDir: string, record: Readonly<SubagentRunRecord>, generation: number) =>
+	settledMember(agentDir, { ...record, status: "closed", generation });
 
 /** What the step after `before` is told of it: its outcome, where it worked, and its Report, cut to fit in `room`. */
 function handoffText(agentDir: string, before: { index: number; member: BatchMember }, room: number): string {

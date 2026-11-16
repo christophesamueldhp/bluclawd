@@ -7,7 +7,6 @@
  */
 
 import { existsSync } from "node:fs";
-import { generationDefinition } from "./generation-state.ts";
 import {
 	capReport,
 	fromRunText,
@@ -18,9 +17,7 @@ import {
 	whileRunning,
 } from "./messages.ts";
 import { type SubagentResultDetails, sanitizeReportText, truncateUtf8Safe } from "./results.ts";
-import { sessionFileEntries } from "./rpc-runs.ts";
-import { checksSummary, commandsRun } from "./run-evidence.ts";
-import { describeWorkspace } from "./run-worktree.ts";
+import { checksSummary, generationEvidence } from "./run-evidence.ts";
 import {
 	type AdmittedSubagentHandle,
 	formatRunLabel,
@@ -28,7 +25,6 @@ import {
 	type SubagentRunRecord,
 } from "./runs.ts";
 import {
-	readRunReports,
 	type StoredRunReport,
 	storedRunReportTextPath,
 	subagentReportPath,
@@ -276,34 +272,18 @@ export async function settleBatch(
 	);
 }
 
-/**
- * A final run as a member: its generation's Report, where it worked and what it changed, and the checks it ran, from
- * its record's start until `until` when given: the next generation's admission, when its run was resumed since.
- */
-export async function settledMember(
-	agentDir: string,
-	record: Readonly<SubagentRunRecord>,
-	until?: number,
-): Promise<BatchMember> {
+/** A final run as a member: what the runtime saw of its record's generation, and, once it reported, its checks. */
+export async function settledMember(agentDir: string, record: Readonly<SubagentRunRecord>): Promise<BatchMember> {
 	const runDir = subagentRunDir(agentDir, record.parentSessionId, record.runId);
-	const report = readRunReports(runDir, 0)
-		.filter(({ generation }) => generation === record.generation)
-		.at(-1);
-	const definition = generationDefinition(runDir, record.generation);
-	const isolated = definition?.workspace;
-	const workspace = isolated && { root: isolated.root, lines: await describeWorkspace(isolated, runDir) };
-	// What its transcript shows of this generation, which started when the scheduler started it.
-	const entries = report && record.transcriptPath ? sessionFileEntries(record.transcriptPath) : undefined;
-	const checks =
-		report &&
-		(entries
-			? checksSummary(definition?.tools ?? [], commandsRun(entries, record.startedAt ?? 0, until))
-			: "Checks: unknown: its transcript could not be read.");
+	const evidence = await generationEvidence(runDir, record.generation, {
+		transcript: record.transcriptPath,
+		startedAt: record.startedAt,
+	});
+	const { report, reportFile, workspace } = evidence;
 	return {
 		record,
-		...(report ? { report, reportFile: storedRunReportTextPath(runDir, report.seq) } : {}),
+		...(report ? { report, reportFile, checks: checksSummary(evidence) } : {}),
 		...(workspace ? { workspace } : {}),
-		...(checks ? { checks } : {}),
 	};
 }
 

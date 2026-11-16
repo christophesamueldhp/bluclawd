@@ -9,9 +9,10 @@ import {
 	startGeneration,
 } from "../ext/subagents/generation-protocol.ts";
 import type { RpcHostSpec } from "../ext/subagents/rpc-host.ts";
+import { generationReport } from "../ext/subagents/run-evidence.ts";
 import { openRunInbox, postToRun, readRunOutbox, sealedRunInbox } from "../ext/subagents/run-mailbox.ts";
 import type { RunRuntimeOutcome } from "../ext/subagents/runs.ts";
-import { readRunReports } from "../ext/subagents/storage.ts";
+import { readRunReports, storeRunReport } from "../ext/subagents/storage.ts";
 import { reportText } from "./helpers/run-files.ts";
 import { waitFor } from "./helpers/wait-for.ts";
 
@@ -72,7 +73,7 @@ let records: GenerationRecord[];
 let endings: (RunRuntimeOutcome | undefined)[];
 
 function start(
-	spec: Partial<Pick<RpcHostSpec, "prompt" | "sessionFile" | "model">> = {},
+	spec: Partial<Pick<RpcHostSpec, "prompt" | "sessionFile" | "model" | "generation">> = {},
 	shape: (pi: MemoryPi) => void = () => {},
 ): MemoryPi {
 	const pi = new MemoryPi();
@@ -329,5 +330,16 @@ describe("a Generation's protocol, on pi in memory", () => {
 			{ kind: "typed", text: "Also look in lib/.", seq: 2 },
 			{ ...message, seq: 3 },
 		]);
+	});
+
+	it("names, as the Report it stored, the one its Generation's evidence takes as its own", async () => {
+		storeRunReport(runDir, { text: "Earlier.", outcome: { status: "completed" }, generation: 0 });
+		openRunInbox(runDir, 1);
+		const pi = start({ generation: 1 });
+		await pi.work.started(STARTED);
+		await pi.settle("Resumed.");
+
+		expect(records.at(-1)?.reportSeq).toBe(2);
+		expect(generationReport(runDir, 1)).toMatchObject({ seq: 2, text: "Resumed." });
 	});
 });
