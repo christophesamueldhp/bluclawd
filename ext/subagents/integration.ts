@@ -134,7 +134,7 @@ export function registerIntegration(pi: ExtensionAPI, deps: IntegrationDeps): vo
 		exposure: "model-only",
 		annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
 		description:
-			"Integrate what a finished subagent that edits changed in its worktree, by name or run ID, or what a completed chain changed, by its ID (chain_…), into your checkout: only its own changes since its baseline are applied, onto your checkout as it is now, and every change made there meanwhile is kept. Nothing is staged, committed or pushed, and its worktree stays. Work that is still running, did not complete, or whose processes may still run is refused; a halted chain's work is applied as it is only with `halted`, when the user asked for it despite the halt. On a conflict nothing is applied: resolve a routine one within what the user asked by editing your own file, then call again with that path in `keep`; a conflict whose resolution would change what the user or the run meant is for the user: ask them, and do not choose. `preview` shows its changes and what would conflict, applying nothing. `check` is a shell command run in the checkout once applied, as your own bash runs it and only while you have bash, to validate the combined result; its exit code and output are reported, and nothing is undone when it fails.",
+			"Integrate what a finished subagent that edits changed in its worktree, by name or run ID, or what a completed chain changed, by its ID (chain_…), into your checkout: only its own changes since its baseline are applied, onto your checkout as it is now, and every change made there meanwhile is kept. Nothing is staged, committed or pushed, and its worktree stays. Work that is still running, did not complete, or whose processes may still run is refused. On a conflict nothing is applied: resolve a routine one within what the user asked by editing your own file, then call again with that path in `keep`; a conflict whose resolution would change what the user or the run meant is for the user: ask them, and do not choose. `check` runs once applied, as your own bash runs it and only while you have bash; its exit code and output are reported, and nothing is undone when it fails.",
 		parameters: Type.Object(
 			{
 				agent: Type.String({ description: "The finished subagent's name or run ID (sub_…), or a chain's ID." }),
@@ -155,7 +155,7 @@ export function registerIntegration(pi: ExtensionAPI, deps: IntegrationDeps): vo
 				halted: Type.Optional(
 					Type.Boolean({
 						description:
-							"Apply a halted chain's worktree as it is: only when the user asked for this work despite the halt.",
+							"Apply a halted chain's worktree as it is, only when the user asked for it despite the halt.",
 					}),
 				),
 			},
