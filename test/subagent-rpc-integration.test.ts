@@ -348,6 +348,7 @@ describe.skipIf(!hasTmux)("integrating an RPC run's changes", () => {
 					calls: [
 						{ tool: "subagent_integrate", args: { agent: halted } },
 						{ tool: "subagent_integrate", args: { agent: "cw" } },
+						{ tool: "subagent_integrate", args: { agent: "hw", halted: true } },
 					],
 				},
 				{ tool: "subagent_integrate", args: { agent: completed, halted: true } },
@@ -356,10 +357,15 @@ describe.skipIf(!hasTmux)("integrating an RPC run's changes", () => {
 			]);
 			real.tmux.sendKeys(pane, ["integrate", "Enter"]);
 			const main = await real.waitForRequests("main", 7);
-			const [refusedHalted, refusedStep, applied, appliedHalted] = toolResults(main[6]).slice(2);
+			const [refusedHalted, refusedStep, refusedHaltedStep, applied, appliedHalted] = toolResults(main[6]).slice(2);
 			expect(refusedHalted).toMatch(new RegExp(`^Not integrated: chain ${halted} halted \\(chain\\[1\\] failed\\)`));
 			expect(refusedHalted).toContain(`subagent_integrate "${halted}" with halted: true`);
 			expect(refusedStep).toMatch(new RegExp(`is a step of chain ${completed}: integrate the chain`));
+			// A step named alone is refused, flag or not, in favour of its chain.
+			expect(refusedHaltedStep).toMatch(
+				new RegExp(`^"hw" \\(sub_[\\w-]+\\) is a step of chain ${halted}, which halted`),
+			);
+			expect(refusedHaltedStep).toContain(`subagent_integrate "${halted}" with halted: true`);
 			// On a chain that completed, the flag changes nothing.
 			expect(applied).toMatch(/^Integration: applied A done\.txt to /m);
 			expect(applied).toMatch(new RegExp(`^Run: chain ${completed}, 2 steps, every one completed`, "m"));
