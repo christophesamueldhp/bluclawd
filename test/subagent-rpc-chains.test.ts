@@ -328,6 +328,9 @@ describe.skipIf(!hasTmux)("a chain of RPC runs", () => {
 			expect(aggregate).toMatch(/- chain\[1\] "rev" \(sub_[\w-]+\): failed: the faux provider broke/);
 			expect(aggregate).toMatch(/- chain\[2\] \("w"\): not run, since chain\[1\] \("rev"\) failed/);
 			expect(aggregate).toMatch(/keeps the partial work for you to inspect\. It is not ready to integrate/);
+			expect(aggregate).toMatch(
+				/If the user wants its work anyway, subagent_integrate "chain_\w+" with halted: true/,
+			);
 			expect(aggregate).toMatch(/### chain\[0\] "w" \(sub_[\w-]+\): completed\nChecks: [^\n]+\nWrote v1\./);
 			const workspace = /^Workspace: (.+?), an isolated Git worktree/m.exec(aggregate)?.[1] ?? "";
 			expect(readFileSync(join(workspace, "new.txt"), "utf8")).toBe("v1\n");
@@ -631,12 +634,14 @@ describe.skipIf(!hasTmux)("a plain Resume of a step of a chain that settled", ()
 
 	// Three pis one after another (a, b, then b's Resume): a readiness bound for each to start, and one for the rest.
 	it(
-		"offers no Integration for a step of a chain that halted, though the step's Resume completed",
+		"integrates a halted chain's work, once the step's Resume completed, only with halted: true and never while a step runs",
 		{ timeout: 4 * readinessMs },
 		async () => {
 			const real = await startOrchestrator();
 			pi = real;
-			repository(real.cwd, { "pkg/a.txt": "one\n" });
+			const repo = real.cwd;
+			repository(repo, { "pkg/a.txt": "one\n" });
+			const gate = join(repo, "..", "b.go");
 			const steps = (chain: string): FauxStep[] => [
 				{ tool: "subagent", args: { ...chainOfTwo, background: true } },
 				{ text: "waiting" },
@@ -644,14 +649,17 @@ describe.skipIf(!hasTmux)("a plain Resume of a step of a chain that settled", ()
 				{ text: "stopped the chain" },
 				{ text: "read the chain" },
 				{ tool: "subagent_resume", args: { agent: "b", task: "Write new.txt." } },
+				{ tool: "subagent_integrate", args: { agent: chain, halted: true } },
 				{ text: "waiting" },
-				{ text: "noted" },
+				{ tool: "subagent_integrate", args: { agent: chain } },
+				{ tool: "subagent_integrate", args: { agent: chain, halted: true } },
+				{ text: "integrated" },
 			];
 			real.script("main", steps("unknown"));
 			real.script("a", [{ text: "Nothing to change." }]);
 			real.script("b", [
-				{ text: "Never.", until: join(real.cwd, "..", "never") },
-				{ tool: "write", args: { path: "new.txt", content: "v1\n" } },
+				{ text: "Never.", until: join(repo, "..", "never") },
+				{ tool: "write", args: { path: "new.txt", content: "v1\n" }, until: gate },
 				{ text: "Wrote v1." },
 			]);
 			const pane = real.start(["--", "delegate"]);
@@ -669,11 +677,32 @@ describe.skipIf(!hasTmux)("a plain Resume of a step of a chain that settled", ()
 
 			real.tmux.sendKeys(pane, ["resume b", "Enter"]);
 			await started(real, "b", 1);
-			const main = await real.waitForRequests("main", 8);
-			const report = conversation(main[7]).at(-1)?.text ?? "";
+			const running = await real.waitForRequests("main", 8);
+			// While the Resume works in the worktree, the flag lifts nothing: either refusal may come first.
+			expect(toolResults(running[7]).at(-1)).toMatch(/^Not integrated: "b" \(sub_[\w-]+\) (is still|works in)/);
+			expect(existsSync(join(repo, "pkg", "new.txt"))).toBe(false);
+
+			writeFileSync(gate, "");
+			const main = await real.waitForRequests("main", 11);
+			const report = conversation(main[8]).at(-1)?.text ?? "";
 			expect(report).toMatch(/^Outcome: completed/m);
 			expect(report).toMatch(/^Changes since its baseline: A pkg\/new\.txt$/m);
-			expect(report).not.toContain("Integration:");
+			expect(report).toMatch(/^Integration: .*halted/m);
+			expect(report).toContain(`subagent_integrate "${chain}" with halted: true`);
+
+			const refused = toolResults(main[9]).at(-1) ?? "";
+			expect(refused).toMatch(new RegExp(`^Not integrated: chain ${chain} halted \\(chain\\[1\\] cancelled\\)`));
+			expect(refused).toContain(`subagent_integrate "${chain}" with halted: true`);
+
+			const applied = toolResults(main[10]).at(-1) ?? "";
+			expect(applied).toMatch(/^Integration: applied A pkg\/new\.txt to /m);
+			expect(applied).toMatch(
+				new RegExp(
+					`^Run: chain ${chain}, halted, integrated as it is at your request: chain\\[0\\] "a" completed; chain\\[1\\] "b" cancelled, then resumed and completed\\.`,
+					"m",
+				),
+			);
+			expect(readFileSync(join(repo, "pkg", "new.txt"), "utf8")).toBe("v1\n");
 		},
 	);
 });

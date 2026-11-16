@@ -27,7 +27,7 @@ Independent runs launched together by one orchestrator call, admitted all togeth
 _Avoid_: chain (for runs that depend on each other), group
 
 **Chain**:
-Dependent runs launched by one orchestrator call as ordered steps: each starts only once the step before it completed, given that step's report, never its transcript. When a step edits, every step works in one isolated workspace, one at a time; a later step continues an earlier one's context only by explicit resume. A failed, cancelled or blocked step halts the chain, and the steps after it never run; a review that reports defects has completed. Its output is integrated, if at all, after the whole sequence completes.
+Dependent runs launched by one orchestrator call as ordered steps: each starts only once the step before it completed, given that step's report, never its transcript. When a step edits, every step works in one isolated workspace, one at a time; a later step continues an earlier one's context only by explicit resume. A failed, cancelled or blocked step halts the chain, and the steps after it never run; a review that reports defects has completed. Its output is integrated, if at all, after the whole sequence completes, or, at the user's request, as it is after a halt.
 _Avoid_: pipeline, batch (for independent runs)
 
 **Report**:

@@ -35,6 +35,7 @@ import { CHAIN_ID_PREFIX } from "./admission.ts";
 import type { ChainResultDetails } from "./chains.ts";
 import type { RunDirectory } from "./directory.ts";
 import { generationDefinition, runProcessesLeft, runWorkspace } from "./generation-state.ts";
+import { haltedIntegration } from "./messages.ts";
 import type { ParentScope } from "./parent-scope.ts";
 import { sanitizeReportText, truncateUtf8Safe } from "./results.ts";
 import type { RpcDenyRules } from "./rpc-child.ts";
@@ -51,6 +52,7 @@ import {
 	worktreeInPlace,
 } from "./run-worktree.ts";
 import { formatRunLabel, isLegacyRun, isTerminalSubagentStatus, type SubagentRunRecord } from "./runs.ts";
+import { memberOutcome } from "./settling.ts";
 import { chainResultPath, readRunReports, subagentRunDir, writeAtomicPrivateFile } from "./storage.ts";
 
 /** How long a call waits for another Integration into the same repository, its check included, before it gives up. */
@@ -87,6 +89,8 @@ interface Target {
 	ownerDir: string;
 	runs: { record: Readonly<SubagentRunRecord>; runDir: string }[];
 	outcome: string;
+	/** A halted chain the orchestrator asked for as it is: its steps need not have completed. */
+	asIs: boolean;
 }
 
 /** What an earlier Integration of the worktree applied: its tree then, from which the next one goes on. */
@@ -129,7 +133,7 @@ export function registerIntegration(pi: ExtensionAPI, deps: IntegrationDeps): vo
 		exposure: "model-only",
 		annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
 		description:
-			"Integrate what a finished subagent that edits changed in its worktree, by name or run ID, or what a completed chain changed, by its ID (chain_…), into your checkout: only its own changes since its baseline are applied, onto your checkout as it is now, and every change made there meanwhile is kept. Nothing is staged, committed or pushed, and its worktree stays. Work that is still running, did not complete, or whose processes may still run is refused. On a conflict nothing is applied: resolve a routine one within what the user asked by editing your own file, then call again with that path in `keep`; a conflict whose resolution would change what the user or the run meant is for the user: ask them, and do not choose. `preview` shows its changes and what would conflict, applying nothing. `check` is a shell command run in the checkout once applied, as your own bash runs it and only while you have bash, to validate the combined result; its exit code and output are reported, and nothing is undone when it fails.",
+			"Integrate what a finished subagent that edits changed in its worktree, by name or run ID, or what a completed chain changed, by its ID (chain_…), into your checkout: only its own changes since its baseline are applied, onto your checkout as it is now, and every change made there meanwhile is kept. Nothing is staged, committed or pushed, and its worktree stays. Work that is still running, did not complete, or whose processes may still run is refused; a halted chain's work is applied as it is only with `halted`, when the user asked for it despite the halt. On a conflict nothing is applied: resolve a routine one within what the user asked by editing your own file, then call again with that path in `keep`; a conflict whose resolution would change what the user or the run meant is for the user: ask them, and do not choose. `preview` shows its changes and what would conflict, applying nothing. `check` is a shell command run in the checkout once applied, as your own bash runs it and only while you have bash, to validate the combined result; its exit code and output are reported, and nothing is undone when it fails.",
 		parameters: Type.Object(
 			{
 				agent: Type.String({ description: "The finished subagent's name or run ID (sub_…), or a chain's ID." }),
@@ -145,6 +149,12 @@ export function registerIntegration(pi: ExtensionAPI, deps: IntegrationDeps): vo
 				check: Type.Optional(
 					Type.String({
 						description: "A shell command to validate the combined result, run in the checkout's root.",
+					}),
+				),
+				halted: Type.Optional(
+					Type.Boolean({
+						description:
+							"Apply a halted chain's worktree as it is: only when the user asked for this work despite the halt.",
 					}),
 				),
 			},
@@ -171,14 +181,14 @@ async function integrate(
 	deps: IntegrationDeps,
 	scope: ParentScope,
 	ctx: IntegrationContext,
-	params: { agent: string; preview?: boolean; keep?: string[]; check?: string },
+	params: { agent: string; preview?: boolean; keep?: string[]; check?: string; halted?: boolean },
 	mayShell: boolean,
 	signal: AbortSignal | undefined,
 ): Promise<ToolResult> {
-	const target = resolveTarget(deps, scope, params.agent);
+	const target = resolveTarget(deps, scope, params.agent, params.halted === true);
 	if (typeof target === "string") return result(target, true);
 	for (const run of target.runs) {
-		const why = await unsettled(deps, scope, run);
+		const why = await unsettled(deps, scope, run, target.asIs);
 		if (why) return result(`Not integrated: ${why}`, true);
 	}
 	const { workspace, ownerDir, label } = target;
@@ -317,23 +327,31 @@ async function integrate(
 	}
 }
 
-/** The run or chain named `name` of this session, with its worktree; or why there is none to integrate. */
-function resolveTarget(deps: IntegrationDeps, scope: ParentScope, name: string): Target | string {
+/** A settled chain of this session, as it stored when it settled; undefined while it has not. */
+function settledChain(agentDir: string, scope: ParentScope, chain: string): ChainResultDetails | undefined {
+	try {
+		return JSON.parse(readFileSync(chainResultPath(agentDir, scope.parentSessionId, chain), "utf8"));
+	} catch {
+		return undefined;
+	}
+}
+
+/**
+ * The run or chain named `name` of this session, with its worktree; or why there is none to integrate. A halted
+ * chain is one only `asIs`, at the user's request.
+ */
+function resolveTarget(deps: IntegrationDeps, scope: ParentScope, name: string, asIs: boolean): Target | string {
 	const agentDir = deps.agentDir();
 	const runOf = (runId: string) => {
 		const record = deps.directory.find(scope, runId)?.record;
 		return record && { record, runDir: subagentRunDir(agentDir, scope.parentSessionId, record.runId) };
 	};
 	if (name.startsWith(CHAIN_ID_PREFIX)) {
-		let chain: ChainResultDetails;
-		try {
-			chain = JSON.parse(readFileSync(chainResultPath(agentDir, scope.parentSessionId, name), "utf8"));
-		} catch {
-			return `No settled chain "${name}" in this session: a chain is integrated once it has completed.`;
-		}
+		const chain = settledChain(agentDir, scope, name);
+		if (!chain) return `No settled chain "${name}" in this session: a chain is integrated once it has completed.`;
 		const halted = chain.runs.filter((run) => run.status !== "completed");
-		if (!chain.completed) {
-			return `Not integrated: chain ${name} halted (${halted.map((run) => `chain[${run.step}] ${run.status}`).join(", ")}). Its worktree keeps the partial work for you to inspect; it is not ready to integrate.`;
+		if (!chain.completed && !asIs) {
+			return `Not integrated: chain ${name} halted (${halted.map((run) => `chain[${run.step}] ${run.status}`).join(", ")}). Its worktree keeps the partial work for you to inspect; it is not ready to integrate.${chain.workspace ? ` ${haltedIntegration(name)}` : ""}`;
 		}
 		const runs = chain.runs.flatMap((run) => (run.runId ? [runOf(run.runId)] : []));
 		const owner = runs[0];
@@ -348,7 +366,10 @@ function resolveTarget(deps: IntegrationDeps, scope: ParentScope, name: string):
 			workspace: chain.workspace,
 			ownerDir: owner.runDir,
 			runs: known,
-			outcome: `Run: chain ${name}, ${chain.runs.length} step${chain.runs.length === 1 ? "" : "s"}, every one completed as its runtime saw it; what they claim to have checked is their own claim.`,
+			outcome: chain.completed
+				? `Run: chain ${name}, ${chain.runs.length} step${chain.runs.length === 1 ? "" : "s"}, every one completed as its runtime saw it; what they claim to have checked is their own claim.`
+				: `Run: chain ${name}, halted, integrated as it is at your request: ${stepsNow(deps, scope, chain)}. What its steps claim to have checked is their own claim.`,
+			asIs: !chain.completed,
 		};
 	}
 	const run = runOf(name);
@@ -356,7 +377,10 @@ function resolveTarget(deps: IntegrationDeps, scope: ParentScope, name: string):
 	const { record, runDir } = run;
 	const label = formatRunLabel(record);
 	if (record.chain) {
-		return `${label} is a step of chain ${record.chain}: integrate the chain, "${record.chain}", once it has completed.`;
+		const chain = settledChain(agentDir, scope, record.chain);
+		const halted =
+			chain && !chain.completed && chain.workspace ? ` It halted. ${haltedIntegration(record.chain)}` : "";
+		return `${label} is a step of chain ${record.chain}: integrate the chain, "${record.chain}", once it has completed.${halted}`;
 	}
 	const workspace = isLegacyRun(record) ? undefined : runWorkspace(runDir);
 	if (!workspace) return `${label} has no worktree of its own: it worked in ${record.cwd}, where its changes are.`;
@@ -369,14 +393,36 @@ function resolveTarget(deps: IntegrationDeps, scope: ParentScope, name: string):
 		ownerDir: runDir,
 		runs: [run],
 		outcome: `Run: completed: its pi settled its work without an error. What it says it checked is its own claim; its Report's Checks line lists the commands its transcript shows.`,
+		asIs: false,
 	};
 }
 
-/** Why the run's work has not settled: it still runs, did not complete, or something of it may still run. */
+/**
+ * Each step of a halted chain: its status when the chain settled, and, on the last step its run went through, what a
+ * Resume since made of it, by the same latest Report Integration goes by.
+ */
+function stepsNow(deps: IntegrationDeps, scope: ParentScope, chain: ChainResultDetails): string {
+	const last = new Map(chain.runs.map(({ runId }, i) => [runId, i]));
+	return chain.runs
+		.map(({ step, runId, name, status }, i) => {
+			const record = runId && last.get(runId) === i ? deps.directory.find(scope, runId)?.record : undefined;
+			const report =
+				record && readRunReports(subagentRunDir(deps.agentDir(), scope.parentSessionId, record.runId), -1).at(-1);
+			const now = record && memberOutcome({ record, report }).status;
+			return `chain[${step}]${name ? ` "${name}"` : ""} ${status}${now && now !== status ? `, then resumed and ${now}` : ""}`;
+		})
+		.join("; ");
+}
+
+/**
+ * Why the run's work has not settled: it still runs, did not complete, or something of it may still run. `asIs`, a
+ * step of a halted chain asked for as it is, need not have completed.
+ */
 async function unsettled(
 	deps: IntegrationDeps,
 	scope: ParentScope,
 	{ record, runDir }: { record: Readonly<SubagentRunRecord>; runDir: string },
+	asIs: boolean,
 ): Promise<string | undefined> {
 	const label = formatRunLabel(record);
 	const now = () => deps.directory.find(scope, record.runId)?.record ?? record;
@@ -388,13 +434,13 @@ async function unsettled(
 		return `${label} is still ${run.status}: Integration waits until its work has settled and none of its processes runs.`;
 	}
 	const reason = run.errorMessage?.split("\n")[0];
-	if (run.status !== "closed") {
+	if (run.status !== "closed" && !asIs) {
 		return `${label} ended ${run.status}${reason ? ` (${reason})` : ""}. Its worktree keeps its partial work for you to inspect; it is not ready to integrate.`;
 	}
 	// Its latest Report of any Generation, not its last Generation's: a Resume left idle, or one that did not start,
 	// closes with no Report of its own and did no work, so the work before it can still be integrated (#455).
 	const report = readRunReports(runDir, -1).at(-1);
-	if (report?.outcome?.status !== "completed") {
+	if (report?.outcome?.status !== "completed" && !asIs) {
 		return `${label}'s last work did not complete (${report?.outcome?.error ?? reason ?? "no outcome was stored"}). Its worktree keeps its partial work for you to inspect; it is not ready to integrate.`;
 	}
 	const left = processesLeft(runDir);
