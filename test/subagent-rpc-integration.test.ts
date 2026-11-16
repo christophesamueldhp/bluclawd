@@ -310,7 +310,7 @@ describe.skipIf(!hasTmux)("integrating an RPC run's changes", () => {
 
 	// Four pis one after another (hw, hrev, cw, then crev): a readiness bound for each to start, and one for the rest.
 	it(
-		"integrates a chain once every step completed, never a halted one or a step on its own",
+		"integrates a chain once every step completed, a halted one only as it is with halted: true, never a step on its own",
 		{ timeout: 5 * readinessMs },
 		async () => {
 			const real = await startOrchestrator();
@@ -348,20 +348,37 @@ describe.skipIf(!hasTmux)("integrating an RPC run's changes", () => {
 					calls: [
 						{ tool: "subagent_integrate", args: { agent: halted } },
 						{ tool: "subagent_integrate", args: { agent: "cw" } },
+						{ tool: "subagent_integrate", args: { agent: "hw", halted: true } },
 					],
 				},
-				{ tool: "subagent_integrate", args: { agent: completed } },
+				{ tool: "subagent_integrate", args: { agent: completed, halted: true } },
+				{ tool: "subagent_integrate", args: { agent: halted, halted: true } },
 				{ text: "done" },
 			]);
 			real.tmux.sendKeys(pane, ["integrate", "Enter"]);
-			const main = await real.waitForRequests("main", 6);
-			const [refusedHalted, refusedStep, applied] = toolResults(main[5]).slice(2);
+			const main = await real.waitForRequests("main", 7);
+			const [refusedHalted, refusedStep, refusedHaltedStep, applied, appliedHalted] = toolResults(main[6]).slice(2);
 			expect(refusedHalted).toMatch(new RegExp(`^Not integrated: chain ${halted} halted \\(chain\\[1\\] failed\\)`));
+			expect(refusedHalted).toContain(`subagent_integrate "${halted}" with halted: true`);
 			expect(refusedStep).toMatch(new RegExp(`is a step of chain ${completed}: integrate the chain`));
+			// A step named alone is refused, flag or not, in favour of its chain.
+			expect(refusedHaltedStep).toMatch(
+				new RegExp(`^"hw" \\(sub_[\\w-]+\\) is a step of chain ${halted}, which halted`),
+			);
+			expect(refusedHaltedStep).toContain(`subagent_integrate "${halted}" with halted: true`);
+			// On a chain that completed, the flag changes nothing.
 			expect(applied).toMatch(/^Integration: applied A done\.txt to /m);
 			expect(applied).toMatch(new RegExp(`^Run: chain ${completed}, 2 steps, every one completed`, "m"));
 			expect(read(repo, "done.txt")).toBe("done\n");
-			expect(existsSync(join(repo, "halted.txt"))).toBe(false);
+			// The failed step was never resumed: its chain's worktree is applied as it is.
+			expect(appliedHalted).toMatch(/^Integration: applied A halted\.txt to /m);
+			expect(appliedHalted).toMatch(
+				new RegExp(
+					`^Run: chain ${halted}, halted, integrated as it is at your request: chain\\[0\\] "hw" completed; chain\\[1\\] "hrev" failed\\.`,
+					"m",
+				),
+			);
+			expect(read(repo, "halted.txt")).toBe("halted\n");
 		},
 	);
 

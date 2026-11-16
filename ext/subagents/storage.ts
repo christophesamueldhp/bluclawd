@@ -13,6 +13,7 @@ import {
 import { basename, dirname, join, resolve } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { SessionUsage } from "../../daemon/ipc/protocol.ts";
+import type { ChainResultDetails } from "./chains.ts";
 import { sanitizeDiagnosticText } from "./diagnostics.ts";
 import { sanitizeReportText } from "./results.ts";
 import { isLegacyRun, isTerminalSubagentStatus, type RunRuntimeOutcome, type SubagentRunRecord } from "./runs.ts";
@@ -229,6 +230,19 @@ export function subagentRunDir(agentDir: string, parentSessionId: string, runId:
 /** Where a settled chain's `ChainResultDetails` are kept, beside its steps' run directories. */
 export function chainResultPath(agentDir: string, parentSessionId: string, chain: string): string {
 	return join(getSubagentsRootDir(agentDir), parentSessionId, "chain-results", `${chain}.json`);
+}
+
+/** A settled chain's `ChainResultDetails`, as it stored them when it settled; undefined while it has not. */
+export function readChainResult(
+	agentDir: string,
+	parentSessionId: string,
+	chain: string,
+): ChainResultDetails | undefined {
+	try {
+		return JSON.parse(readFileSync(chainResultPath(agentDir, parentSessionId, chain), "utf8"));
+	} catch {
+		return undefined;
+	}
 }
 
 /** The parent session whose run `runDir` is: the one {@link subagentRunDir} kept it under. */

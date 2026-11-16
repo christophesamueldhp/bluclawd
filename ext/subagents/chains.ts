@@ -23,7 +23,14 @@ import {
 } from "./admission.ts";
 import { runWorkspace } from "./generation-state.ts";
 import type { ChainStep } from "./invocation.ts";
-import { GROUP_PROGRESS, NOT_APPROVAL, NOTHING_TO_CLOSE, type RunReports, whileRunning } from "./messages.ts";
+import {
+	GROUP_PROGRESS,
+	haltedIntegration,
+	NOT_APPROVAL,
+	NOTHING_TO_CLOSE,
+	type RunReports,
+	whileRunning,
+} from "./messages.ts";
 import type { ParentScopeChecks } from "./parent-scope.ts";
 import { sanitizeReportText, truncateUtf8Safe } from "./results.ts";
 import {
@@ -651,7 +658,7 @@ function formatChainAggregate(
 			? `The chain ${completed ? "completed" : "halted"}, and no step changed anything: there is nothing to integrate.`
 			: completed
 				? `Every step completed: the worktree holds the chain's work, ready for you to review and integrate with subagent_integrate "${chain}"; none of it is in your checkout.`
-				: `The chain halted: its worktree keeps the partial work for you to inspect. It is not ready to integrate, and none of it is in your checkout.`
+				: `The chain halted: its worktree keeps the partial work for you to inspect. It is not ready to integrate, and none of it is in your checkout. ${haltedIntegration(chain)}`
 		: completed
 			? "Every step completed."
 			: "The chain halted.";

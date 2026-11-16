@@ -16,6 +16,9 @@ export const RUN_PROGRESS =
 	"Its progress does not wake you; its findings, questions and blockers reach you as messages.";
 /** The same, after a batch's or chain's launch. */
 export const GROUP_PROGRESS = "Progress does not wake you; findings, questions and blockers reach you as messages.";
+/** The one way to integrate a halted chain's worktree: as it is, and only when the user asks for it. */
+export const haltedIntegration = (chain: string) =>
+	`If the user wants its work anyway, subagent_integrate "${chain}" with halted: true applies it as it is.`;
 
 /**
  * After a background launch or resume, what the parent does while the work runs: `runs` is "it runs", "they run"
