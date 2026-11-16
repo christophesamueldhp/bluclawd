@@ -8,7 +8,7 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { existsSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, readdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import {
 	type AdmissionContext,
@@ -57,8 +57,11 @@ import {
 	storeManifest,
 } from "./settling.ts";
 import {
+	type ChainPlan,
+	chainPlanPath,
 	chainResultPath,
 	getSubagentsRootDir,
+	readChainPlan,
 	readPersistedRunRecord,
 	storedRunReportTextPath,
 	subagentRunDir,
@@ -268,42 +271,12 @@ export async function runChain(
 	);
 }
 
-/** A chain as stored for the next instance of its orchestrator's session, which goes on with it. */
-interface ChainPlan {
-	chain: string;
-	steps: ChainStep[];
-	toolCallId: string;
-	parentTurnId: string;
-	/** A step edits: every step works in the worktree its first step's Admission recorded. */
-	writes: boolean;
-	/** Each step's run and generation, stored before it is admitted; null for a step not reached. */
-	ran: ({ runId: string; generation: number } | null)[];
-	/** Stopped as a whole, or its call cancelled: no later step starts, whoever goes on with it. */
-	stopped?: true;
-	settled?: true;
-}
-
-function chainPlanPath(agentDir: string, parentSessionId: string, chain: string): string {
-	return join(getSubagentsRootDir(agentDir), parentSessionId, "chain-plans", `${chain}.json`);
-}
-
 /** Stores the plan as it is now; one that cannot be stored leaves the chain to this instance alone. */
 function storePlan(path: string, plan: ChainPlan): void {
 	try {
 		writeAtomicPrivateFile(path, JSON.stringify(plan));
 	} catch {
 		// Kept in memory: an instance taking the session over would not go on with it.
-	}
-}
-
-function readPlan(path: string): ChainPlan | undefined {
-	try {
-		const plan = JSON.parse(readFileSync(path, "utf8")) as ChainPlan;
-		return Array.isArray(plan.steps) && Array.isArray(plan.ran) && plan.ran.length === plan.steps.length
-			? plan
-			: undefined;
-	} catch {
-		return undefined;
 	}
 }
 
@@ -509,7 +482,7 @@ export function resumeChains(deps: ChainDeps, parentSessionId: string): void {
 	const recordOf = (runId: string) => deps.getRun(runId) ?? readPersistedRunRecord(agentDir, parentSessionId, runId);
 	for (const file of files) {
 		const planPath = join(dir, file);
-		const plan = readPlan(planPath);
+		const plan = readChainPlan(planPath);
 		if (!plan || plan.settled || deps.calls.kind(plan.chain)) continue;
 		const first = plan.ran[0] && recordOf(plan.ran[0].runId);
 		// Its first step was never admitted: it never began.

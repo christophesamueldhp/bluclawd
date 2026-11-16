@@ -607,4 +607,115 @@ describe.skipIf(!hasTmux)("recovering RPC runs", () => {
 		},
 		5 * readinessMs,
 	);
+
+	// Four pis one after another (a, b, b's Resume, then the orchestrator reopened): a readiness bound for each to
+	// start, and one for the rest.
+	it(
+		"releases the chain's worktree once a plain Resume of its step taken over ends unchanged, as one not taken over",
+		async () => {
+			const real = await startOrchestrator();
+			pi = real;
+			repository(real.cwd);
+			const gate = join(real.cwd, "..", "b.go");
+			real.script("main", [
+				{
+					tool: "subagent",
+					args: {
+						chain: ["a", "b"].map((name) => ({ agent: writer, name, task: "Do the step." })),
+					},
+				},
+				{ text: "read the chain" },
+				{ tool: "subagent_resume", args: { agent: "b", task: "Look again." } },
+				{ text: "waiting" },
+				{ text: "noted" },
+			]);
+			real.script("a", [{ text: "Nothing to change." }]);
+			real.script("b", [{ text: "Nothing to change." }, { text: "Still nothing.", until: gate }]);
+			const pane = real.start(["--", "delegate"]);
+			const settled = await real.waitForRequests("main", 2);
+			const root = /^Workspace: (.+?), removed: it held no change/m.exec(
+				conversation(settled[1])
+					.map(({ text }) => text)
+					.join("\n"),
+			)?.[1];
+			expect(root).toBeDefined();
+			const sessionFile = await sessionFileOf(real, pane);
+			real.tmux.sendKeys(pane, ["resume b", "Enter"]);
+			await real.waitForRequests("b", 2);
+			await real.waitForRequests("main", 4);
+			// The Resume made the worktree again from its baseline.
+			expect(existsSync(root ?? "")).toBe(true);
+
+			crash(real, pane);
+			writeFileSync(gate, "");
+			await waitFor(() => expect(hostOf(real, "b").exit).toBeDefined());
+
+			real.start(["--session", sessionFile]);
+			const main = await real.waitForRequests("main", 5);
+			const report = conversation(main[4]).at(-1)?.text ?? "";
+			expect(report).toContain("Still nothing.");
+			expect(report).toContain(
+				`Workspace: ${root}, removed: it held no change since its baseline, from which a Resume makes it again.`,
+			);
+			expect(report).not.toContain("Integration:");
+			expect(existsSync(root ?? "")).toBe(false);
+			expect(existsSync(join(runDirOf(real.agentDir, "b"), "workspace-removed.json"))).toBe(false);
+		},
+		5 * readinessMs,
+	);
+
+	// Four pis one after another (a, b, b's Resume, then the orchestrator reopened): a readiness bound for each to
+	// start, and one for the rest.
+	it(
+		"ends a plain Resume of a completed chain's step taken over as one not taken over, offering to integrate the chain",
+		async () => {
+			const real = await startOrchestrator();
+			pi = real;
+			repository(real.cwd);
+			const gate = join(real.cwd, "..", "b.go");
+			real.script("main", [
+				{
+					tool: "subagent",
+					args: {
+						chain: [
+							{ agent: writer, name: "a", task: "Write new.txt." },
+							{ agent: writer, name: "b", task: "Look next." },
+						],
+					},
+				},
+				{ text: "read the chain" },
+				{ tool: "subagent_resume", args: { agent: "b", task: "Look again." } },
+				{ text: "waiting" },
+				{ text: "noted" },
+			]);
+			real.script("a", [{ tool: "write", args: { path: "new.txt", content: "v1\n" } }, { text: "Wrote v1." }]);
+			real.script("b", [{ text: "B done." }, { text: "Looked again.", until: gate }]);
+			const pane = real.start(["--", "delegate"]);
+			const settled = await real.waitForRequests("main", 2);
+			const chain = /Chain (chain_\w+): 2 steps, all completed\./.exec(
+				conversation(settled[1])
+					.map(({ text }) => text)
+					.join("\n"),
+			)?.[1];
+			expect(chain).toBeDefined();
+			const sessionFile = await sessionFileOf(real, pane);
+			real.tmux.sendKeys(pane, ["resume b", "Enter"]);
+			await real.waitForRequests("b", 2);
+			await real.waitForRequests("main", 4);
+
+			crash(real, pane);
+			writeFileSync(gate, "");
+			await waitFor(() => expect(hostOf(real, "b").exit).toBeDefined());
+
+			real.start(["--session", sessionFile]);
+			const main = await real.waitForRequests("main", 5);
+			const report = conversation(main[4]).at(-1)?.text ?? "";
+			expect(report).toContain("Looked again.");
+			expect(report).toMatch(/^Changes since its baseline: A new\.txt$/m);
+			expect(report).toContain(
+				`\nIntegration: once you have reviewed its changes, subagent_integrate "${chain}" applies its chain's changes to your checkout.\n`,
+			);
+		},
+		5 * readinessMs,
+	);
 });

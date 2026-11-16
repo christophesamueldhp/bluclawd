@@ -15,6 +15,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { SessionUsage } from "../../daemon/ipc/protocol.ts";
 import type { ChainResultDetails } from "./chains.ts";
 import { sanitizeDiagnosticText } from "./diagnostics.ts";
+import type { ChainStep } from "./invocation.ts";
 import { sanitizeReportText } from "./results.ts";
 import { isLegacyRun, isTerminalSubagentStatus, type RunRuntimeOutcome, type SubagentRunRecord } from "./runs.ts";
 import { addSubagentUsage, createEmptySubagentUsage } from "./usage.ts";
@@ -230,6 +231,36 @@ export function subagentRunDir(agentDir: string, parentSessionId: string, runId:
 /** Where a settled chain's `ChainResultDetails` are kept, beside its steps' run directories. */
 export function chainResultPath(agentDir: string, parentSessionId: string, chain: string): string {
 	return join(getSubagentsRootDir(agentDir), parentSessionId, "chain-results", `${chain}.json`);
+}
+
+/** A chain as stored for the next instance of its orchestrator's session, which goes on with it. */
+export interface ChainPlan {
+	chain: string;
+	steps: ChainStep[];
+	toolCallId: string;
+	parentTurnId: string;
+	/** A step edits: every step works in the worktree its first step's Admission recorded. */
+	writes: boolean;
+	/** Each step's run and generation, stored before it is admitted; null for a step not reached. */
+	ran: ({ runId: string; generation: number } | null)[];
+	/** Stopped as a whole, or its call cancelled: no later step starts, whoever goes on with it. */
+	stopped?: true;
+	settled?: true;
+}
+
+export function chainPlanPath(agentDir: string, parentSessionId: string, chain: string): string {
+	return join(getSubagentsRootDir(agentDir), parentSessionId, "chain-plans", `${chain}.json`);
+}
+
+export function readChainPlan(path: string): ChainPlan | undefined {
+	try {
+		const plan = JSON.parse(readFileSync(path, "utf8")) as ChainPlan;
+		return Array.isArray(plan.steps) && Array.isArray(plan.ran) && plan.ran.length === plan.steps.length
+			? plan
+			: undefined;
+	} catch {
+		return undefined;
+	}
 }
 
 /** A settled chain's `ChainResultDetails`, as it stored them when it settled; undefined while it has not. */
