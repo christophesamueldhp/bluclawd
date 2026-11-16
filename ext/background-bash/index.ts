@@ -241,7 +241,7 @@ const backgroundBash: InlineExtension = {
 				const startedAt = thisProcessStart();
 				return startedAt === undefined ? undefined : { pid: process.pid, startedAt };
 			},
-			now: Date.now,
+			now: () => Date.now(),
 			killedBySignal,
 		});
 
