@@ -62,7 +62,7 @@ import {
 	type SubagentRunRecord,
 	type SubagentRunScheduler,
 } from "./runs.ts";
-import { ensureRunStorageDir } from "./storage.ts";
+import { chainPlanPath, ensureRunStorageDir, readChainPlan } from "./storage.ts";
 import { legacyRunRefusal, type RunLaunch } from "./tmux-runs.ts";
 
 export const MAX_TASK_INPUT_BYTES = 32 * 1024;
@@ -874,6 +874,13 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 			const { workspace } = definition;
 			// A run in a pane follows its orchestrator to the pane its session runs in now (ADR-0008): its spec says which.
 			const pane = spec.pane && { ...spec.pane, parent: deps.pane() ?? spec.pane.parent };
+			// Only a generation its chain runs as a step keeps the worktree for the next step; a plain Resume of a step
+			// ends as one not taken over does. A settled chain runs none, whatever its plan stored before it admitted one.
+			const plan = run.chain && readChainPlan(chainPlanPath(agentDir, run.parentSessionId, run.chain));
+			const inChain =
+				plan &&
+				!plan.settled &&
+				plan.ran.some((step) => step?.runId === run.runId && step.generation === run.generation);
 			deps.scheduler.takeOver(
 				{ ...run, sessionEpoch: scope.sessionEpoch },
 				{
@@ -891,7 +898,7 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 							...(spec.sessionFile ? { sessionFile: spec.sessionFile } : {}),
 							// A later step of a chain works in the worktree its first step made, named after that step's run.
 							...(workspace && basename(workspace.root) !== run.runId ? { worktreeMade: true } : {}),
-							...(run.chain ? { keepWorktree: true } : {}),
+							...(inChain ? { keepWorktree: true } : {}),
 							...(pane ? { parentPane: pane.parent } : {}),
 							recovered: pane ? { ...spec, pane } : spec,
 						},

@@ -850,6 +850,67 @@ describe("Run admission of a run an earlier instance of its orchestrator's sessi
 		expect(context && "rpc" in context ? context.rpc.recheck() : "no run").toBeUndefined();
 	});
 
+	it("keeps the worktree of a generation taken over only while its unsettled chain ran it as one of its steps", async () => {
+		const first = await setup();
+		const launched = handleOf(await first.launch({ agent: "explorer", task: "x" })).record;
+		const runId = launched.runId;
+		const runDir = join(first.storageDir, runId);
+		const planPath = join(first.storageDir, "chain-plans", "chain_x.json");
+		const plan = (ran: ({ runId: string; generation: number } | null)[], settled?: true) => {
+			mkdirSync(join(first.storageDir, "chain-plans"), { recursive: true });
+			const steps = ran.map(() => ({ run: { agent: "explorer", task: "x" } }));
+			writeFileSync(
+				planPath,
+				JSON.stringify({ chain: "chain_x", steps, toolCallId: "c", parentTurnId: "t", writes: true, ran, settled }),
+			);
+		};
+		const keptAt = async (generation: number) => {
+			if (generation > 0) admitGeneration(runDir, generation, definitionOf(runDir));
+			storeLaunch(runDir, {
+				args: [],
+				cwd: first.cwd,
+				agentDir: first.agentDir,
+				prompt: "x",
+				model: { provider: "faux-adm", id: "faux-main", thinkingLevel: "low" },
+				generation,
+			});
+			const second = await setup({ sameSession: first });
+			expect(second.admission.recover({ ...launched, chain: "chain_x", generation }, second.ctx)).toBe(true);
+			const context = second.scheduler.getContext(runId);
+			return context && "rpc" in context ? context.rpc.keepWorktree : "no run";
+		};
+
+		// No plan stored, or none readable: no chain goes on with it, so it ends as a plain Resume does.
+		expect(await keptAt(0)).toBeUndefined();
+		mkdirSync(join(first.storageDir, "chain-plans"), { recursive: true });
+		writeFileSync(planPath, "{");
+		expect(await keptAt(0)).toBeUndefined();
+		// Its chain's first step, a later step its chain launched, and a step its chain resumed.
+		plan([{ runId, generation: 0 }, null]);
+		expect(await keptAt(0)).toBe(true);
+		plan([
+			{ runId: "other", generation: 0 },
+			{ runId, generation: 0 },
+		]);
+		expect(await keptAt(0)).toBe(true);
+		plan([
+			{ runId, generation: 0 },
+			{ runId, generation: 1 },
+		]);
+		expect(await keptAt(1)).toBe(true);
+		// A plain Resume since, which its chain never ran.
+		expect(await keptAt(2)).toBeUndefined();
+		// A step its chain stored but never admitted, whose chain settled: a plain Resume took its generation since.
+		plan(
+			[
+				{ runId, generation: 0 },
+				{ runId, generation: 1 },
+			],
+			true,
+		);
+		expect(await keptAt(1)).toBeUndefined();
+	});
+
 	it("leaves a run on pi's RPC whose stored definition or spec does not hold its generation", async () => {
 		const first = await setup();
 		const run = handleOf(await first.launch({ agent: "explorer", task: "x" })).record;
