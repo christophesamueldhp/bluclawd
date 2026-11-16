@@ -9,7 +9,7 @@
  * processes runs: its host's group, and every process its commands started (ext/sandbox/run-containment.ts).
  */
 
-import { existsSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DefaultPackageManager, SettingsManager } from "@earendil-works/pi-coding-agent";
@@ -62,6 +62,7 @@ import {
 	materializeWorktree,
 	releaseUnchangedWorktree,
 	workspaceInstructions,
+	worktreeOwner,
 } from "./run-worktree.ts";
 import {
 	isLegacyRun,
@@ -71,7 +72,7 @@ import {
 	type SubagentRunOutcome,
 	type SubagentRunRecord,
 } from "./runs.ts";
-import { readRunReports, storedRunReportTextPath } from "./storage.ts";
+import { chainResultPath, readRunReports, storedRunReportTextPath } from "./storage.ts";
 import { sessionUsage } from "./usage.ts";
 
 /**
@@ -680,11 +681,7 @@ export async function executeRpcRun(
 	if (notStarted) return didNotStart(notStarted);
 	// Once nothing of it runs, a worktree it left as it was made goes, a Resume making it again; any other stays.
 	if (workspace && terminated && !launch.keepWorktree) {
-		await releaseUnchangedWorktree(workspace, {
-			agentDir: launch.agentDir,
-			runId: record.runId,
-			runDir: launch.runDir,
-		});
+		await releaseUnchangedWorktree(workspace, worktreeOwner(workspace, launch.agentDir, record.parentSessionId));
 	}
 	// Whatever it sent before it ended reaches its recipients before its Report.
 	relay();
@@ -759,6 +756,19 @@ export async function executeRpcRun(
 	controller.markDelivered(report.seq);
 	controller.updateProgress(report.text);
 	const fullReport = storedRunReportTextPath(launch.runDir, report.seq);
+	// A step of a chain is integrated with its chain once the chain has completed, a Resume of the step as well; a step
+	// running in its chain keeps its worktree for the next one.
+	const integration =
+		!evidence.workspace ||
+		outcome.status !== "completed" ||
+		launch.keepWorktree ||
+		!existsSync(evidence.workspace.root)
+			? undefined
+			: !record.chain
+				? `subagent_integrate "${launch.name}" applies them`
+				: chainCompleted(launch.agentDir, record.parentSessionId, record.chain)
+					? `subagent_integrate "${record.chain}" applies its chain's changes`
+					: undefined;
 	// What the runtime saw, never cut: the run's claim above it takes what room is left.
 	const runtime = [
 		"---",
@@ -767,15 +777,7 @@ export async function executeRpcRun(
 		// Commands not known, its transcript unread, are listed as none, as they always were.
 		...checksLines(launch.tools, "ran" in evidence.commands ? evidence.commands.ran : []),
 		...(evidence.workspace ? workspaceLines : ["Changes: none: it had no tool that changes files."]),
-		// A step of a chain is integrated with its chain, once the chain has completed.
-		...(evidence.workspace &&
-		outcome.status === "completed" &&
-		!launch.keepWorktree &&
-		existsSync(evidence.workspace.root)
-			? [
-					`Integration: once you have reviewed its changes, subagent_integrate "${launch.name}" applies them to your checkout.`,
-				]
-			: []),
+		...(integration ? [`Integration: once you have reviewed its changes, ${integration} to your checkout.`] : []),
 		`Transcript: ${exited.sessionFile ?? "none"}`,
 		`Report: ${fullReport}`,
 		...(report.untaken ? [`Untaken: ${untakenText(report.untaken, launch.runDir, record.generation)}.`] : []),
@@ -810,6 +812,15 @@ function boundedClaim(text: string, room: number, fullReport: string): string {
 	if (bytes(text) <= room) return text;
 	const cut = `\n[Cut short; its full Report: ${fullReport}]`;
 	return `${truncateUtf8Safe(text, Math.max(0, room - bytes(cut))).text}${cut}`;
+}
+
+/** Whether the chain settled with every step completed, as it stored when it settled. */
+function chainCompleted(agentDir: string, parentSessionId: string, chain: string): boolean {
+	try {
+		return JSON.parse(readFileSync(chainResultPath(agentDir, parentSessionId, chain), "utf8")).completed === true;
+	} catch {
+		return false;
+	}
 }
 
 /** Why its work failed, as the runtime saw it: a pi's stderr can run long. */

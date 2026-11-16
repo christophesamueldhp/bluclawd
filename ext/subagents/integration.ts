@@ -32,7 +32,7 @@ import { evaluateToolCallDeny } from "../permissions/policy.ts";
 import { prepareRunContainment, runProcesses } from "../sandbox/run-containment.ts";
 import { sandboxStatus, sandboxWraps, wrapExec } from "../sandbox/runtime.ts";
 import { CHAIN_ID_PREFIX } from "./admission.ts";
-import { type ChainResultDetails, chainResultPath } from "./chains.ts";
+import type { ChainResultDetails } from "./chains.ts";
 import type { RunDirectory } from "./directory.ts";
 import { generationDefinition, runProcessesLeft, runWorkspace } from "./generation-state.ts";
 import type { ParentScope } from "./parent-scope.ts";
@@ -51,7 +51,7 @@ import {
 	worktreeInPlace,
 } from "./run-worktree.ts";
 import { formatRunLabel, isLegacyRun, isTerminalSubagentStatus, type SubagentRunRecord } from "./runs.ts";
-import { readRunReports, subagentRunDir, writeAtomicPrivateFile } from "./storage.ts";
+import { chainResultPath, readRunReports, subagentRunDir, writeAtomicPrivateFile } from "./storage.ts";
 
 /** How long a call waits for another Integration into the same repository, its check included, before it gives up. */
 const CHECK_TIMEOUT_MS = 10 * 60_000;

@@ -226,6 +226,11 @@ export function subagentRunDir(agentDir: string, parentSessionId: string, runId:
 	return join(getSubagentsRootDir(agentDir), parentSessionId, runId);
 }
 
+/** Where a settled chain's `ChainResultDetails` are kept, beside its steps' run directories. */
+export function chainResultPath(agentDir: string, parentSessionId: string, chain: string): string {
+	return join(getSubagentsRootDir(agentDir), parentSessionId, "chain-results", `${chain}.json`);
+}
+
 /** The parent session whose run `runDir` is: the one {@link subagentRunDir} kept it under. */
 export function runDirParentSessionId(runDir: string): string {
 	return basename(dirname(runDir));
