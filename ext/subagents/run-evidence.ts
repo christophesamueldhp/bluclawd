@@ -8,8 +8,8 @@ import { readFileSync } from "node:fs";
 import { parseSessionEntries, type SessionEntry } from "@earendil-works/pi-coding-agent";
 import { generationDefinition } from "./generation-state.ts";
 import { sanitizeReportText, textOf, truncateUtf8Safe } from "./results.ts";
-import { describeWorkspace } from "./run-worktree.ts";
-import { readRunReports, type StoredRunReport, storedRunReportTextPath } from "./storage.ts";
+import { describeWorkspace, worktreeOwner } from "./run-worktree.ts";
+import { readRunReports, runDirParentSessionId, type StoredRunReport, storedRunReportTextPath } from "./storage.ts";
 
 /** What the runtime saw of a Generation, apart from its Report's claim. */
 export interface GenerationEvidence {
@@ -36,11 +36,12 @@ export function generationReport(runDir: string, generation: number): StoredRunR
 }
 
 /**
- * What generation `generation` of the run kept in `runDir` left on disk. Its commands are those from its admission to
- * the next Generation's, or to the end of `transcript`, the run's session file. A Generation stored before Admission
- * kept when it admitted it counts them from `startedAt`, its reader's own start for it.
+ * What generation `generation` of the run kept in `runDir`, under `agentDir`, left on disk. Its commands are those from
+ * its admission to the next Generation's, or to the end of `transcript`, the run's session file. A Generation stored
+ * before Admission kept when it admitted it counts them from `startedAt`, its reader's own start for it.
  */
 export async function generationEvidence(
+	agentDir: string,
 	runDir: string,
 	generation: number,
 	known: { transcript?: string; startedAt?: number },
@@ -49,7 +50,10 @@ export async function generationEvidence(
 	const definition = generationDefinition(runDir, generation);
 	const next = generationDefinition(runDir, generation + 1);
 	const isolated = definition?.workspace;
-	const workspace = isolated && { root: isolated.root, lines: await describeWorkspace(isolated, runDir) };
+	// Its worktree's removal is recorded by the run that owns it: for a Chain's later step, the Chain's first.
+	const ownerDir = isolated && worktreeOwner(isolated, agentDir, runDirParentSessionId(runDir)).runDir;
+	const workspace = isolated &&
+		ownerDir && { root: isolated.root, lines: await describeWorkspace(isolated, ownerDir) };
 	return {
 		...(report ? { report, reportFile: storedRunReportTextPath(runDir, report.seq) } : {}),
 		tools: definition?.tools ?? [],

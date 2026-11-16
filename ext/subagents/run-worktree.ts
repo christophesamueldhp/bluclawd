@@ -11,7 +11,7 @@ import { execFile, spawnSync } from "node:child_process";
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, relative, sep } from "node:path";
-import { writeAtomicPrivateFile } from "./storage.ts";
+import { subagentRunDir, writeAtomicPrivateFile } from "./storage.ts";
 
 export interface RunBaseline {
 	/** The root of the repository the run was admitted in, real, and the Git directory all its worktrees share. */
@@ -205,6 +205,15 @@ export interface WorktreeOwner {
 	agentDir: string;
 	runId: string;
 	runDir: string;
+}
+
+/**
+ * The run a workspace is kept for: the one its path names. A Chain's steps share their first step's worktree, so that
+ * run owns it for every step, and keeps the record of its removal in its directory of the Parent scope's session.
+ */
+export function worktreeOwner(workspace: IsolatedWorkspace, agentDir: string, parentSessionId: string): WorktreeOwner {
+	const runId = basename(workspace.root);
+	return { agentDir, runId, runDir: subagentRunDir(agentDir, parentSessionId, runId) };
 }
 
 /**

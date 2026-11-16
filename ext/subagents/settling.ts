@@ -275,7 +275,7 @@ export async function settleBatch(
 /** A final run as a member: what the runtime saw of its record's generation, and, once it reported, its checks. */
 export async function settledMember(agentDir: string, record: Readonly<SubagentRunRecord>): Promise<BatchMember> {
 	const runDir = subagentRunDir(agentDir, record.parentSessionId, record.runId);
-	const evidence = await generationEvidence(runDir, record.generation, {
+	const evidence = await generationEvidence(agentDir, runDir, record.generation, {
 		transcript: record.transcriptPath,
 		startedAt: record.startedAt,
 	});

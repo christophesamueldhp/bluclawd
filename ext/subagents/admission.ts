@@ -49,6 +49,7 @@ import {
 	type IsolatedWorkspace,
 	restoreWorktree,
 	worktreeInPlace,
+	worktreeOwner,
 	worktreePath,
 	worktreeUnavailable,
 } from "./run-worktree.ts";
@@ -363,7 +364,8 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 		if (left) return cannot(`processes its earlier Generation started still run (process group ${left.group}).`);
 		// A run that edits resumes in its own worktree exactly, made again if it was removed holding only its baseline.
 		if (admitted.workspace) {
-			const lost = await restoreWorktree(admitted.workspace, { agentDir, runId: current.runId, runDir });
+			const owner = worktreeOwner(admitted.workspace, agentDir, current.parentSessionId);
+			const lost = await restoreWorktree(admitted.workspace, owner);
 			if (lost) {
 				return cannot(
 					`${lost}. It resumes only in its own workspace, never in the checkout as it is now; its transcript and Reports are kept: spawn a new subagent and point it at ${current.reportPath ?? "its report"}.`,

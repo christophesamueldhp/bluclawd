@@ -699,7 +699,7 @@ export async function executeRpcRun(
 		controller.updateUsage(usage);
 		deps.usage(state?.sessionId ?? record.runId, usage);
 	}
-	const evidence = await generationEvidence(launch.runDir, record.generation, {
+	const evidence = await generationEvidence(launch.agentDir, launch.runDir, record.generation, {
 		transcript: state?.sessionFile,
 		startedAt: queuedAt,
 	});

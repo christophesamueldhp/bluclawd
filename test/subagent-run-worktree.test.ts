@@ -13,6 +13,7 @@ import {
 	releaseUnchangedWorktree,
 	restoreWorktree,
 	worktreeInPlace,
+	worktreeOwner,
 	worktreePath,
 } from "../ext/subagents/run-worktree.ts";
 
@@ -208,5 +209,17 @@ describe("a run's worktree once the run ended", () => {
 			/its baseline refs\/bluclawd\/runs\/sub_kept\/baseline is gone/,
 		);
 		expect(existsSync(workspace.root)).toBe(false);
+	});
+});
+
+describe("a worktree's owner", () => {
+	it("is the run whose worktree it is", () => {
+		const agentDir = "/agent";
+		const workspace = { root: "/agent/bluclawd/worktrees/sub_alone", baseline: {} as IsolatedWorkspace["baseline"] };
+		expect(worktreeOwner(workspace, agentDir, "parent")).toEqual({
+			agentDir,
+			runId: "sub_alone",
+			runDir: "/agent/bluclawd/subagents/parent/sub_alone",
+		});
 	});
 });
