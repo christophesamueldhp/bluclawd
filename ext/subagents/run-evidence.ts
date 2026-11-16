@@ -51,9 +51,8 @@ export async function generationEvidence(
 	const next = generationDefinition(runDir, generation + 1);
 	const isolated = definition?.workspace;
 	// Its worktree's removal is recorded by the run that owns it: for a Chain's later step, the Chain's first.
-	const ownerDir = isolated && worktreeOwner(isolated, agentDir, runDirParentSessionId(runDir)).runDir;
-	const workspace = isolated &&
-		ownerDir && { root: isolated.root, lines: await describeWorkspace(isolated, ownerDir) };
+	const owner = isolated && worktreeOwner(isolated, agentDir, runDirParentSessionId(runDir));
+	const workspace = owner && { root: isolated.root, lines: await describeWorkspace(isolated, owner.runDir) };
 	return {
 		...(report ? { report, reportFile: storedRunReportTextPath(runDir, report.seq) } : {}),
 		tools: definition?.tools ?? [],

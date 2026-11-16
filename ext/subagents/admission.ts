@@ -362,7 +362,8 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 		const left = runProcessesLeft(runDir);
 		if (left?.host) return cannot("its pi from before is still running.");
 		if (left) return cannot(`processes its earlier Generation started still run (process group ${left.group}).`);
-		// A run that edits resumes in its own worktree exactly, made again if it was removed holding only its baseline.
+		// A run that edits resumes in the worktree it was admitted with exactly, made again if it was removed holding only
+		// its baseline.
 		if (admitted.workspace) {
 			const owner = worktreeOwner(admitted.workspace, agentDir, current.parentSessionId);
 			const lost = await restoreWorktree(admitted.workspace, owner);
