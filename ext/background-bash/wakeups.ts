@@ -7,6 +7,7 @@
  * and process-wide like the jobs (`/tasks` is read from other extensions' module graphs).
  */
 
+import type { SessionShutdownEvent, SessionStartEvent } from "@earendil-works/pi-coding-agent";
 import { piCommand } from "../../daemon/tmux.ts";
 import {
 	cancelledByDelete,
@@ -242,6 +243,28 @@ interface WakeupLifecycleDeps {
 	killedBySignal: () => Promise<boolean>;
 }
 
+type ShutdownOutcome = "keep" | "cancel";
+
+/**
+ * What each reason pi gives at shutdown does to the session's wake-ups (ADR-0009): those that end the session cancel
+ * them; a reload, a `/resume` of the session itself, and a crash leave them pending.
+ */
+const AT_SHUTDOWN: Record<
+	SessionShutdownEvent["reason"],
+	(shutdown: {
+		/** Whether a `/resume` opens the session itself. */
+		sameSession: boolean;
+		killedBySignal: () => Promise<boolean>;
+	}) => ShutdownOutcome | Promise<ShutdownOutcome>
+> = {
+	reload: () => "keep",
+	resume: ({ sameSession }) => (sameSession ? "keep" : "cancel"),
+	// The user's quit ends the session; a signal nobody sent is a crash.
+	quit: async ({ killedBySignal }) => ((await killedBySignal()) ? "keep" : "cancel"),
+	new: () => "cancel",
+	fork: () => "cancel",
+};
+
 /**
  * The pi side of one session instance's wake-ups (ADR-0009): scheduling and recording one, firing it once due and the
  * session idle, recording each end, restoring them from the log, handing the pending set to the daemon after every
@@ -252,8 +275,8 @@ export function wakeupLifecycle(deps: WakeupLifecycleDeps) {
 	const owner = () => deps.session()?.sessionManager.getSessionId();
 
 	const dueWakeup = () => {
-		const session = owner();
-		return session === undefined ? undefined : wakeups.list(session).find((wakeup) => wakeup.dueAt <= deps.now());
+		const sessionId = owner();
+		return sessionId === undefined ? undefined : wakeups.list(sessionId).find((wakeup) => wakeup.dueAt <= deps.now());
 	};
 	/**
 	 * Starts the turn of the session's earliest due wake-up once the session is idle. Until then it stays pending,
@@ -312,9 +335,9 @@ export function wakeupLifecycle(deps: WakeupLifecycleDeps) {
 	};
 
 	const cancelAll = () => {
-		const session = owner();
-		if (session === undefined) return;
-		for (const wakeup of wakeups.list(session)) wakeups.take(wakeup.id, session);
+		const sessionId = owner();
+		if (sessionId === undefined) return;
+		for (const wakeup of wakeups.list(sessionId)) wakeups.take(wakeup.id, sessionId);
 	};
 
 	return {
@@ -347,10 +370,10 @@ export function wakeupLifecycle(deps: WakeupLifecycleDeps) {
 		 * Nor do those a Delete cancelled, which the log records now. This pi holds the rest, and says so to the daemon,
 		 * which leaves them to it while it runs. Returns how many it holds.
 		 */
-		restore(reason: "startup" | "reload" | "new" | "resume" | "fork"): number {
+		restore(reason: SessionStartEvent["reason"]): number {
 			const session = deps.session();
 			if (!session) return 0;
-			const id = session.sessionManager.getSessionId();
+			const sessionId = session.sessionManager.getSessionId();
 			for (const record of pendingWakeups(session.sessionManager.getEntries())) {
 				const deleted = cancelledByDelete(record.id);
 				if (reason === "fork" || deleted) {
@@ -359,7 +382,7 @@ export function wakeupLifecycle(deps: WakeupLifecycleDeps) {
 					if (deleted && reason !== "fork") forgetCancelled(record.id);
 				} else {
 					wakeups.schedule({
-						owner: id,
+						owner: sessionId,
 						prompt: record.prompt,
 						dueAt: record.dueAt,
 						restore: record,
@@ -368,7 +391,7 @@ export function wakeupLifecycle(deps: WakeupLifecycleDeps) {
 					});
 				}
 			}
-			const stored = wakeups.list(id).length;
+			const stored = wakeups.list(sessionId).length;
 			if (stored > 0) handOff();
 			return stored;
 		},
@@ -379,23 +402,16 @@ export function wakeupLifecycle(deps: WakeupLifecycleDeps) {
 		/** Cancels the session's wake-ups: tree navigation ends them. */
 		cancel: cancelAll,
 
-		/**
-		 * At shutdown: a reload, or a `/resume` of the session itself, leaves its wake-ups pending for the next instance,
-		 * and so does a crash, which a signal nobody sent counts as. Anything else ends the session and cancels them.
-		 */
-		async shutdown(event: {
-			reason: "quit" | "reload" | "new" | "resume" | "fork";
-			targetSessionFile?: string;
-		}): Promise<"keep" | "cancel"> {
-			const session = owner();
-			const kept =
-				event.reason === "reload" ||
-				(event.reason === "resume" &&
-					event.targetSessionFile === deps.session()?.sessionManager.getSessionFile()) ||
-				(event.reason === "quit" && (await deps.killedBySignal()));
-			if (!kept) cancelAll();
-			else if (session !== undefined) wakeups.release(session);
-			return kept ? "keep" : "cancel";
+		/** At shutdown: keeps the session's wake-ups pending for the next instance, or cancels them, as AT_SHUTDOWN says. */
+		async shutdown(event: Pick<SessionShutdownEvent, "reason" | "targetSessionFile">): Promise<ShutdownOutcome> {
+			const sessionId = owner();
+			const outcome = await AT_SHUTDOWN[event.reason]({
+				sameSession: event.targetSessionFile === deps.session()?.sessionManager.getSessionFile(),
+				killedBySignal: deps.killedBySignal,
+			});
+			if (outcome === "cancel") cancelAll();
+			else if (sessionId !== undefined) wakeups.release(sessionId);
+			return outcome;
 		},
 	};
 }

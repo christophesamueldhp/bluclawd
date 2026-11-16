@@ -1,6 +1,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { SessionShutdownEvent } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cancelledByDelete, type HeldWakeups, markCancelled } from "../daemon/wakeups.ts";
 import { holdNotifications } from "../ext/background-bash/notification-hold.ts";
@@ -133,20 +134,20 @@ describe("scheduling a wake-up", () => {
 
 describe("the hand-off", () => {
 	it("starts no daemon when none runs and the session holds nothing", async () => {
-		const f = fixture({ daemon: { running: false } });
-		const wakeup = f.lifecycle.schedule({ prompt: "Check CI", delay: 600 });
-		wakeups.take(wakeup.id, "s1");
+		// A fork's copy, recorded cancelled, hands off the empty set.
+		const f = fixture({
+			daemon: { running: false },
+			entries: [
+				{
+					type: "custom",
+					customType: WAKEUP_ENTRY,
+					data: { id: "wfork0001", prompt: "Check CI", dueAt: NOW + 5 * MINUTE, scheduledAt: NOW },
+				},
+			],
+		});
+		expect(f.lifecycle.restore("fork")).toBe(0);
 		await settle();
-		// The schedule's hand-off starts it; once it holds the cancel's empty set, there is one to tell.
-		expect(f.calls).toEqual(["info", "ensure", `hold ${wakeup.id}`, "info", "hold "]);
-
-		const g = fixture({ daemon: { running: false } });
-		g.lifecycle.cancel();
-		expect(g.lifecycle.restore("startup")).toBe(0);
-		g.close();
-		await g.lifecycle.shutdown({ reason: "quit" });
-		await settle();
-		expect(g.calls).toEqual([]);
+		expect(f.calls).toEqual(["info"]);
 	});
 
 	it("starts the daemon when none runs and the session holds one", async () => {
@@ -209,12 +210,7 @@ describe("the hand-off", () => {
 });
 
 describe("keep or cancel at shutdown (ADR-0009)", () => {
-	const cases: [
-		string,
-		{ reason: "quit" | "reload" | "new" | "resume" | "fork"; targetSessionFile?: string },
-		boolean,
-		"keep" | "cancel",
-	][] = [
+	const cases: [string, Pick<SessionShutdownEvent, "reason" | "targetSessionFile">, boolean, "keep" | "cancel"][] = [
 		["a reload", { reason: "reload" }, false, "keep"],
 		["a /resume of the session itself", { reason: "resume", targetSessionFile: FILE }, false, "keep"],
 		["a /resume of another session", { reason: "resume", targetSessionFile: "/sessions/b.jsonl" }, false, "cancel"],
