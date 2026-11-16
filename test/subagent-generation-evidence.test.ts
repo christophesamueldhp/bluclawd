@@ -184,7 +184,7 @@ function storeTranscript(runDir: string, entries: object[]): string {
 
 describe("what the runtime saw of a Generation", () => {
 	it("is its Report, the commands it ran from its admission to the next one's, and what it changed in its worktree", async () => {
-		const { runDir, workspace } = await runWithWorktree();
+		const { agentDir, runDir, workspace } = await runWithWorktree();
 		admit(runDir, 0, { tools: ["edit", "bash"], workspace, admittedAt: at(0) });
 		storeRunReport(runDir, { text: "Added new.txt.", outcome: { status: "completed" }, generation: 0 });
 		admit(runDir, 1, { tools: ["edit", "bash"], workspace, admittedAt: at(30) });
@@ -194,7 +194,7 @@ describe("what the runtime saw of a Generation", () => {
 			...ran(40, "git diff"),
 		]);
 
-		const first = await generationEvidence(runDir, 0, { transcript, startedAt: at(20) });
+		const first = await generationEvidence(agentDir, runDir, 0, { transcript, startedAt: at(20) });
 		expect(first.report?.text).toBe("Added new.txt.");
 		expect(first.reportFile).toBe(join(runDir, "reports", "1.md"));
 		expect(first.tools).toEqual(["edit", "bash"]);
@@ -207,7 +207,7 @@ describe("what the runtime saw of a Generation", () => {
 		expect(first.workspace?.root).toBe(workspace.root);
 		expect(first.workspace?.lines.at(-1)).toBe("Changes since its baseline: A new.txt");
 
-		const second = await generationEvidence(runDir, 1, { transcript, startedAt: at(0) });
+		const second = await generationEvidence(agentDir, runDir, 1, { transcript, startedAt: at(0) });
 		expect(second.report).toBeUndefined();
 		expect(second.commands).toEqual({ ran: [{ command: "git diff", ended: "exit 0" }] });
 	});
@@ -215,26 +215,26 @@ describe("what the runtime saw of a Generation", () => {
 
 describe("what the runtime saw of a Generation stored before Admission kept when it admitted it", () => {
 	it("counts its commands from its reader's own start for it, while it is the run's latest", async () => {
-		const { runDir } = await runWithWorktree();
+		const { agentDir, runDir } = await runWithWorktree();
 		admit(runDir, 0, { tools: ["bash"] });
 		const transcript = storeTranscript(runDir, [...ran(5, "before"), ...ran(25, "after")]);
 
-		expect((await generationEvidence(runDir, 0, { transcript, startedAt: at(20) })).commands).toEqual({
+		expect((await generationEvidence(agentDir, runDir, 0, { transcript, startedAt: at(20) })).commands).toEqual({
 			ran: [{ command: "after", ended: "exit 0" }],
 		});
 		// One not admitted here at all, as a fake orchestrator's, counts the same.
-		expect((await generationEvidence(runDir, 3, { transcript, startedAt: at(20) })).commands).toEqual({
+		expect((await generationEvidence(agentDir, runDir, 3, { transcript, startedAt: at(20) })).commands).toEqual({
 			ran: [{ command: "after", ended: "exit 0" }],
 		});
 	});
 
 	it("does not know its commands once its run was resumed since", async () => {
-		const { runDir } = await runWithWorktree();
+		const { agentDir, runDir } = await runWithWorktree();
 		admit(runDir, 0, { tools: ["bash"] });
 		admit(runDir, 1, { tools: ["bash"] });
 		const transcript = storeTranscript(runDir, ran(5, "either"));
 
-		expect((await generationEvidence(runDir, 0, { transcript, startedAt: at(0) })).commands).toEqual({
+		expect((await generationEvidence(agentDir, runDir, 0, { transcript, startedAt: at(0) })).commands).toEqual({
 			unknown: "resumed",
 		});
 	});
@@ -242,22 +242,22 @@ describe("what the runtime saw of a Generation stored before Admission kept when
 
 describe("what the runtime saw of a Generation, as far as it can", () => {
 	it("does not know its commands when its transcript cannot be read, or none was stored", async () => {
-		const { runDir } = await runWithWorktree();
+		const { agentDir, runDir } = await runWithWorktree();
 		admit(runDir, 0, { tools: ["bash"], admittedAt: at(0) });
 
 		const unread = { unknown: "unreadable" };
-		expect((await generationEvidence(runDir, 0, { transcript: join(runDir, "missing.jsonl") })).commands).toEqual(
-			unread,
-		);
-		expect((await generationEvidence(runDir, 0, {})).commands).toEqual(unread);
+		expect(
+			(await generationEvidence(agentDir, runDir, 0, { transcript: join(runDir, "missing.jsonl") })).commands,
+		).toEqual(unread);
+		expect((await generationEvidence(agentDir, runDir, 0, {})).commands).toEqual(unread);
 	});
 
 	it("has no worktree for a role with no tool that changes files", async () => {
-		const { runDir } = await runWithWorktree();
+		const { agentDir, runDir } = await runWithWorktree();
 		admit(runDir, 0, { tools: ["read"], admittedAt: at(0) });
 		storeRunReport(runDir, { text: "Read it.", outcome: { status: "completed" }, generation: 0 });
 
-		const evidence = await generationEvidence(runDir, 0, { transcript: storeTranscript(runDir, []) });
+		const evidence = await generationEvidence(agentDir, runDir, 0, { transcript: storeTranscript(runDir, []) });
 		expect(evidence).toMatchObject({ tools: ["read"], commands: { ran: [] } });
 		expect(evidence.workspace).toBeUndefined();
 	});
@@ -265,7 +265,7 @@ describe("what the runtime saw of a Generation, as far as it can", () => {
 
 describe("a single Run's checks", () => {
 	it("are the same counted from its Generation's admission as from when its run queued", async () => {
-		const { runDir, workspace } = await runWithWorktree();
+		const { agentDir, runDir, workspace } = await runWithWorktree();
 		admit(runDir, 0, { tools: ["edit", "bash"], workspace, admittedAt: at(0) });
 		admit(runDir, 1, { tools: ["edit", "bash"], workspace, admittedAt: at(30) });
 		const queuedAt = at(31);
@@ -275,7 +275,7 @@ describe("a single Run's checks", () => {
 			...ran(36, "npm test"),
 		]);
 
-		const { commands } = await generationEvidence(runDir, 1, { transcript, startedAt: queuedAt });
+		const { commands } = await generationEvidence(agentDir, runDir, 1, { transcript, startedAt: queuedAt });
 		const lines = checksLines(["edit", "bash"], "ran" in commands ? commands.ran : []);
 		expect(lines).toEqual([
 			"Checks: the commands its transcript shows it ran, 2:",

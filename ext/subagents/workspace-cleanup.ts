@@ -9,7 +9,7 @@ import type { RunDirectory } from "./directory.ts";
 import { runProcessesLeft, runWorkspace } from "./generation-state.ts";
 import type { ParentScope } from "./parent-scope.ts";
 import { within } from "./run-workspace.ts";
-import { cleanWorktree, listChanges, UNLISTED } from "./run-worktree.ts";
+import { cleanWorktree, listChanges, UNLISTED, worktreeOwner } from "./run-worktree.ts";
 import { formatRunLabel } from "./runs.ts";
 import { subagentRunDir } from "./storage.ts";
 
@@ -68,11 +68,8 @@ export function registerWorkspaceCleanup(
 			if (occupied) return tell(occupied, "warning");
 			const gone = !existsSync(workspace.root);
 			try {
-				const removal = await cleanWorktree(
-					workspace,
-					{ agentDir, runId: record.runId, runDir },
-					() => busy() ?? inUse(),
-				);
+				const owner = worktreeOwner(workspace, agentDir, record.parentSessionId);
+				const removal = await cleanWorktree(workspace, owner, () => busy() ?? inUse());
 				if (gone) {
 					return tell(
 						`${workspace.root} was removed already; ${label} ${removal.restorable ? "can still be resumed, its worktree made again" : "can no longer be resumed"}.`,
