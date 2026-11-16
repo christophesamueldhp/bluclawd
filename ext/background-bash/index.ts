@@ -17,7 +17,6 @@ import type {
 	ExtensionCommandContext,
 	ExtensionContext,
 	InlineExtension,
-	SessionStartEvent,
 } from "@earendil-works/pi-coding-agent";
 import { createLocalBashOperations, getAgentDir } from "@earendil-works/pi-coding-agent";
 import {
@@ -33,8 +32,8 @@ import {
 import { Type } from "typebox";
 import { stripAnsi } from "../../daemon/ansi.ts";
 import { currentDaemonBuildId, OrchestratorClient } from "../../daemon/orchestrator-client.ts";
-import { endedAsQuit, piCommand, runParent, Tmux } from "../../daemon/tmux.ts";
-import { cancelledByDelete, forgetCancelled, type HeldWakeups, processStart } from "../../daemon/wakeups.ts";
+import { endedAsQuit, runParent, Tmux } from "../../daemon/tmux.ts";
+import { processStart } from "../../daemon/wakeups.ts";
 import { agentTasks, isAgentTaskId, subscribeAgentTasks } from "../_shared/agent-tasks.ts";
 import { commandBlock } from "../_shared/command-block.ts";
 import { sharedRef } from "../_shared/global-state.ts";
@@ -69,18 +68,10 @@ import { restoreSessionModel } from "./session-model.ts";
 import { type TaskRow, TasksDialog, taskRows } from "./tasks-dialog.ts";
 import {
 	isWakeupTaskId,
-	pendingWakeups,
-	WAKEUP_END_ENTRY,
-	WAKEUP_ENTRY,
 	WAKEUP_MESSAGE_TYPE,
-	type Wakeup,
-	type WakeupEnd,
-	type WakeupEndRecord,
 	type WakeupMessageDetails,
-	type WakeupRecord,
 	wakeupClock,
-	wakeupDue,
-	wakeupMessage,
+	wakeupLifecycle,
 	wakeupScheduledText,
 	wakeups,
 	wakeupToolOffNotice,
@@ -240,103 +231,24 @@ const backgroundBash: InlineExtension = {
 			}),
 		);
 
-		/**
-		 * Starts the turn of the session's earliest due wake-up once the session is idle. Until then it stays
-		 * pending, listed and cancellable, rather than in pi's queue, which Esc clears. A send held by `/tasks`
-		 * checks again when it goes out.
-		 */
-		const dueWakeup = () => {
-			const session = owner();
-			return session === undefined ? undefined : wakeups.list(session).find((wakeup) => wakeup.dueAt <= Date.now());
-		};
-		const startDueWakeup = () => {
-			if (!dueWakeup()) return;
-			deliverOrHold(() => {
-				const due = dueWakeup();
-				if (!due || !ctx?.isIdle()) return;
-				wakeups.take(due.id, undefined, "fired");
-				pi.sendMessage(wakeupMessage(due, Date.now()), EVENT_DELIVERY);
-			});
-		};
-
-		let handing = Promise.resolve();
-		/**
-		 * Hands the daemon the session's pending wake-ups each time they change, so it can take one for the session once
-		 * this pi is gone (ADR-0009). Sent in order; one lost on the way is made up for by the session log, which the
-		 * daemon reads again before it acts.
-		 */
-		const handOff = () => {
-			const session = owner();
-			const sessionFile = ctx?.sessionManager.getSessionFile();
-			const startedAt = thisProcessStart();
-			if (ctx?.mode !== "tui" || session === undefined || !sessionFile || startedAt === undefined) return;
-			const held: HeldWakeups = {
-				sessionFile,
-				cwd: ctx.sessionManager.getCwd(),
-				label: ctx.sessionManager.getSessionName(),
-				holder: { pid: process.pid, startedAt },
-				launch: { command: piCommand() },
-				wakeups: wakeups
-					.list(session)
-					.map(({ id, prompt, dueAt, scheduledAt }) => ({ id, prompt, dueAt, scheduledAt })),
-			};
-			handing = handing
-				.then(async () => {
-					const client = new OrchestratorClient();
-					// Scheduling one starts the daemon, as agent view does; one not running holds none to take back. One of an
-					// older build is replaced, as agent view replaces it: it would not know a hand-off.
-					const info = await client.getDaemonInfo();
-					if (!info.running && held.wakeups.length === 0) return;
-					if (info.running && info.buildId !== currentDaemonBuildId()) await client.restartDaemon();
-					else if (!info.running) await client.ensureDaemon();
-					await client.holdWakeups(held);
-				})
-				.catch(() => {});
-		};
-
-		const recordWakeupEnd = (wakeup: Pick<Wakeup, "id">, end: WakeupEnd) => {
-			pi.appendEntry<WakeupEndRecord>(WAKEUP_END_ENTRY, { id: wakeup.id, end });
-			handOff();
-		};
-
-		/**
-		 * The session's pending wake-ups, rebuilt from its log; overdue ones fall due at once. A fork's new session gets
-		 * none: those it copied are recorded cancelled, so a later `/resume` of it revives none either. Nor do those a
-		 * Delete cancelled, which the log records now.
-		 */
-		const restoreWakeups = (event: SessionStartEvent, startCtx: ExtensionContext) => {
-			const session = startCtx.sessionManager.getSessionId();
-			for (const record of pendingWakeups(startCtx.sessionManager.getEntries())) {
-				const deleted = cancelledByDelete(record.id);
-				if (event.reason === "fork" || deleted) {
-					recordWakeupEnd(record, "cancelled");
-					// A fork records it in its own log, not in the deleted session's.
-					if (deleted && event.reason !== "fork") forgetCancelled(record.id);
-				} else {
-					wakeups.schedule({
-						owner: session,
-						prompt: record.prompt,
-						dueAt: record.dueAt,
-						restore: record,
-						onDue: startDueWakeup,
-						onEnd: recordWakeupEnd,
-					});
-				}
-			}
-		};
-
-		/** Ending the session cancels its wake-ups. */
-		const cancelWakeups = () => {
-			const session = owner();
-			if (session === undefined) return;
-			for (const wakeup of wakeups.list(session)) wakeups.take(wakeup.id, session);
-		};
+		const sessionWakeups = wakeupLifecycle({
+			session: () => ctx,
+			append: (customType, data) => pi.appendEntry(customType, data),
+			send: (message) => pi.sendMessage(message, EVENT_DELIVERY),
+			daemon: () => new OrchestratorClient(),
+			buildId: currentDaemonBuildId,
+			holder: () => {
+				const startedAt = thisProcessStart();
+				return startedAt === undefined ? undefined : { pid: process.pid, startedAt };
+			},
+			now: Date.now,
+			killedBySignal,
+		});
 
 		// The orchestrator's only: a run does not schedule its own turns.
 		if (!runParent()) {
-			// The running turn has ended, and nothing else continues it.
-			pi.on("agent_settled", startDueWakeup);
-			pi.on("session_tree", cancelWakeups);
+			pi.on("agent_settled", sessionWakeups.settled);
+			pi.on("session_tree", sessionWakeups.cancel);
 			pi.registerTool({
 				name: "schedule_wakeup",
 				label: "ScheduleWakeup",
@@ -355,25 +267,8 @@ const backgroundBash: InlineExtension = {
 					delay: Type.Optional(Type.Number({ description: "Seconds from now, 60 to 86400" })),
 					at: Type.Optional(Type.String({ description: "A local 24-hour clock time, HH:MM, e.g. 14:05" })),
 				}),
-				execute: async (_toolCallId, params, _signal, _onUpdate, toolCtx) => {
-					const prompt = params.prompt.trim();
-					if (!prompt) throw new Error("Missing required parameter: prompt");
-					const due = wakeupDue(params, Date.now());
-					if (!due.ok) throw new Error(due.error);
-					const wakeup = wakeups.schedule({
-						owner: toolCtx?.sessionManager?.getSessionId(),
-						prompt,
-						dueAt: due.dueAt,
-						onDue: startDueWakeup,
-						onEnd: recordWakeupEnd,
-					});
-					pi.appendEntry<WakeupRecord>(WAKEUP_ENTRY, {
-						id: wakeup.id,
-						prompt,
-						dueAt: wakeup.dueAt,
-						scheduledAt: wakeup.scheduledAt,
-					});
-					handOff();
+				execute: async (_toolCallId, params) => {
+					const wakeup = sessionWakeups.schedule(params);
 					return { content: [{ type: "text", text: wakeupScheduledText(wakeup) }], details: undefined };
 				},
 			});
@@ -545,13 +440,10 @@ const backgroundBash: InlineExtension = {
 			const previous = lastMainSession.get();
 			if (event.reason === "new" && previous && previous !== session) backgroundBashJobs.reown(previous, session);
 			lastMainSession.set(session);
-			if (!runParent()) restoreWakeups(event, startCtx);
-			const stored = wakeups.list(session).length;
-			if (!runParent() && stored > 0 && !pi.getActiveTools().includes("schedule_wakeup")) {
+			const stored = runParent() ? 0 : sessionWakeups.restore(event.reason);
+			if (stored > 0 && !pi.getActiveTools().includes("schedule_wakeup")) {
 				toolOffNoticeOnce(startCtx, getAgentDir(), "schedule-wakeup-tool-off", wakeupToolOffNotice(stored));
 			}
-			// This pi holds them now: the daemon leaves them to it while it runs.
-			if (stored > 0) handOff();
 			// Only pi's own TUI ends on its signal handlers; a listener here would keep a print run from ending on one.
 			if (startCtx.mode === "tui") watchSignals();
 			if (event.reason === "startup" || event.reason === "resume") reportOrphanShells(startCtx);
@@ -631,16 +523,7 @@ const backgroundBash: InlineExtension = {
 		});
 
 		pi.on("session_shutdown", async (event) => {
-			// A reload, or a `/resume` of the session itself, leaves its wake-ups pending for the next instance, and so
-			// does a crash (ADR-0009).
-			const session = owner();
-			const kept =
-				event.reason === "reload" ||
-				(event.reason === "resume" && event.targetSessionFile === ctx?.sessionManager.getSessionFile()) ||
-				(event.reason === "quit" && (await killedBySignal()));
-			if (kept) {
-				if (session !== undefined) wakeups.release(session);
-			} else cancelWakeups();
+			await sessionWakeups.shutdown(event);
 			clearMainSession();
 			for (const off of cleanups.splice(0)) off();
 			clearTimeout(hintTimer);
