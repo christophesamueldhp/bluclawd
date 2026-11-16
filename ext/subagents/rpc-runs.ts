@@ -756,12 +756,19 @@ export async function executeRpcRun(
 	controller.markDelivered(report.seq);
 	controller.updateProgress(report.text);
 	const fullReport = storedRunReportTextPath(launch.runDir, report.seq);
-	// A step of a chain is integrated with its chain, once the chain has completed; a Resume of the step as well.
-	const integrated = !record.chain
-		? launch.name
-		: chainCompleted(launch.agentDir, record.parentSessionId, record.chain)
-			? record.chain
-			: undefined;
+	// A step of a chain is integrated with its chain once the chain has completed, a Resume of the step as well; a step
+	// running in its chain keeps its worktree for the next one.
+	const integration =
+		!evidence.workspace ||
+		outcome.status !== "completed" ||
+		launch.keepWorktree ||
+		!existsSync(evidence.workspace.root)
+			? undefined
+			: !record.chain
+				? `subagent_integrate "${launch.name}" applies them`
+				: chainCompleted(launch.agentDir, record.parentSessionId, record.chain)
+					? `subagent_integrate "${record.chain}" applies its chain's changes`
+					: undefined;
 	// What the runtime saw, never cut: the run's claim above it takes what room is left.
 	const runtime = [
 		"---",
@@ -770,16 +777,7 @@ export async function executeRpcRun(
 		// Commands not known, its transcript unread, are listed as none, as they always were.
 		...checksLines(launch.tools, "ran" in evidence.commands ? evidence.commands.ran : []),
 		...(evidence.workspace ? workspaceLines : ["Changes: none: it had no tool that changes files."]),
-		// A step running in its chain is integrated with the chain once it settles.
-		...(evidence.workspace &&
-		outcome.status === "completed" &&
-		!launch.keepWorktree &&
-		integrated &&
-		existsSync(evidence.workspace.root)
-			? [
-					`Integration: once you have reviewed its changes, subagent_integrate "${integrated}" applies ${record.chain ? "its chain's" : "them"} to your checkout.`,
-				]
-			: []),
+		...(integration ? [`Integration: once you have reviewed its changes, ${integration} to your checkout.`] : []),
 		`Transcript: ${exited.sessionFile ?? "none"}`,
 		`Report: ${fullReport}`,
 		...(report.untaken ? [`Untaken: ${untakenText(report.untaken, launch.runDir, record.generation)}.`] : []),

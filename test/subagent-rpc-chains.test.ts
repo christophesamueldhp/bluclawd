@@ -619,8 +619,8 @@ describe.skipIf(!hasTmux)("a plain Resume of a step of a chain that settled", ()
 			const main = await real.waitForRequests("main", 6);
 			const report = conversation(main[4]).at(-1)?.text ?? "";
 			expect(report).toMatch(/^Changes since its baseline: A pkg\/new\.txt$/m);
-			expect(report).toMatch(
-				new RegExp(`^Integration: once you have reviewed its changes, subagent_integrate "${chain}" applies`, "m"),
+			expect(report).toContain(
+				`\nIntegration: once you have reviewed its changes, subagent_integrate "${chain}" applies its chain's changes to your checkout.\n`,
 			);
 			expect(report).not.toContain('subagent_integrate "b"');
 
