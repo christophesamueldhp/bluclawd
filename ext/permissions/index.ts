@@ -1,3 +1,4 @@
+import { homedir } from "node:os";
 import type {
 	ExtensionAPI,
 	ExtensionContext,
@@ -12,6 +13,12 @@ import { type StartupSettings, startupSettings } from "../_shared/startup-settin
 import { STATUS_KEYS } from "../_shared/status-keys.ts";
 import { timed } from "../_shared/timing.ts";
 import { type ProjectTrust, trustBadge } from "../_shared/trust-badge.ts";
+import {
+	agentCredentialPaths,
+	globalSandboxSetting,
+	protectedProjectWritePaths,
+	SANDBOX_SETTINGS_CHANGED,
+} from "../sandbox/config.ts";
 import { evaluateToolCallDeny, filterDeniedGrepToolResult } from "./policy.ts";
 import { legacyAbsoluteDenyRule } from "./rules.ts";
 
@@ -51,8 +58,22 @@ export async function setProjectTrust(
 	pi.events.emit(TRUST_CHANGED, trust);
 }
 
+function builtInFileDenyRules(cwd: string, sm: SettingsManager): string[] {
+	const sandbox = globalSandboxSetting(sm);
+	if (sandbox.kind !== "on") return [];
+	const absoluteRulePath = (path: string) => `/${path.replaceAll("*", "\\*")}`;
+	return [
+		...protectedProjectWritePaths(cwd, homedir(), sandbox.settings.allowWrite).map(
+			(path) => `Edit(${absoluteRulePath(path)}/**)`,
+		),
+		...agentCredentialPaths().map((path) => `Read(${absoluteRulePath(path)})`),
+	];
+}
+
 function factory(pi: ExtensionAPI): void {
 	let deny: string[] = [];
+	let builtInFileDeny: string[] = [];
+	let cwd: string | undefined;
 
 	function loadDeny(ctx: ExtensionContext, { settings: sm, errors }: StartupSettings): void {
 		deny = forkSettings.denyRules(sm);
@@ -75,18 +96,26 @@ function factory(pi: ExtensionAPI): void {
 	}
 
 	pi.on("session_start", async (event, ctx) => {
+		cwd = ctx.cwd;
 		const read = startupSettings(event, ctx);
 		loadDeny(ctx, read);
+		builtInFileDeny = builtInFileDenyRules(cwd, read.settings);
 		refreshBadge(ctx, read.settings.getDefaultProjectTrust());
 	});
 
+	pi.events.on(SANDBOX_SETTINGS_CHANGED, () => {
+		if (cwd === undefined) return;
+		const sm = SettingsManager.create(cwd, undefined, { projectTrusted: false });
+		builtInFileDeny = builtInFileDenyRules(cwd, sm);
+	});
+
 	pi.on("tool_call", async (event, ctx): Promise<ToolCallEventResult | undefined> => {
-		return evaluateToolCallDeny(deny, event.toolName, event.input as Record<string, unknown>, ctx.cwd);
+		return evaluateToolCallDeny(deny, event.toolName, event.input, ctx.cwd, builtInFileDeny);
 	});
 
 	pi.on("tool_result", async (event, ctx): Promise<ToolResultEventResult | undefined> => {
 		return filterDeniedGrepToolResult(
-			deny,
+			[...deny, ...builtInFileDeny],
 			{
 				toolName: event.toolName,
 				input: event.input as Record<string, unknown>,
