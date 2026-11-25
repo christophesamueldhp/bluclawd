@@ -1,0 +1,114 @@
+import { mkdtemp, rm } from "node:fs/promises";
+import { createConnection, createServer, type Server } from "node:net";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { BUILD_ID, VERSION } from "../daemon/config.ts";
+import { type IpcRequestHandler, startIpcServer } from "../daemon/ipc/server.ts";
+import { OrchestratorClient } from "../daemon/orchestrator-client.ts";
+
+describe("startIpcServer — version echo", () => {
+	let tempDir: string;
+	let server: Server | undefined;
+
+	beforeEach(async () => {
+		tempDir = await mkdtemp(join(tmpdir(), "bluclawd-ipc-server-test-"));
+		vi.stubEnv("PI_SERVER_DIR", tempDir);
+	});
+
+	afterEach(async () => {
+		server?.close();
+		server = undefined;
+		vi.unstubAllEnvs();
+		await rm(tempDir, { recursive: true, force: true });
+	});
+
+	function fakeHandler(): IpcRequestHandler {
+		const handler = (async (request: { type: string }) => {
+			if (request.type === "list") return { type: "list_result", ok: true, instances: [] };
+			return { type: "error", ok: false, error: "unsupported in this test" };
+		}) as IpcRequestHandler;
+		return handler;
+	}
+
+	async function sendRaw(socketPath: string, line: string): Promise<Record<string, unknown>> {
+		return new Promise((resolve, reject) => {
+			const socket = createConnection(socketPath);
+			let buffer = "";
+			socket.on("connect", () => socket.write(`${line}\n`));
+			socket.on("data", (chunk: Buffer) => {
+				buffer += chunk.toString();
+				const nl = buffer.indexOf("\n");
+				if (nl === -1) return;
+				resolve(JSON.parse(buffer.slice(0, nl)));
+				socket.end();
+			});
+			socket.on("error", reject);
+		});
+	}
+
+	it("echoes version, buildId and pid on a normal response", async () => {
+		server = await startIpcServer(fakeHandler());
+		const response = await sendRaw(join(tempDir, "server.sock"), JSON.stringify({ type: "list" }));
+
+		expect(response.type).toBe("list_result");
+		expect(response.version).toBe(VERSION);
+		expect(response.buildId).toBe(BUILD_ID);
+		expect(typeof response.buildId).toBe("string");
+		expect(response.pid).toBe(process.pid);
+	});
+
+	it("echoes version and buildId even on a parse-error response", async () => {
+		server = await startIpcServer(fakeHandler());
+		const response = await sendRaw(join(tempDir, "server.sock"), "not json");
+
+		expect(response.ok).toBe(false);
+		expect(response.version).toBe(VERSION);
+		expect(response.buildId).toBe(BUILD_ID);
+	});
+
+	it("sends a request of a type it does not know no answer of any type, without asking the handler", async () => {
+		const asked: unknown[] = [];
+		server = await startIpcServer((async (request: unknown) => {
+			asked.push(request);
+			return { type: "ack", ok: true };
+		}) as IpcRequestHandler);
+		const socketPath = join(tempDir, "server.sock");
+
+		for (const type of ["from_a_later_client", "constructor", "toString", 7]) {
+			const response = await sendRaw(socketPath, JSON.stringify({ type }));
+			expect(response).toEqual({ version: VERSION, buildId: BUILD_ID, pid: process.pid });
+		}
+		expect(asked).toEqual([]);
+	});
+
+	it("preserves Unicode in CLI responses split inside a UTF-8 character", async () => {
+		const response = {
+			type: "list_result",
+			ok: true,
+			instances: [{ id: "pane", label: "Session ✻ 中文" }],
+		};
+		const bytes = Buffer.from(`${JSON.stringify(response)}\n`);
+		const cut = bytes.indexOf(Buffer.from("✻")) + 1;
+		server = createServer((socket) => {
+			socket.once("data", () => {
+				socket.write(bytes.subarray(0, cut));
+				setTimeout(() => socket.end(bytes.subarray(cut)), 20);
+			});
+		});
+		await new Promise<void>((resolve) => server?.listen(join(tempDir, "server.sock"), resolve));
+
+		expect(await new OrchestratorClient().request({ type: "list" })).toEqual(response);
+	});
+
+	it("reads a large request whole, with characters cut across its reads", async () => {
+		const received: unknown[] = [];
+		server = await startIpcServer((async (request: unknown) => {
+			received.push(request);
+			return { type: "ack", ok: true };
+		}) as IpcRequestHandler);
+		const name = "✻".repeat(200_000);
+		await new OrchestratorClient(join(tempDir, "server.sock")).rename("pane", name);
+		expect(received).toEqual([{ type: "rename", instanceId: "pane", name }]);
+	});
+});

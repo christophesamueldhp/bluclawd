@@ -1,0 +1,389 @@
+import { validateToolArguments } from "@earendil-works/pi-ai";
+import { createLocalBashOperations } from "@earendil-works/pi-coding-agent";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { type BackgroundExec, BackgroundJobRegistry } from "../ext/background-bash/background-bash.ts";
+import { createMonitorTool, stdoutOnly, websocketExec } from "../ext/background-bash/monitor-tool.ts";
+import { waitFor } from "./helpers/wait-for.ts";
+
+function harness(exec: BackgroundExec, commandPrefix?: () => string | undefined) {
+	const sent: { message: any; options: any }[] = [];
+	const registry = new BackgroundJobRegistry();
+	const tool = createMonitorTool({
+		sendMessage: (message, options) => sent.push({ message, options }),
+		cwd: "/",
+		exec,
+		commandPrefix,
+		registry,
+		rateLimit: { capacity: 2, refillMs: 60_000, maxSuppressMs: 500 },
+	}) as any;
+	const id = () => registry.list()[0]?.id as string;
+	return { tool, sent, registry, id };
+}
+
+describe("monitor tool", () => {
+	beforeEach(() => vi.useFakeTimers());
+	afterEach(() => vi.useRealTimers());
+
+	it("accepts a call that omits timeout_ms", () => {
+		// pi validates but never applies schema defaults, so a required `timeout_ms`
+		// would turn the documented default into a validation error.
+		const { tool } = harness(() => new Promise(() => {}));
+		const args = validateToolArguments(tool, {
+			type: "toolCall",
+			id: "c1",
+			name: "monitor",
+			arguments: { command: "x", description: "d" },
+		});
+		expect(args).toMatchObject({ command: "x" });
+	});
+
+	it("starts a monitor job and reports its id in bluclawd's words", async () => {
+		const { tool, registry, id } = harness(() => new Promise(() => {}));
+		const result = await tool.execute(
+			"c1",
+			{ command: "tail -f x", description: "x errors" },
+			undefined as any,
+			undefined,
+		);
+		expect(id()).toMatch(/^b[0-9a-z]{8}$/);
+		expect(result.content[0].text).toBe(
+			`Monitor started (task ${id()}, expires in 5m unless the source ends first; you get one notice at expiry — re-arm if you still need the watch). You will be notified on each event. Keep working — do not poll or sleep. Events may arrive while you are waiting for the user — an event is not their reply.`,
+		);
+		expect(registry.get(id())).toMatchObject({ kind: "monitor", description: "x errors" });
+	});
+
+	it("sends one steer+triggerTurn notification per batch and a terminal one on exit", async () => {
+		const exec: BackgroundExec = async (_c, _d, { onData }) => {
+			onData(Buffer.from("a\nb\n"));
+			await new Promise((r) => setTimeout(r, 500));
+			return { exitCode: 0 };
+		};
+		const { tool, sent } = harness(exec);
+		await tool.execute("c1", { command: "x", description: "d" }, undefined as any, undefined);
+		await vi.advanceTimersByTimeAsync(600);
+		expect(sent).toHaveLength(2);
+		expect(sent[0].message.content).toContain('<summary>Monitor event: "d"</summary>\n<event>a\nb</event>');
+		expect(sent[1].message.content).toContain('<summary>Monitor "d" stream ended</summary>');
+		expect(sent[0].options).toEqual({ deliverAs: "steer", triggerTurn: true });
+	});
+
+	it("folds leftover lines into the terminal message instead of sending two", async () => {
+		const exec: BackgroundExec = async (_c, _d, { onData }) => {
+			onData(Buffer.from("only\n"));
+			return { exitCode: 3 };
+		};
+		const { tool, sent, registry, id } = harness(exec);
+		await tool.execute("c1", { command: "x", description: "d" }, undefined as any, undefined);
+		await vi.advanceTimersByTimeAsync(0);
+		expect(sent).toHaveLength(1);
+		expect(sent[0].message.content).toContain(
+			'<summary>Monitor "d" script failed (exit 3)</summary>\n<event>only</event>',
+		);
+		expect(registry.get(id())?.events).toBe(1);
+	});
+
+	it("keeps the event count at 0 when a monitor exits with no leftover lines", async () => {
+		const exec: BackgroundExec = async () => ({ exitCode: 0 });
+		const { tool, registry, id, sent } = harness(exec);
+		await tool.execute("c1", { command: "x", description: "d" }, undefined as any, undefined);
+		await vi.advanceTimersByTimeAsync(0);
+		expect(registry.get(id())?.events).toBe(0);
+		expect(sent[0].message.content).toContain('Monitor "d" ended without producing output (exit 0)');
+	});
+
+	it("suppresses events past the bucket, says so, and stops after a long suppression", async () => {
+		let onDataRef!: (b: Buffer) => void;
+		const exec: BackgroundExec = (_c, _d, { onData, signal }) =>
+			new Promise((_resolve, reject) => {
+				onDataRef = onData;
+				signal?.addEventListener("abort", () => reject(new Error("aborted")));
+			});
+		const { tool, sent, registry, id } = harness(exec);
+		await tool.execute("c1", { command: "x", description: "d" }, undefined as any, undefined);
+		for (let i = 0; i < 7; i++) {
+			onDataRef(Buffer.from(`${i}\n`));
+			await vi.advanceTimersByTimeAsync(250);
+		}
+		expect(
+			sent.filter((s) => s.message.content.includes("<event>0") || s.message.content.includes("<event>1")),
+		).toHaveLength(2);
+		expect(registry.get(id())?.stopReason).toMatch(
+			/^\[Monitor stopped — too much output \(\d+ events suppressed over \d+s\)/,
+		);
+		expect(sent.at(-1)?.message.content).toContain("[Monitor stopped — too much output");
+		const afterExit = sent.length;
+		onDataRef(Buffer.from("late\n"));
+		await vi.advanceTimersByTimeAsync(250);
+		expect(sent.length).toBe(afterExit);
+	});
+
+	it("stops sustained overload even while refilled tokens deliver occasional events", async () => {
+		let onDataRef!: (b: Buffer) => void;
+		const exec: BackgroundExec = (_c, _d, { onData, signal }) =>
+			new Promise((_resolve, reject) => {
+				onDataRef = onData;
+				signal?.addEventListener("abort", () => reject(new Error("aborted")));
+			});
+		const registry = new BackgroundJobRegistry({ outputRoot: null });
+		const tool = createMonitorTool({ cwd: "/", exec, registry, sendMessage: () => {} });
+		await tool.execute("c1", { command: "x", description: "d" }, undefined, undefined, undefined as any);
+		for (let i = 0; i < 300; i++) {
+			onDataRef(Buffer.from(`${i}\n`));
+			await vi.advanceTimersByTimeAsync(200);
+		}
+		expect(registry.list()[0]?.stopReason).toContain("Monitor stopped — too much output");
+	});
+
+	it("resets the overload window after the source has recovered", async () => {
+		let onDataRef!: (b: Buffer) => void;
+		const exec: BackgroundExec = (_c, _d, { onData }) =>
+			new Promise(() => {
+				onDataRef = onData;
+			});
+		const registry = new BackgroundJobRegistry({ outputRoot: null });
+		const tool = createMonitorTool({
+			cwd: "/",
+			exec,
+			registry,
+			sendMessage: () => {},
+			rateLimit: { capacity: 1, refillMs: 1000, maxSuppressMs: 2000 },
+		});
+		await tool.execute("c1", { command: "x", description: "d" }, undefined, undefined, undefined as any);
+		for (let episode = 0; episode < 2; episode++) {
+			for (let i = 0; i < 6; i++) {
+				onDataRef(Buffer.from(`${i}\n`));
+				await vi.advanceTimersByTimeAsync(250);
+			}
+			await vi.advanceTimersByTimeAsync(1500);
+		}
+		expect(registry.list()[0]?.killed).toBe(false);
+	});
+
+	it("reports how many events it suppressed once the bucket refills", async () => {
+		let onDataRef!: (b: Buffer) => void;
+		const exec: BackgroundExec = (_c, _d, { onData }) =>
+			new Promise(() => {
+				onDataRef = onData;
+			});
+		const sent: { message: any }[] = [];
+		const registry = new BackgroundJobRegistry({ outputRoot: null });
+		const tool = createMonitorTool({
+			sendMessage: (message) => sent.push({ message }),
+			cwd: "/",
+			exec,
+			registry,
+			rateLimit: { capacity: 1, refillMs: 1000, maxSuppressMs: 60_000 },
+		}) as any;
+		await tool.execute("c1", { command: "x", description: "d" }, undefined as any, undefined);
+		onDataRef(Buffer.from("first\n"));
+		await vi.advanceTimersByTimeAsync(250);
+		onDataRef(Buffer.from("dropped\n"));
+		await vi.advanceTimersByTimeAsync(250);
+		await vi.advanceTimersByTimeAsync(1000);
+		onDataRef(Buffer.from("back\n"));
+		await vi.advanceTimersByTimeAsync(250);
+		expect(sent).toHaveLength(2);
+		expect(sent[1].message.content).toContain(
+			"<event>[1 events suppressed — output rate too high. Consider using TaskStop to restart this monitor with a more selective filter.]\nback</event>",
+		);
+	});
+
+	it("sends one expiry notice when the timeout ends it", async () => {
+		const exec: BackgroundExec = async (_c, _d, { timeout }) => {
+			throw new Error(`timeout:${timeout}`);
+		};
+		const { tool, sent } = harness(exec);
+		await tool.execute("c1", { command: "x", description: "d" }, undefined as any, undefined);
+		await vi.advanceTimersByTimeAsync(0);
+		expect(sent).toHaveLength(1);
+		expect(sent[0].message.content).toContain(
+			"<event>[Monitor expired after 5m with no events delivered. Re-arm it if you still need the watch — and widen the filter if silence was unexpected.]</event>",
+		);
+	});
+
+	it("delivers nothing more once killed, even if the child ignores the signal", async () => {
+		let onDataRef!: (b: Buffer) => void;
+		const exec: BackgroundExec = (_c, _d, { onData }) =>
+			new Promise(() => {
+				onDataRef = onData;
+			});
+		const { tool, sent, registry, id } = harness(exec);
+		await tool.execute("c1", { command: "x", description: "d" }, undefined as any, undefined);
+		registry.kill(id(), { reason: "a registry stop" });
+		const afterKill = sent.length;
+		onDataRef(Buffer.from("late\n"));
+		await vi.advanceTimersByTimeAsync(250);
+		expect(sent.length).toBe(afterKill);
+	});
+
+	it("stays quiet after the model's own task_stop, and tells it about a stop the user made", async () => {
+		const exec: BackgroundExec = (_c, _d, { signal }) =>
+			new Promise((_resolve, reject) => signal?.addEventListener("abort", () => reject(new Error("aborted"))));
+		const { tool, sent, registry } = harness(exec);
+		await tool.execute("c1", { command: "x", description: "d" }, undefined as any, undefined);
+		await tool.execute("c2", { command: "y", description: "e" }, undefined as any, undefined);
+		const [first, second] = registry.list();
+		registry.kill(first.id);
+		registry.kill(second.id, { byUser: true });
+		await vi.advanceTimersByTimeAsync(0);
+		expect(sent).toHaveLength(1);
+		expect(sent[0].message.content).toContain('<summary>Task "e" was stopped by the user</summary>');
+	});
+
+	it("passes timeout_ms through in seconds, capped at 30 minutes", async () => {
+		const seen: (number | undefined)[] = [];
+		const exec: BackgroundExec = (_c, _d, { timeout }) => {
+			seen.push(timeout);
+			return new Promise(() => {});
+		};
+		const { tool } = harness(exec);
+		await tool.execute("c1", { command: "x", description: "d" }, undefined as any, undefined);
+		await tool.execute("c2", { command: "x", description: "d", timeout_ms: 60_000 }, undefined as any, undefined);
+		await tool.execute("c3", { command: "x", description: "d", timeout_ms: 3_600_000 }, undefined as any, undefined);
+		expect(seen).toEqual([300, 60, 1800]);
+	});
+
+	it("refuses a timeout_ms past an hour or under a second, as bluclawd's schema does", () => {
+		const { tool } = harness(() => new Promise(() => {}));
+		const call = (timeout_ms: number) => () =>
+			validateToolArguments(tool, {
+				type: "toolCall",
+				id: "c1",
+				name: "monitor",
+				arguments: { command: "x", description: "d", timeout_ms },
+			});
+		expect(call(3_600_001)).toThrow();
+		expect(call(999)).toThrow();
+		expect(call(1000)).not.toThrow();
+	});
+
+	it("states each of its rules once: in its description, or where the parameter is filled", () => {
+		const { tool } = harness(() => new Promise(() => {}));
+		const { properties } = tool.parameters;
+		for (const rule of [
+			"they are not replies from the user",
+			"**bash with `run_in_background`**",
+			"Every pipe stage must flush per line",
+			"merge it with `2>&1`",
+			"**Silence is not success.** The filter must match every terminal state",
+			"Never pipe raw logs",
+			"Use task_stop to cancel early",
+		]) {
+			expect(tool.description).toContain(rule);
+		}
+		expect(properties.description.description).toContain("it appears in every notification");
+		expect(properties.ws.description).toContain("Prefer it over `websocat`");
+		expect(properties.timeout_ms.description).toContain("Milliseconds");
+		expect(tool.description).not.toContain("Write a specific `description`");
+		expect(tool.description).not.toContain("**ws source**");
+	});
+
+	it("carries no persistent parameter: every monitor expires", () => {
+		const { tool } = harness(() => new Promise(() => {}));
+		expect(Object.keys(tool.parameters.properties)).toEqual(["command", "ws", "description", "timeout_ms"]);
+		expect(tool.description).toContain(
+			"Every monitor expires after `timeout_ms` (default 5 minutes, at most 30 minutes)",
+		);
+	});
+});
+
+describe("monitor sources", () => {
+	it("refuses a call with neither or both of command and ws", async () => {
+		const { tool } = harness(async () => ({ exitCode: 0 }));
+		for (const params of [{ description: "d" }, { command: "x", ws: { url: "wss://h" }, description: "d" }]) {
+			const result = await tool.execute("c1", params, undefined as any, undefined);
+			expect(result.isError).toBe(true);
+		}
+	});
+
+	it("runs the command when a strict-schema model sends an empty ws beside it", async () => {
+		const seen: string[] = [];
+		const { tool, registry } = harness(async (command) => {
+			seen.push(command);
+			return { exitCode: 0 };
+		});
+		const result = await tool.execute(
+			"c1",
+			{ command: "echo hi", ws: { url: "", protocols: [] }, description: "d" },
+			undefined as any,
+			undefined,
+		);
+		expect(result.isError).toBeUndefined();
+		expect(registry.list()[0].command).toBe("echo hi");
+	});
+
+	it("sends a command's stderr to the output file instead of the event stream", async () => {
+		const seen: string[] = [];
+		const exec: BackgroundExec = async (command) => {
+			seen.push(command);
+			return { exitCode: 0 };
+		};
+		await stdoutOnly(exec)("grep x log", "/", { onData: () => {}, outputFile: "/tmp/it's.output" });
+		expect(seen[0]).toBe("{ grep x log\n} 2>>'/tmp/it'\\''s.output'");
+		await stdoutOnly(exec)("grep x log", "/", { onData: () => {} });
+		expect(seen[1]).toBe("grep x log");
+	});
+
+	it("turns WebSocket frames into lines and close into the exit", async () => {
+		class FakeSocket {
+			static last: FakeSocket;
+			binaryType = "";
+			listeners: Record<string, ((e: any) => void)[]> = {};
+			constructor() {
+				FakeSocket.last = this;
+			}
+			addEventListener(type: string, fn: (e: any) => void) {
+				this.listeners[type] = [...(this.listeners[type] ?? []), fn];
+			}
+			emit(type: string, event: any) {
+				for (const fn of this.listeners[type] ?? []) fn(event);
+			}
+			close() {}
+		}
+		vi.stubGlobal("WebSocket", FakeSocket);
+		try {
+			const out: string[] = [];
+			const run = websocketExec("wss://events.example/stream")("", "/", { onData: (d) => out.push(d.toString()) });
+			FakeSocket.last.emit("message", { data: "deploy started" });
+			FakeSocket.last.emit("message", { data: new ArrayBuffer(4) });
+			FakeSocket.last.emit("close", { code: 1006, reason: "" });
+			expect(await run).toEqual({ exitCode: 1006 });
+			expect(out).toEqual(["deploy started\n", "[binary frame, 4 bytes]\n", "[WebSocket closed: 1006]\n"]);
+		} finally {
+			vi.unstubAllGlobals();
+		}
+	});
+});
+
+describe("monitor tool with pi's shellCommandPrefix", () => {
+	const shell: BackgroundExec = (command, cwd, options) => createLocalBashOperations().exec(command, cwd, options);
+	const watch = async (command: string, commandPrefix?: () => string | undefined) => {
+		const { tool, sent, registry } = harness(shell, commandPrefix);
+		await tool.execute("c1", { command, description: "d" }, undefined as any, undefined);
+		await waitFor(() => expect(sent).toHaveLength(1));
+		return { content: sent[0].message.content as string, job: registry.list()[0] };
+	};
+
+	it("runs the command after the prefix, and lists it as the model wrote it", async () => {
+		const { content, job } = await watch("echo $PFX", () => "export PFX=applied");
+		expect(content).toContain("<event>applied</event>");
+		expect(job.command).toBe("echo $PFX");
+	});
+
+	it("runs the command as written when the setting is absent", async () => {
+		const { content } = await watch("echo $PFX", () => undefined);
+		expect(content).toContain('<summary>Monitor "d" stream ended</summary>');
+		expect(content).not.toContain("<event>");
+	});
+
+	it("keeps the prefix's stderr out of the events, as the command's own", async () => {
+		const { content } = await watch("echo $PFX", () => "echo noise >&2; export PFX=applied");
+		expect(content).toContain("<event>applied</event>");
+		expect(content).not.toContain("noise");
+	});
+
+	it("lets the command use aliases the prefix defines, as pi's alias recipe does", async () => {
+		const { content } = await watch("hi", () => "shopt -s expand_aliases\nalias hi='echo aliased'");
+		expect(content).toContain("<event>aliased</event>");
+	});
+});

@@ -1,0 +1,274 @@
+import { spawnSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import type { AdmissionContext } from "../ext/subagents/admission.ts";
+import { type ChainDeps, resumeChains } from "../ext/subagents/chains.ts";
+import { admitGeneration, runDefinitionPath } from "../ext/subagents/generation-state.ts";
+import type { ChainStep } from "../ext/subagents/invocation.ts";
+import type { ParentScope } from "../ext/subagents/parent-scope.ts";
+import type { RunDefinition } from "../ext/subagents/rpc-runs.ts";
+import {
+	captureRunBaseline,
+	type IsolatedWorkspace,
+	materializeWorktree,
+	worktreePath,
+} from "../ext/subagents/run-worktree.ts";
+import { createRunId, type SubagentRunRecord } from "../ext/subagents/runs.ts";
+import { CallsUnderWay } from "../ext/subagents/settling.ts";
+import {
+	getSubagentsRootDir,
+	storeRunReport,
+	subagentRunDir,
+	writeAtomicPrivateFile,
+	writePersistedRunRecord,
+} from "../ext/subagents/storage.ts";
+
+const SESSION = "session-1";
+const at = (minute: number) => Date.parse(`2026-01-01T00:${String(minute).padStart(2, "0")}:00Z`);
+
+let root: string | undefined;
+afterEach(() => {
+	vi.useRealTimers();
+	if (root) rmSync(root, { recursive: true, force: true });
+	root = undefined;
+});
+
+function git(cwd: string, ...args: string[]): void {
+	const config = ["-c", "user.name=F", "-c", "user.email=f@example.com", "-c", "commit.gpgsign=false"];
+	const result = spawnSync("git", [...config, ...args], { cwd, encoding: "utf8" });
+	if (result.status !== 0) throw new Error(`git ${args.join(" ")}: ${result.stderr}`);
+}
+
+function closedRun(
+	runId: string,
+	name: string,
+	cwd: string,
+	extra: Partial<SubagentRunRecord> = {},
+): SubagentRunRecord {
+	return {
+		runId,
+		parentSessionId: SESSION,
+		sessionEpoch: 1,
+		parentTurnId: "turn_1",
+		originToolCallId: "call_1",
+		name,
+		generation: 0,
+		backend: "rpc",
+		agentName: name,
+		provider: "faux",
+		modelId: "faux-1",
+		thinkingLevel: "off",
+		cwd,
+		taskSummary: name,
+		admittedAt: at(0),
+		startedAt: at(0),
+		endedAt: at(30),
+		deliveryMode: "background",
+		chain: "chain_t",
+		status: "closed",
+		backgroundDeliveryAttempted: false,
+		...extra,
+	} as SubagentRunRecord;
+}
+
+async function chainWorktree(): Promise<{ agentDir: string; a: string; workspace: IsolatedWorkspace }> {
+	root = realpathSync(mkdtempSync(join(tmpdir(), "bc-chain-takeover-")));
+	const repo = join(root, "repo");
+	const agentDir = join(root, "agent");
+	mkdirSync(repo);
+	mkdirSync(agentDir);
+	writeFileSync(join(repo, "a.txt"), "one\n");
+	git(repo, "init", "-q");
+	git(repo, "add", ".");
+	git(repo, "commit", "-q", "-m", "start");
+	const a = createRunId();
+	const captured = captureRunBaseline(repo, a);
+	if (!captured.ok) throw new Error(captured.error);
+	const workspace = { root: worktreePath(agentDir, a), baseline: captured.baseline };
+	await materializeWorktree(workspace);
+	writeFileSync(join(workspace.root, "new.txt"), "v1\n");
+	return { agentDir, a, workspace };
+}
+
+function storeRun(
+	agentDir: string,
+	workspace: IsolatedWorkspace,
+	record: SubagentRunRecord,
+	generations: { tools: string[]; report: string; admittedAt?: number }[],
+	transcript: object[] = [],
+): void {
+	const runDir = subagentRunDir(agentDir, SESSION, record.runId);
+	const transcriptPath = join(runDir, "transcript.jsonl");
+	writePersistedRunRecord(agentDir, { ...record, transcriptPath });
+	const header = { type: "session", version: 3, id: "a", timestamp: new Date(at(0)).toISOString(), cwd: record.cwd };
+	writeFileSync(transcriptPath, `${[header, ...transcript].map((entry) => JSON.stringify(entry)).join("\n")}\n`);
+	generations.forEach(({ tools, report, admittedAt }, generation) => {
+		if (admittedAt !== undefined) vi.setSystemTime(admittedAt);
+		admitGeneration(runDir, generation, {
+			name: "writer",
+			description: "Edits files.",
+			instructions: "Make the change asked.",
+			tools,
+			deny: [],
+			cwd: workspace.root,
+			projectTrusted: false,
+			admitted: { provider: "faux", modelId: "faux-1", thinkingLevel: "off" },
+			workspace,
+		} as unknown as RunDefinition);
+		if (admittedAt === undefined) {
+			const path = runDefinitionPath(runDir, generation);
+			const { admittedAt: _, ...stored } = JSON.parse(readFileSync(path, "utf8"));
+			writeFileSync(path, JSON.stringify(stored));
+		}
+		storeRunReport(runDir, { text: report, outcome: { status: "completed" }, generation });
+	});
+	vi.useRealTimers();
+}
+
+function takeOver(
+	agentDir: string,
+	workspace: IsolatedWorkspace,
+	steps: ChainStep[],
+	ran: ({ runId: string; generation: number } | null)[],
+): Promise<{ tasks: string[]; aggregate: string }> {
+	writeAtomicPrivateFile(
+		join(getSubagentsRootDir(agentDir), SESSION, "chain-plans", "chain_t.json"),
+		JSON.stringify({ chain: "chain_t", steps, toolCallId: "call_1", parentTurnId: "turn_1", writes: true, ran }),
+	);
+	const tasks: string[] = [];
+	return new Promise((resolve) => {
+		const deps: ChainDeps = {
+			admission: {
+				check: async () => ({ ok: false, error: "no chain is checked after the takeover" }),
+				launch: async ({ params, runId }) => {
+					tasks.push(params.task);
+					const run = closedRun(runId ?? createRunId(), params.name ?? "", workspace.root);
+					storeRunReport(subagentRunDir(agentDir, SESSION, run.runId), {
+						text: "Admitted done.",
+						outcome: { status: "completed" },
+						generation: 0,
+					});
+					return { ok: true, handle: { runId: run.runId, record: run, completion: Promise.resolve(run) } };
+				},
+				resume: async () => ({ ok: false, error: "no step is resumed after the takeover" }),
+			},
+			nameHolder: () => undefined,
+			agentDir: () => agentDir,
+			reports: { next: () => new Promise(() => {}) },
+			getRun: () => undefined,
+			whenFinal: () => undefined,
+			handOff: new AbortController().signal,
+			cancel: () => {},
+			scope: {
+				current: () => ({ parentSessionId: SESSION, sessionEpoch: 2 }) as ParentScope,
+				inScope: () => true,
+				onBranch: () => true,
+			},
+			context: () => ({}) as AdmissionContext,
+			calls: new CallsUnderWay(),
+			notify: (_first, { parentText }) => resolve({ tasks, aggregate: parentText }),
+		};
+		resumeChains(deps, SESSION);
+	});
+}
+
+describe("a chain taken over before its next step's run existed", () => {
+	it("tells that step where the step that edits before it worked, and the aggregate each step's checks", async () => {
+		const { agentDir, a, workspace } = await chainWorktree();
+		storeRun(agentDir, workspace, closedRun(a, "a", workspace.root), [
+			{ tools: ["read", "write"], report: "Wrote v1." },
+		]);
+
+		const { tasks, aggregate } = await takeOver(
+			agentDir,
+			workspace,
+			[
+				{ run: { agent: "writer", name: "a", task: "Write new.txt." } },
+				{ run: { agent: "explorer", name: "b", task: "Look next." } },
+			],
+			[
+				{ runId: a, generation: 0 },
+				{ runId: createRunId(), generation: 0 },
+			],
+		);
+
+		expect(tasks).toHaveLength(1);
+		expect(tasks[0]).toContain("Look next.");
+		expect(tasks[0]).toContain("Wrote v1.");
+		expect(tasks[0]).toMatch(/^Changes since its baseline: A new\.txt$/m);
+		expect(aggregate).toMatch(/Chain chain_t: 2 steps, all completed\./);
+		expect(aggregate).toMatch(
+			/### chain\[0\] "a" \(sub_[\w-]+\): completed\nChecks: none ran: it had no tool that runs commands\.\nWrote v1\./,
+		);
+	}, 60_000);
+
+	const resumedRun = async (admittedAt: [number, number] | undefined) => {
+		const { agentDir, a, workspace } = await chainWorktree();
+		const tools = ["read", "write", "bash"];
+		storeRun(
+			agentDir,
+			workspace,
+			closedRun(a, "a", workspace.root, { generation: 1, startedAt: at(20) }),
+			[
+				{ tools, report: "Checked v1.", ...(admittedAt ? { admittedAt: admittedAt[0] } : {}) },
+				{ tools, report: "Checked again.", ...(admittedAt ? { admittedAt: admittedAt[1] } : {}) },
+			],
+			[
+				{
+					type: "message",
+					timestamp: new Date(at(5)).toISOString(),
+					message: {
+						role: "assistant",
+						content: [{ type: "toolCall", id: "t1", name: "bash", arguments: { command: "grep v1 new.txt" } }],
+					},
+				},
+				{
+					type: "message",
+					timestamp: new Date(at(5)).toISOString(),
+					message: { role: "toolResult", toolCallId: "t1", toolName: "bash", isError: false, content: "v1" },
+				},
+			],
+		);
+		return takeOver(
+			agentDir,
+			workspace,
+			[
+				{ run: { agent: "writer", name: "a", task: "Write new.txt." } },
+				{ resume: 0, task: "Check again." },
+				{ run: { agent: "explorer", name: "c", task: "Look last." } },
+			],
+			[
+				{ runId: a, generation: 0 },
+				{ runId: a, generation: 1 },
+				{ runId: createRunId(), generation: 0 },
+			],
+		);
+	};
+
+	it("counts the checks of a step whose run a later step resumed, from its own Generation's admission", async () => {
+		const { tasks, aggregate } = await resumedRun([at(0), at(20)]);
+
+		expect(tasks).toHaveLength(1);
+		expect(tasks[0]).toContain("Checked again.");
+		expect(aggregate).toMatch(/Chain chain_t: 3 steps, all completed\./);
+		expect(aggregate).toMatch(
+			/### chain\[0\] "a" \(sub_[\w-]+\): completed\nChecks: its transcript shows 1 command, 0 not ending with exit 0\.\nChecked v1\./,
+		);
+		expect(aggregate).toMatch(
+			/### chain\[1\] "a" \(sub_[\w-]+\), resumed: completed\nChecks: its transcript shows it ran no commands\.\nChecked again\./,
+		);
+	}, 60_000);
+
+	it("says what it cannot tell of the checks of a step resumed since, its Generations stored without their admission", async () => {
+		const { tasks, aggregate } = await resumedRun(undefined);
+
+		expect(tasks).toHaveLength(1);
+		expect(tasks[0]).toContain("Checked again.");
+		expect(tasks[0]).toMatch(/^Changes since its baseline: A new\.txt$/m);
+		expect(aggregate).toMatch(
+			/### chain\[0\] "a" \(sub_[\w-]+\): completed\nChecks: unknown: its run was resumed since\.\nChecked v1\./,
+		);
+	}, 60_000);
+});

@@ -1,0 +1,115 @@
+import { mkdtemp, rm } from "node:fs/promises";
+import { createServer, type Server } from "node:net";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { handleIpcRequest } from "../daemon/handler.ts";
+import { OrchestratorClient } from "../daemon/orchestrator-client.ts";
+import { testRegistry } from "./helpers/registry.ts";
+
+describe("daemon `shutdown` request", () => {
+	it("answers ok and then hands off to the process's shutdown hook", async () => {
+		let called = 0;
+		const shutdown = () => {
+			called++;
+		};
+		const response = await handleIpcRequest(testRegistry(), { type: "shutdown" }, { shutdown });
+		expect(response).toMatchObject({ type: "shutdown_result", ok: true });
+		expect(called).toBe(0);
+		await new Promise((r) => setTimeout(r, 150));
+		expect(called).toBe(1);
+	});
+
+	it("is an error when no shutdown is given", async () => {
+		const response = await handleIpcRequest(testRegistry(), { type: "shutdown" });
+		expect(response.ok).toBe(false);
+	});
+});
+
+describe("OrchestratorClient.shutdownDaemon", () => {
+	let dir: string;
+	let server: Server | undefined;
+
+	beforeEach(async () => {
+		dir = await mkdtemp(join(tmpdir(), "bluclawd-shutdown-"));
+	});
+	afterEach(async () => {
+		server?.close();
+		server = undefined;
+		await rm(dir, { recursive: true, force: true });
+	});
+
+	function fakeDaemon(socketPath: string, onShutdown: () => { ok: true } | { ok: false; error: string }) {
+		server = createServer((socket) => {
+			socket.on("data", (chunk) => {
+				const req = JSON.parse(chunk.toString().trim()) as { type: string };
+				if (req.type === "list")
+					socket.end(`${JSON.stringify({ type: "list_result", ok: true, instances: [] })}\n`);
+				else if (req.type === "shutdown") {
+					const verdict = onShutdown();
+					socket.end(`${JSON.stringify({ type: verdict.ok ? "shutdown_result" : "error", ...verdict })}\n`);
+					if (verdict.ok) setTimeout(() => server?.close(), 50);
+				} else socket.end(`${JSON.stringify({ type: "error", ok: false, error: "unknown" })}\n`);
+			});
+		});
+		return new Promise<void>((resolve) => server?.listen(socketPath, resolve));
+	}
+
+	it("resolves once the daemon has actually gone away", async () => {
+		const socketPath = join(dir, "server.sock");
+		await fakeDaemon(socketPath, () => ({ ok: true }));
+		const client = new OrchestratorClient(socketPath);
+		expect(await client.shutdownDaemon()).toEqual({ ok: true });
+		expect(await client.isRunning()).toBe(false);
+	});
+
+	it("resolves once the daemon has gone away, though a new one already answers in its place", async () => {
+		const socketPath = join(dir, "server.sock");
+		const daemon = (pid: number) => {
+			const next = createServer((socket) => {
+				socket.on("data", (chunk) => {
+					const req = JSON.parse(chunk.toString().trim()) as { type: string };
+					const type = req.type === "shutdown" ? "shutdown_result" : "list_result";
+					socket.end(`${JSON.stringify({ type, ok: true, instances: [], pid })}\n`);
+					if (req.type === "shutdown") setTimeout(() => next.close(() => void daemon(pid + 1)), 50);
+				});
+			});
+			server = next;
+			return new Promise<void>((resolve) => next.listen(socketPath, resolve));
+		};
+		await daemon(1001);
+		const client = new OrchestratorClient(socketPath);
+		expect(await client.shutdownDaemon()).toEqual({ ok: true });
+		expect(await client.getDaemonInfo()).toMatchObject({ running: true, pid: 1002 });
+	});
+
+	it("reports the daemon's refusal instead of waiting", async () => {
+		const socketPath = join(dir, "server.sock");
+		await fakeDaemon(socketPath, () => ({ ok: false, error: "2 running sessions" }));
+		const client = new OrchestratorClient(socketPath);
+		expect(await client.shutdownDaemon()).toEqual({ ok: false, reason: "2 running sessions" });
+		expect(await client.isRunning()).toBe(true);
+	});
+
+	it("recognises a pre-verb daemon by its typeless reply and says to restart it by hand", async () => {
+		const socketPath = join(dir, "server.sock");
+		server = createServer((socket) => {
+			socket.on("data", () => socket.end(`${JSON.stringify({ version: "0.85.1", buildId: "old" })}\n`));
+		});
+		await new Promise<void>((resolve) => server?.listen(socketPath, resolve));
+		const client = new OrchestratorClient(socketPath);
+		expect(await client.shutdownDaemon()).toMatchObject({ ok: false, reason: expect.stringContaining("predates") });
+	});
+
+	it("treats a daemon that does not know the verb as a refusal, not a crash", async () => {
+		const socketPath = join(dir, "server.sock");
+		server = createServer((socket) => {
+			socket.on("data", () =>
+				socket.end(`${JSON.stringify({ type: "error", ok: false, error: "Unknown request" })}\n`),
+			);
+		});
+		await new Promise<void>((resolve) => server?.listen(socketPath, resolve));
+		const client = new OrchestratorClient(socketPath);
+		expect((await client.shutdownDaemon()).ok).toBe(false);
+	});
+});

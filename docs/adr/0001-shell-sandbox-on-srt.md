@@ -1,0 +1,15 @@
+# The model's shell commands run in Anthropic's sandbox runtime (srt)
+
+Deny rules match the text of a call, so they cannot stop a command that reads a secret without naming it, such as `grep -r KEY .`. bluclawd therefore wraps the model's `bash` and `monitor` in `@anthropic-ai/sandbox-runtime` (srt), the library behind Claude Code's sandbox. On macOS it uses Seatbelt and on Linux/WSL2 bubblewrap, with a localhost proxy for network filtering. The sandbox is opt-in through global settings only, so a repository cannot loosen it. If it cannot start, it fails closed, and a host no rule covers is asked about once per host per session.
+
+## Considered options
+
+- **Hand-written Seatbelt profiles**: easy to get wrong, and they would cover macOS only.
+- **Codex CLI, Cursor or gemini-cli sandboxes**: the same Seatbelt design on macOS, with the same gaps (2026-10-28 research).
+- **A VM per command** (Apple `container`, Docker, Lima): the only way to contain process lifetime on macOS for arbitrary commands, but it costs a VM boot or an always-on VM, runs only Linux binaries, and puts the live checkout behind a mount. A run's shell contains process lifetime by sandbox identity instead (ADR-0011). Not planned (#30), because the mounted checkout holds macOS builds of its dependencies, such as native `node_modules` binaries, which a Linux VM cannot run. Reconsider if a process is shown to escape the reaper, untrusted repositories must run unattended, or a project's toolchain is Linux.
+- **Cloud sandboxes** (E2B, Daytona): they cannot work on the user's live checkout.
+
+## Consequences
+
+- On macOS, Seatbelt limits files and network but not process lifetime. A command that detaches or double-forks a descendant would leave it running after a stop. A best-effort reaper (#29, `ext/sandbox/reaper.ts`) follows each command's processes by parent unique id and an environment cookie and kills them when the command ends. A very fast double-fork that also scrubs its environment can slip between its scans, and it relies on private SPI. Linux's PID namespace contains it. A run's shell confirms its processes ended without a VM; see ADR-0011.
+- srt is pre-1.0 ("Beta Research Preview") and its API still moves, so it is pinned.

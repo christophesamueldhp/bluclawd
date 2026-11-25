@@ -1,0 +1,225 @@
+import { readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+	conversation,
+	FAUX,
+	type FauxRequest,
+	type FauxStep,
+	hasTmux,
+	type RealPi,
+	startRealPi,
+	toolNames,
+} from "./helpers/real-pi.ts";
+import { hostState, reportOf, runDirOf, runNamed, storedHost } from "./helpers/run-files.ts";
+import { nothingWithin, piStartsTimeout, whicheverStarted } from "./helpers/run-timing.ts";
+import { waitFor } from "./helpers/wait-for.ts";
+
+const readJson = (path: string) => JSON.parse(readFileSync(path, "utf8"));
+const recordOf = (real: RealPi, name: string) => runNamed(real.agentDir, name).record;
+const hostOf = (real: RealPi, name: string) => storedHost(runDirOf(real.agentDir, name));
+
+function addSettings(real: RealPi, added: Record<string, unknown>): void {
+	const path = join(real.agentDir, "settings.json");
+	writeFileSync(path, JSON.stringify({ ...readJson(path), ...added }));
+}
+
+const lastToolResult = (request: FauxRequest) =>
+	conversation(request)
+		.filter((message) => message.role === "toolResult")
+		.at(-1)?.text;
+
+const groupAlive = (pid: number) => {
+	try {
+		process.kill(-pid, 0);
+		return true;
+	} catch (error) {
+		return (error as NodeJS.ErrnoException).code !== "ESRCH";
+	}
+};
+
+const LINGERER = fileURLToPath(new URL("./fixtures/real-pi/lingerer.ts", import.meta.url));
+
+const alive = (pid: number | undefined) => {
+	if (pid === undefined) return false;
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch {
+		return false;
+	}
+};
+
+async function startOrchestrator(extensions: string[] = []): Promise<RealPi> {
+	vi.stubEnv("BLUCLAWD_RPC_PROVIDER_EXTENSIONS", [FAUX, ...extensions].join(":"));
+	return startRealPi();
+}
+
+const launch = (name: string, foreground = false) => ({
+	tool: "subagent",
+	args: { agent: "explorer", name, task: `Look, ${name}.`, ...(foreground ? {} : { background: true }) },
+});
+
+describe.skipIf(!hasTmux)("stopping an RPC run", () => {
+	let pi: RealPi | undefined;
+	afterEach(async () => {
+		await pi?.stop();
+		pi = undefined;
+	});
+
+	it("cancels a foreground run when its call is cancelled, and leaves one launched in the background working", async () => {
+		const real = await startOrchestrator();
+		pi = real;
+		const gate = join(real.cwd, "back.go");
+		real.script("main", [{ calls: [launch("back"), launch("fore", true)] }, { text: "read back's report" }]);
+		real.script("fore", [{ text: "Never.", until: join(real.cwd, "never") }]);
+		real.script("back", [{ text: "Back done.", until: gate }]);
+		const pane = real.start(["--", "delegate"]);
+		await real.waitForRequests("fore", 1);
+		await real.waitForRequests("back", 1);
+		const tools = toolNames(real.requests("main")[0]);
+		expect(tools).toEqual(expect.arrayContaining(["subagent", "subagent_stop", "subagent_resume"]));
+		expect(tools).not.toContain("subagent_close");
+
+		real.tmux.sendKeys(pane, ["Escape"]);
+		await waitFor(() => expect(recordOf(real, "fore").status).toBe("cancelled"));
+		expect(groupAlive(hostOf(real, "fore").hostPid)).toBe(false);
+		expect(reportOf(runDirOf(real.agentDir, "fore"), 1)?.outcome).toMatchObject({
+			status: "stopped",
+		});
+		expect(real.requests("fore")).toHaveLength(1);
+
+		expect(recordOf(real, "back").status).toBe("running");
+		writeFileSync(gate, "");
+		await real.waitForRequests("main", 2);
+		await waitFor(() => expect(recordOf(real, "back").status).toBe("closed"));
+		expect(reportOf(runDirOf(real.agentDir, "back"), 1)?.outcome).toEqual({
+			status: "completed",
+		});
+	});
+
+	it("cancels a queued run before it starts: it never gets a process or a model call, even once a slot frees", async () => {
+		const real = await startOrchestrator();
+		pi = real;
+		addSettings(real, { subagents: { panes: false, maxActive: 1 } });
+		const names = ["first", "second"];
+		const gate = (name: string) => join(real.cwd, `${name}.go`);
+		const steps = (queued: string): FauxStep[] => [
+			{ calls: names.map((name) => launch(name)) },
+			{ text: "waiting" },
+			{ tool: "subagent_stop", args: { agent: queued } },
+			{ text: "stopped it" },
+			{ text: "read the other's report" },
+		];
+		real.script("main", steps("unknown"));
+		for (const name of names) real.script(name, [{ text: `${name} done.`, until: gate(name) }]);
+		const pane = real.start(["--", "delegate"]);
+		const [working] = await waitFor(() => {
+			const started = whicheverStarted(real, names);
+			expect(started).toHaveLength(1);
+			return started;
+		});
+		const [queued] = names.filter((name) => name !== working);
+		real.script("main", steps(queued));
+		await real.waitForRequests("main", 2);
+		expect(recordOf(real, queued).status).toBe("starting");
+
+		real.tmux.sendKeys(pane, [`stop ${queued}`, "Enter"]);
+		const main = await real.waitForRequests("main", 4);
+		expect(lastToolResult(main[3])).toMatch(
+			new RegExp(`^Stopped "${queued}" \\(sub_[\\w-]+\\): its work was cancelled`),
+		);
+		expect(lastToolResult(main[3])).toContain("only subagent_resume continues it.");
+		expect(recordOf(real, queued)).toMatchObject({ status: "cancelled", stopSource: "model" });
+
+		for (const name of names) writeFileSync(gate(name), "");
+		await real.waitForRequests("main", 5);
+		await waitFor(() => expect(groupAlive(hostOf(real, working).hostPid)).toBe(false));
+		await nothingWithin(1000);
+		expect(hostState(runDirOf(real.agentDir, queued))).toBeUndefined();
+		expect(real.requests(queued)).toHaveLength(0);
+		expect(recordOf(real, queued).status).toBe("cancelled");
+	});
+
+	it(
+		"keeps a stopped run's session and Report, lets no late message, Report or reload restart it, and resumes it only when asked",
+		{ timeout: piStartsTimeout(3) },
+		async () => {
+			const real = await startOrchestrator();
+			pi = real;
+			real.script("main", [
+				launch("work"),
+				{ text: "waiting" },
+				{ tool: "subagent_stop", args: { agent: "work" } },
+				{ text: "stopped it" },
+				{ tool: "subagent_message", args: { to: "work", content: "Carry on." } },
+				{ text: "it takes no message" },
+				{ tool: "subagent_resume", args: { agent: "work", task: "Now finish." } },
+				{ text: "resumed it" },
+				{ text: "read its report" },
+			]);
+			real.script("work", [{ text: "Never.", until: join(real.cwd, "never") }, { text: "Finished." }]);
+			const pane = real.start(["--", "delegate"]);
+			await real.waitForRequests("work", 1);
+			await real.waitForRequests("main", 2);
+
+			real.tmux.sendKeys(pane, ["stop work", "Enter"]);
+			await real.waitForRequests("main", 4);
+			const dir = runDirOf(real.agentDir, "work");
+			const stopped = recordOf(real, "work");
+			expect(stopped).toMatchObject({ status: "cancelled", generation: 0 });
+			expect(readFileSync(String(stopped.transcriptPath), "utf8")).toContain("Look, work.");
+			expect(reportOf(dir, 1)?.outcome).toMatchObject({ status: "stopped" });
+
+			real.tmux.sendKeys(pane, ["message work", "Enter"]);
+			const main = await real.waitForRequests("main", 6);
+			expect(lastToolResult(main[5])).toMatch(
+				/^Message \d+ unavailable: "work" \(sub_[\w-]+\) was stopped\. Only subagent_resume continues it/,
+			);
+			real.tmux.sendKeys(pane, ["/reload", "Enter"]);
+			await waitFor(() => expect(real.tmux.capture(pane, 50).join("\n")).toMatch(/Reloaded/i));
+			await nothingWithin(1000);
+			expect(real.requests("main")).toHaveLength(6);
+			expect(real.requests("work")).toHaveLength(1);
+			expect(recordOf(real, "work")).toMatchObject({ status: "cancelled", generation: 0 });
+
+			real.tmux.sendKeys(pane, ["resume work", "Enter"]);
+			await real.waitForRequests("main", 9);
+			const [, resumed] = real.requests("work");
+			expect(conversation(resumed).map(({ role, text }) => `${role}: ${text.split("\n").at(-1)}`)).toEqual([
+				"user: Look, work.",
+				"assistant: ",
+				"user: Now finish.",
+			]);
+			expect(recordOf(real, "work")).toMatchObject({ status: "closed", generation: 1 });
+		},
+	);
+
+	it("is cancelled only once nothing of it runs: what its pi left in its process group is ended first", async () => {
+		const real = await startOrchestrator([LINGERER]);
+		pi = real;
+		real.script("main", [
+			launch("stay"),
+			{ text: "waiting" },
+			{ tool: "subagent_stop", args: { agent: "stay" } },
+			{ text: "stopped it" },
+		]);
+		real.script("stay", [{ text: "Never.", until: join(real.cwd, "never") }]);
+		const pane = real.start(["--", "delegate"]);
+		await real.waitForRequests("stay", 1);
+		await real.waitForRequests("main", 2);
+		const lingerer = Number(readFileSync(join(real.cwd, "lingerer.pid"), "utf8"));
+
+		real.tmux.sendKeys(pane, ["stop stay", "Enter"]);
+		const { hostPid, childPid } = hostOf(real, "stay");
+		await waitFor(() => expect([alive(hostPid), alive(childPid)]).toEqual([false, false]));
+		expect(alive(lingerer)).toBe(true);
+		expect(recordOf(real, "stay").status).toBe("stopping");
+
+		const main = await real.waitForRequests("main", 4);
+		expect(lastToolResult(main[3])).toMatch(/^Stopped "stay" \(sub_[\w-]+\): its work was cancelled/);
+		expect(alive(lingerer)).toBe(false);
+		expect(recordOf(real, "stay").status).toBe("cancelled");
+	});
+});

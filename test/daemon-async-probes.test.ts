@@ -1,0 +1,145 @@
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { describe, expect, it } from "vitest";
+import { handleIpcRequest, listSummaries } from "../daemon/handler.ts";
+import type { ErrorResponse, InstanceSummary, ListResponse } from "../daemon/ipc/protocol.ts";
+import { loadDeleted, loadInstances, saveInstances } from "../daemon/storage.ts";
+import type { InstanceRecord } from "../daemon/types.ts";
+import { heldTmux } from "./helpers/held-tmux.ts";
+import { testRegistry } from "./helpers/registry.ts";
+import { waitFor } from "./helpers/wait-for.ts";
+
+function instancesOf(reply: ListResponse | ErrorResponse): InstanceSummary[] {
+	if (!reply.ok) throw new Error(reply.error);
+	return reply.instances ?? [];
+}
+
+function register(id: string) {
+	return { type: "register", instance: { id, pane: id, cwd: "/p", activity: "idle" } } as const;
+}
+
+describe("a list's tmux probes", () => {
+	it("asks tmux about every lapsed pane at once, and answers a heartbeat meanwhile", async () => {
+		let now = 1000;
+		const { tmux, pending, answer } = heldTmux(new Set(["pi-a", "pi-b", "pi-c"]));
+		const supervisor = testRegistry(undefined, () => now, tmux);
+		for (const id of ["pi-a", "pi-b", "pi-c"]) await handleIpcRequest(supervisor, register(id));
+		now += 16_000;
+
+		const list = handleIpcRequest(supervisor, { type: "list" });
+		await waitFor(() => expect([...pending.keys()].sort()).toEqual(["pi-a", "pi-b", "pi-c"]));
+		await expect(handleIpcRequest(supervisor, register("pi-d"))).resolves.toMatchObject({ ok: true });
+		answer();
+
+		const instances = instancesOf(await list);
+		expect(instances.map(({ id, silent }) => ({ id, silent }))).toEqual([
+			{ id: "pi-d", silent: undefined },
+			{ id: "pi-a", silent: true },
+			{ id: "pi-b", silent: true },
+			{ id: "pi-c", silent: true },
+		]);
+	});
+});
+
+describe("a silent pane", () => {
+	it("is asked about once per list, not once for each of its halves", async () => {
+		let now = 1000;
+		const { tmux, asked, pending, answer } = heldTmux(new Set(["pi-a"]));
+		const supervisor = testRegistry(undefined, () => now, tmux);
+		await handleIpcRequest(supervisor, register("pi-a"));
+		now += 16_000;
+		const list = async () => {
+			const listed = handleIpcRequest(supervisor, { type: "list" });
+			await waitFor(() => expect(pending.size).toBe(1));
+			answer();
+			return listed;
+		};
+		await list();
+		asked.length = 0;
+		const instances = instancesOf(await list());
+		expect(instances).toMatchObject([{ id: "pi-a", silent: true }]);
+		expect(asked).toEqual(["pi-a"]);
+	});
+});
+
+describe("listing with async probes", () => {
+	const file = join(mkdtempSync(join(tmpdir(), "bluclawd-probes-")), "gone.jsonl");
+	writeFileSync(file, "");
+
+	function fixture(withAsync: boolean) {
+		const dir = mkdtempSync(join(tmpdir(), "bluclawd-probes-"));
+		const up = new Set(["pi-up", "pi-gone", "pi-was", "pi-live", "pi-del"]);
+		const blocking: string[] = [];
+		const answer = (name: string) => {
+			if (name === "pi-unk") throw new Error("tmux timed out");
+			return up.has(name);
+		};
+		let now = 1000;
+		const supervisor = testRegistry(dir, () => now, {
+			hasSession: (name) => {
+				blocking.push(name);
+				return answer(name);
+			},
+			...(withAsync ? { hasSessionAsync: async (name: string) => answer(name) } : {}),
+			hangUpAsQuit: () => {},
+		});
+		saveInstances(dir, [
+			{ id: "run", status: "stopped", cwd: "/p", createdAt: "2026-01-01T00:00:00Z", parent: "pi-o" },
+		]);
+		const beat = (id: string, extra = {}) =>
+			supervisor.registerExternal({ ...rec(id), pane: id, ...extra }, "idle", now);
+		beat("pi-was");
+		now += 16_000;
+		supervisor.listExternalInstances(now);
+		up.delete("pi-was");
+		for (const id of ["pi-up", "pi-unk", "pi-live", "pi-del"]) beat(id);
+		beat("pi-gone", { sessionFile: file });
+		supervisor.deleteInstance("pi-del");
+		up.delete("pi-del");
+		up.delete("pi-gone");
+		supervisor.paneStarting({ pane: "pi-new", cwd: "/p" });
+		now += 16_000;
+		beat("pi-live");
+		blocking.length = 0;
+		return { dir, supervisor, blocking };
+	}
+
+	function rec(id: string): InstanceRecord {
+		return { id, status: "online", cwd: "/p", createdAt: "2026-01-01T00:00:00Z" };
+	}
+
+	it("lists, reaps and expires the same rows as blocking probes do", async () => {
+		const blocking = fixture(false);
+		const probed = fixture(true);
+		const before = listSummaries(blocking.supervisor);
+		const after = instancesOf(await handleIpcRequest(probed.supervisor, { type: "list" }));
+		expect(after).toEqual(before);
+		expect(probed.blocking).toEqual([]);
+		expect(blocking.blocking).not.toEqual([]);
+		expect(before.map(({ id, status, silent }) => ({ id, status, silent }))).toEqual([
+			{ id: "pi-gone", status: "stopped", silent: undefined },
+			{ id: "pi-live", status: "online", silent: undefined },
+			{ id: "pi-up", status: "online", silent: true },
+		]);
+		expect(loadInstances(probed.dir)).toEqual(loadInstances(blocking.dir));
+		expect(loadDeleted(probed.dir)).toEqual(loadDeleted(blocking.dir));
+		expect(loadDeleted(blocking.dir)).toEqual([expect.objectContaining({ paneId: "pi-del", goneAt: 33_000 })]);
+	});
+});
+
+describe("a start claimed while a list's probes are out", () => {
+	it("is reaped by that list as it would have been had it come first", async () => {
+		let now = 1000;
+		const { tmux, pending, answer } = heldTmux(new Set(["pi-a"]));
+		const supervisor = testRegistry(undefined, () => now, tmux);
+		await handleIpcRequest(supervisor, register("pi-a"));
+		now += 16_000;
+		const list = handleIpcRequest(supervisor, { type: "list" });
+		await waitFor(() => expect(pending.size).toBe(1));
+		await handleIpcRequest(supervisor, { type: "start", pane: "pi-new", cwd: "/p" });
+		answer();
+		const instances = instancesOf(await list);
+		expect(instances.map(({ id }) => id)).toEqual(["pi-a"]);
+	});
+});

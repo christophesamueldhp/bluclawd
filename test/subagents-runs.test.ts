@@ -1,0 +1,331 @@
+import { describe, expect, it, vi } from "vitest";
+import {
+	type AdmitSubagentRunResult,
+	type SubagentRunExecuteParams,
+	type SubagentRunOutcome,
+	SubagentRunScheduler,
+} from "../ext/subagents/runs.ts";
+import { createEmptySubagentUsage } from "../ext/subagents/usage.ts";
+
+function deferred<T = void>() {
+	let resolve!: (value: T | PromiseLike<T>) => void;
+	let reject!: (reason?: unknown) => void;
+	const promise = new Promise<T>((res, rej) => {
+		resolve = res;
+		reject = rej;
+	});
+	return { promise, resolve, reject };
+}
+
+const runIgnoringAbort = (gate: { promise: Promise<SubagentRunOutcome> }) => () => gate.promise;
+
+function admitted(result: AdmitSubagentRunResult) {
+	if (!result.ok) throw new Error(`Expected an admitted run, got: ${result.error}`);
+	return result.handle;
+}
+
+function makeRequest(overrides: Partial<Parameters<SubagentRunScheduler["admit"]>[0]> = {}) {
+	return {
+		parentSessionId: "sess_1",
+		sessionEpoch: 1,
+		parentTurnId: "turn_1",
+		originToolCallId: `call_${Math.random().toString(36).slice(2, 8)}`,
+		originEntryId: "entry_1",
+		agentName: "explorer",
+		definitionSource: "bundled" as const,
+		provider: "faux",
+		modelId: "faux-1",
+		thinkingLevel: "low",
+		cwd: "/proj",
+		deliveryMode: "foreground" as const,
+		...overrides,
+	};
+}
+
+describe("Ticket #8 — Every requested run starts immediately with no child quotas", () => {
+	it("starts 20 runs admitted in one parent turn before any of them finishes", async () => {
+		const gates: ReturnType<typeof deferred<SubagentRunOutcome>>[] = [];
+		const started: string[] = [];
+		const scheduler = new SubagentRunScheduler({
+			executeRun: (params) => {
+				started.push(params.record.runId);
+				const gate = deferred<SubagentRunOutcome>();
+				gates.push(gate);
+				return gate.promise;
+			},
+		});
+
+		const handles = Array.from({ length: 20 }, (_, i) => {
+			return admitted(scheduler.admit(makeRequest({ originToolCallId: `call_${i}` })));
+		});
+
+		expect(started).toEqual(handles.map((h) => h.runId));
+		for (const handle of handles) {
+			expect(handle.record.status).toBe("starting");
+			for (const quotaField of ["deadlineAt", "repeatedCallCount", "repeatedDenialCount"]) {
+				expect(handle.record).not.toHaveProperty(quotaField);
+			}
+		}
+
+		for (const gate of gates) gate.resolve({ status: "closed", summaryText: "done" });
+		const finished = await Promise.all(handles.map((h) => h.completion));
+		expect(finished.every((r) => r.status === "closed")).toBe(true);
+	});
+
+	it("does not auto-stop a run past former turn, tool-call, token, repetition and time limits", async () => {
+		vi.useFakeTimers();
+		try {
+			const gates = new Map<string, ReturnType<typeof deferred<SubagentRunOutcome>>>();
+			const scheduler = new SubagentRunScheduler({
+				executeRun: (params: SubagentRunExecuteParams) => {
+					const gate = deferred<SubagentRunOutcome>();
+					gates.set(params.record.originToolCallId, gate);
+					params.controller.markRunning();
+					params.controller.updateUsage({ ...createEmptySubagentUsage(), input: 100_001, totalTokens: 100_001 });
+					return gate.promise;
+				},
+			});
+
+			const handles = ["heavy_1", "heavy_2", "heavy_3"].map((id) =>
+				admitted(scheduler.admit(makeRequest({ originToolCallId: id }))),
+			);
+			vi.advanceTimersByTime(6 * 60 * 1000);
+
+			for (const handle of handles) {
+				const live = scheduler.getRun(handle.runId)!;
+				expect(live.status).toBe("running");
+				expect(live.usage.totalTokens).toBe(100_001);
+			}
+
+			for (const gate of gates.values()) gate.resolve({ status: "closed", summaryText: "done" });
+			for (const handle of handles) {
+				const done = await handle.completion;
+				expect(done.status).toBe("closed");
+				expect(done.stopReason).toBeUndefined();
+			}
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+});
+
+describe("Task 3 (M1) — Run state and cancellation", () => {
+	it("does not reuse persisted run IDs after a runtime module reload", async () => {
+		const ids: string[] = [];
+		for (let reload = 0; reload < 2; reload++) {
+			vi.resetModules();
+			const { SubagentRunScheduler: ReloadedScheduler } = await import("../ext/subagents/runs.ts");
+			const scheduler = new ReloadedScheduler({
+				executeRun: async () => ({ status: "closed", summaryText: "done" }),
+			});
+			const handle = admitted(scheduler.admit(makeRequest()));
+			await handle.completion;
+			ids.push(handle.runId);
+		}
+		expect(ids[0]).not.toBe(ids[1]);
+	});
+
+	it("numbers a launch as generation 0 and its resume as generation 1", async () => {
+		const scheduler = new SubagentRunScheduler({
+			executeRun: async () => ({ status: "closed", summaryText: "done" }),
+		});
+		const launch = admitted(scheduler.admit(makeRequest()));
+		expect(launch.record.generation).toBe(0);
+		await launch.completion;
+
+		const resumed = admitted(scheduler.resume(launch.runId, undefined));
+		expect(resumed.record.generation).toBe(1);
+	});
+
+	it("handles cancellation before admission, by explicit stop while running, and by the caller signal", async () => {
+		const scheduler = new SubagentRunScheduler({
+			executeRun: (params) => {
+				const gate = deferred<SubagentRunOutcome>();
+				params.signal.addEventListener(
+					"abort",
+					() => gate.resolve({ status: "closed", summaryText: "Partial before abort" }),
+					{ once: true },
+				);
+				return gate.promise;
+			},
+		});
+
+		const preAborted = new AbortController();
+		preAborted.abort();
+		const preRes = scheduler.admit(makeRequest({ signal: preAborted.signal }));
+		expect(preRes).toMatchObject({ ok: false, error: expect.stringMatching(/aborted/i) });
+
+		const stopped = admitted(scheduler.admit(makeRequest()));
+		expect(scheduler.cancelRun(stopped.runId, "remote")).toBe(true);
+		const stoppedResult = await stopped.completion;
+		expect(stoppedResult.status).toBe("closed");
+		expect(stoppedResult.stopSource).toBe("remote");
+		expect(stoppedResult.summaryText).toBe("Partial before abort");
+
+		const caller = new AbortController();
+		const callerRun = admitted(scheduler.admit(makeRequest({ signal: caller.signal })));
+		caller.abort();
+		const callerResult = await callerRun.completion;
+		expect(callerResult.status).toBe("closed");
+		expect(callerResult.stopSource).toBe("caller");
+	});
+
+	it("ignores stop requests after a run has finished", async () => {
+		const scheduler = new SubagentRunScheduler({
+			executeRun: async () => ({ status: "closed", summaryText: "ok" }),
+		});
+		const handle = admitted(scheduler.admit(makeRequest()));
+		await handle.completion;
+
+		expect(scheduler.cancelRun(handle.runId, "user")).toBe(false);
+		expect(scheduler.getRun(handle.runId)?.status).toBe("closed");
+	});
+
+	it("keeps a stopping run active until a non-cooperating runner actually returns", async () => {
+		const stuckGate = deferred<SubagentRunOutcome>();
+		const scheduler = new SubagentRunScheduler({
+			executeRun: runIgnoringAbort(stuckGate),
+		});
+
+		const run = admitted(scheduler.admit(makeRequest()));
+		scheduler.cancelRun(run.runId, "user");
+		expect(scheduler.getRun(run.runId)?.status).toBe("stopping");
+		expect(scheduler.listActiveRuns().map((r) => r.runId)).toEqual([run.runId]);
+
+		stuckGate.resolve({ status: "failed", summaryText: "late" });
+		const done = await run.completion;
+		expect(done.status).toBe("failed");
+		expect(scheduler.listActiveRuns()).toEqual([]);
+	});
+});
+
+describe("Ticket #12 — Completion resolves only after durable finalization", () => {
+	const tick = () => new Promise((resolve) => setTimeout(resolve, 10));
+
+	it("keeps a run active and its completion pending until the finalizer finishes", async () => {
+		const finalizerGate = deferred();
+		let finalizerCalls = 0;
+		const scheduler = new SubagentRunScheduler({
+			executeRun: async () => ({ status: "closed", summaryText: "done" }),
+			onFinalize: async (record) => {
+				finalizerCalls++;
+				await finalizerGate.promise;
+				return { ...record, reportPath: "/durable/report.md" };
+			},
+		});
+		const handle = admitted(scheduler.admit(makeRequest()));
+		let resolved = false;
+		void handle.completion.then(() => {
+			resolved = true;
+		});
+
+		await tick();
+		expect(finalizerCalls).toBe(1);
+		expect(resolved).toBe(false);
+		expect(scheduler.listActiveRuns().map((r) => r.runId)).toEqual([handle.runId]);
+		expect(scheduler.cancelRun(handle.runId, "user")).toBe(true);
+
+		finalizerGate.resolve();
+		const done = await handle.completion;
+		expect(done).toMatchObject({ status: "closed", reportPath: "/durable/report.md" });
+		expect(finalizerCalls).toBe(1);
+		expect(scheduler.listActiveRuns()).toEqual([]);
+	});
+
+	it("turns a failing finalizer into a failed durable outcome", async () => {
+		const changes: string[] = [];
+		const finalized: string[] = [];
+		const scheduler = new SubagentRunScheduler({
+			executeRun: async () => ({ status: "closed", summaryText: "done" }),
+			onFinalize: async (record) => {
+				finalized.push(record.status);
+				if (record.status === "closed") throw new Error("disk full");
+				return record;
+			},
+			onStateChange: (record) => changes.push(record.status),
+		});
+		const done = await admitted(scheduler.admit(makeRequest())).completion;
+		expect(done).toMatchObject({ status: "failed" });
+		expect(done.errorMessage).toMatch(/finaliz.*disk full/i);
+		expect(changes.at(-1)).toBe("failed");
+		expect(changes).not.toContain("closed");
+		expect(finalized).toEqual(["closed", "failed"]);
+	});
+
+	it("waits for runners and finalizers to settle and writes nothing afterwards", async () => {
+		const runnerGate = deferred<SubagentRunOutcome>();
+		const finalizerGate = deferred();
+		let changesAfterSettled = 0;
+		let settled = false;
+		const scheduler = new SubagentRunScheduler({
+			executeRun: runIgnoringAbort(runnerGate),
+			onFinalize: async (record) => {
+				await finalizerGate.promise;
+				return record;
+			},
+			onStateChange: () => {
+				if (settled) changesAfterSettled++;
+			},
+		});
+		const handle = admitted(scheduler.admit(makeRequest()));
+		scheduler.cancelRuns((record) => record.parentSessionId === "sess_1", "Parent session changed");
+		const drained = scheduler.waitForSettled().then(() => {
+			settled = true;
+		});
+
+		runnerGate.resolve({ status: "failed", summaryText: "late" });
+		await tick();
+		expect(settled).toBe(false);
+		finalizerGate.resolve();
+		await drained;
+		expect((await handle.completion).status).toBe("failed");
+		await tick();
+		expect(changesAfterSettled).toBe(0);
+	});
+});
+
+describe("Issue #63 — A run's controller only affects its own generation", () => {
+	function exercise(controller: SubagentRunExecuteParams["controller"], tag: string) {
+		controller.markRunning();
+		controller.recordPane(`pi-${tag}`);
+		controller.updateActivity("idle");
+		controller.updateUsage({ ...createEmptySubagentUsage(), input: tag === "new" ? 15 : 10 });
+		controller.updateProgress(`progress_${tag}`);
+	}
+
+	it("ignores an earlier generation's controller after a resume", async () => {
+		let clock = 0;
+		const controllers: SubagentRunExecuteParams["controller"][] = [];
+		const gates: ReturnType<typeof deferred<SubagentRunOutcome>>[] = [];
+		const scheduler = new SubagentRunScheduler({
+			now: () => ++clock,
+			executeRun: ({ controller }) => {
+				controllers.push(controller);
+				const gate = deferred<SubagentRunOutcome>();
+				gates.push(gate);
+				return gate.promise;
+			},
+		});
+		const handle = admitted(scheduler.admit(makeRequest()));
+		gates[0].resolve({ status: "closed", summaryText: "first" });
+		await handle.completion;
+
+		const resumed = admitted(scheduler.resume(handle.runId, undefined));
+		const before = scheduler.getRun(handle.runId);
+		exercise(controllers[0], "old");
+		expect(scheduler.getRun(handle.runId)).toEqual(before);
+
+		exercise(controllers[1], "new");
+		expect(scheduler.getRun(handle.runId)).toMatchObject({
+			generation: 1,
+			status: "running",
+			pane: "pi-new",
+			activity: "idle",
+			lastProgressText: "progress_new",
+			usage: { input: 15 },
+		});
+
+		gates[1].resolve({ status: "closed", summaryText: "second" });
+		expect(await resumed.completion).toMatchObject({ status: "closed", usage: { input: 15 } });
+	});
+});

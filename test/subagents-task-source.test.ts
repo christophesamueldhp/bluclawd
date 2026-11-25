@@ -1,0 +1,254 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
+import { createRunDirectory } from "../ext/subagents/directory.ts";
+import {
+	type SubagentRunController,
+	type SubagentRunOutcome,
+	type SubagentRunRecord,
+	SubagentRunScheduler,
+} from "../ext/subagents/runs.ts";
+import { writeFullSubagentReport, writePersistedRunRecord } from "../ext/subagents/storage.ts";
+import { createAgentTaskSource } from "../ext/subagents/task-source.ts";
+import { createEmptySubagentUsage } from "../ext/subagents/usage.ts";
+import { createParentScopeViews } from "../ext/subagents/views.ts";
+
+const tempDirs: string[] = [];
+
+afterEach(() => {
+	for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+});
+
+function makeAgentDir(): string {
+	const dir = mkdtempSync(join(tmpdir(), "bluclawd-task-source-"));
+	tempDirs.push(dir);
+	return dir;
+}
+
+function persistedRecord(overrides: Partial<SubagentRunRecord>): SubagentRunRecord {
+	return {
+		runId: "sub_done",
+		parentSessionId: "sess_main",
+		sessionEpoch: 1,
+		parentTurnId: "turn_1",
+		originToolCallId: "call_1",
+		generation: 0,
+		agentName: "explorer",
+		definitionSource: "bundled",
+		provider: "faux",
+		modelId: "faux-1",
+		thinkingLevel: "low",
+		cwd: "/proj",
+		taskSummary: "Inspect architecture",
+		startSnapshot: { headCommit: null, dirty: false, statusDigest: "" },
+		admittedAt: 1000,
+		startedAt: 1010,
+		endedAt: 2000,
+		deliveryMode: "background",
+		status: "closed",
+		usage: createEmptySubagentUsage(),
+		backgroundDeliveryAttempted: true,
+		...overrides,
+	};
+}
+
+function setup(activeParentSessionId: string | undefined = "sess_main") {
+	const agentDir = makeAgentDir();
+	const controllers = new Map<string, SubagentRunController>();
+	const settle = new Map<string, (outcome: SubagentRunOutcome) => void>();
+	const scheduler = new SubagentRunScheduler<{ resume?: { toolCallId: string } }>({
+		executeRun: ({ record, controller, signal }) => {
+			controllers.set(record.runId, controller);
+			return new Promise<SubagentRunOutcome>((resolve) => {
+				settle.set(record.runId, resolve);
+				signal.addEventListener("abort", () => resolve({ status: "closed", summaryText: "stopped" }));
+			});
+		},
+	});
+	const launch = (parentSessionId = "sess_main", taskSummary = "Scan auth", sessionEpoch = 1) => {
+		const admitted = scheduler.admit({
+			parentSessionId,
+			sessionEpoch,
+			parentTurnId: "turn_1",
+			originToolCallId: `call_${Math.random().toString(36).slice(2, 8)}`,
+			agentName: "explorer",
+			definitionSource: "bundled",
+			provider: "faux",
+			modelId: "faux-1",
+			thinkingLevel: "low",
+			cwd: "/proj",
+			taskSummary,
+			deliveryMode: "background",
+		});
+		if (!admitted.ok) throw new Error(admitted.error);
+		return admitted.handle;
+	};
+	const directory = createRunDirectory({ scheduler, agentDir: () => agentDir });
+	const source = createAgentTaskSource({
+		views: createParentScopeViews({
+			scheduler,
+			directory,
+			agentDir: () => agentDir,
+			scope: () =>
+				activeParentSessionId === undefined
+					? undefined
+					: { parentSessionId: activeParentSessionId, sessionEpoch: 1 },
+			idle: () => true,
+			onChange: () => {},
+		}),
+		directory,
+		scheduler,
+		agentDir: () => agentDir,
+	});
+	return { agentDir, scheduler, controllers, settle, launch, source };
+}
+
+describe("Spec #52 — the run-to-task translation behind the agent-task seam", () => {
+	it("lists the live runs of the orchestrator's scope as running tasks", () => {
+		const { launch, source, controllers } = setup();
+		const mine = launch("sess_main", "Scan auth");
+		launch("sess_other", "Elsewhere");
+		controllers.get(mine.runId)?.markRunning();
+
+		const tasks = source.list();
+		expect(tasks).toHaveLength(1);
+		expect(tasks[0]).toMatchObject({
+			id: mine.runId,
+			owner: "sess_main",
+			agent: "explorer",
+			summary: "Scan auth",
+			state: "running",
+			status: "running",
+			model: "faux/faux-1",
+		});
+		expect(source.list("sess_other")).toEqual([]);
+	});
+
+	it("gets a live or a finished run as the same task, and hides another session's run", () => {
+		const { agentDir, launch, source } = setup();
+		const live = launch();
+		const foreign = launch("sess_other");
+		for (const [runId, status] of [
+			["sub_closed", "closed"],
+			["sub_failed", "failed"],
+			["sub_interrupted", "interrupted"],
+		] as const) {
+			writePersistedRunRecord(agentDir, persistedRecord({ runId, status }));
+		}
+
+		expect(source.getOwned(live.runId)).toMatchObject({ id: live.runId, state: "running", status: "starting" });
+		expect(source.getOwned(foreign.runId)).toBeUndefined();
+		expect(source.getOwned(foreign.runId, "sess_other")?.id).toBe(foreign.runId);
+		expect(
+			["sub_closed", "sub_failed", "sub_interrupted"].map((id) => {
+				const task = source.getOwned(id);
+				return [task?.state, task?.status];
+			}),
+		).toEqual([
+			["completed", "closed"],
+			["failed", "failed"],
+			["failed", "interrupted"],
+		]);
+		expect(source.getOwned("sub_closed")).toMatchObject({ startedAt: 1010, endedAt: 2000 });
+		expect(source.getOwned("sub_missing")).toBeUndefined();
+	});
+
+	it("keeps a stopping run in the running state", async () => {
+		const { launch, source, scheduler } = setup();
+		const run = launch();
+		scheduler.cancelRun(run.runId, "user");
+		expect(source.getOwned(run.runId)).toMatchObject({ state: "running", status: "stopping" });
+		await run.completion;
+		expect(source.getOwned(run.runId)).toMatchObject({ state: "completed", status: "closed" });
+	});
+
+	it("says why a stop failed: an unknown, foreign or orphaned id is not found, a finished run is not running", async () => {
+		const { agentDir, launch, source, settle } = setup();
+		const running = launch();
+		const foreign = launch("sess_other");
+		const finished = launch();
+		const earlierEpoch = launch("sess_main", "Scan auth", 0);
+		for (const run of [finished, earlierEpoch]) {
+			settle.get(run.runId)?.({ status: "closed", summaryText: "done" });
+			await run.completion;
+		}
+		writePersistedRunRecord(agentDir, persistedRecord({ runId: "sub_earlier", status: "closed" }));
+		writePersistedRunRecord(
+			agentDir,
+			persistedRecord({ runId: "sub_orphan", status: "running", endedAt: undefined }),
+		);
+
+		expect(source.closeOwned("sub_missing")).toEqual({ ok: false, reason: "not_found" });
+		expect(source.closeOwned(foreign.runId, { owner: "sess_main" })).toEqual({ ok: false, reason: "not_found" });
+		expect(source.closeOwned(finished.runId)).toMatchObject({
+			ok: false,
+			reason: "not_running",
+			task: { id: finished.runId, status: "closed" },
+		});
+		expect(source.closeOwned(earlierEpoch.runId)).toMatchObject({
+			ok: false,
+			reason: "not_running",
+			task: { id: earlierEpoch.runId, status: "closed" },
+		});
+		expect(source.closeOwned("sub_earlier")).toMatchObject({
+			ok: false,
+			reason: "not_running",
+			task: { status: "closed" },
+		});
+
+		expect(source.closeOwned("sub_orphan")).toEqual({ ok: false, reason: "not_found" });
+
+		const stopped = source.closeOwned(running.runId, { source: "model" });
+		expect(stopped).toMatchObject({ ok: true, task: { id: running.runId } });
+		expect(await running.completion).toMatchObject({ status: "closed", stopSource: "model" });
+	});
+
+	it("stops a run by its id only, not by its name", () => {
+		const { scheduler, source } = setup();
+		const admitted = scheduler.admit({
+			parentSessionId: "sess_main",
+			sessionEpoch: 1,
+			parentTurnId: "turn_1",
+			originToolCallId: "call_named",
+			name: "api",
+			agentName: "explorer",
+			definitionSource: "bundled",
+			provider: "faux",
+			modelId: "faux-1",
+			thinkingLevel: "low",
+			cwd: "/proj",
+			deliveryMode: "background",
+		});
+		expect(admitted.ok).toBe(true);
+		expect(source.closeOwned("api")).toEqual({ ok: false, reason: "not_found" });
+	});
+
+	it("stops every running run of the owner", () => {
+		const { launch, source } = setup();
+		launch();
+		launch();
+		launch("sess_other");
+		expect(source.closeAll({ source: "user" })).toBe(2);
+		expect(setup(undefined).source.closeAll()).toBe(0);
+	});
+
+	it("reads the bounded report as output, falling back to the latest progress", () => {
+		const { agentDir, launch, source, controllers } = setup();
+		const live = launch();
+		controllers.get(live.runId)?.updateProgress("Scanning src/auth.ts");
+		expect(source.getOwned(live.runId)?.output()).toBe("Scanning src/auth.ts");
+
+		writePersistedRunRecord(agentDir, persistedRecord({ runId: "sub_unreported", summaryText: "Summary only" }));
+		expect(source.getOwned("sub_unreported")?.output()).toBe("Summary only");
+
+		const done = persistedRecord({ runId: "sub_reported" });
+		writePersistedRunRecord(agentDir, done);
+		writeFullSubagentReport(agentDir, done, `Final report\n${"x".repeat(10_000)}`);
+		const task = source.getOwned("sub_reported");
+		expect(task?.outputFile).toBe(join(agentDir, "bluclawd", "subagents", "sess_main", "sub_reported", "report.md"));
+		const output = task?.output() ?? "";
+		expect(output.startsWith("Final report")).toBe(true);
+		expect(output).toContain("[Report view truncated at 8192 bytes]");
+	});
+});

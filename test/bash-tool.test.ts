@@ -1,0 +1,302 @@
+import type { BashOperations } from "@earendil-works/pi-coding-agent";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { backgroundBashJobs } from "../ext/background-bash/background-bash.ts";
+import { formatTaskDuration } from "../ext/background-bash/bash-limits.ts";
+import { backgroundStartText, createBackgroundBashTool } from "../ext/background-bash/bash-tool.ts";
+import { waitFor } from "./helpers/wait-for.ts";
+
+function fakeOps() {
+	const calls: { command: string; timeout?: number; finish: (code: number) => void; aborted: () => boolean }[] = [];
+	const ops: BashOperations = {
+		exec: (command, _cwd, { onData, signal, timeout }) =>
+			new Promise((resolve, reject) => {
+				let aborted = false;
+				signal?.addEventListener("abort", () => {
+					aborted = true;
+					reject(new Error("aborted"));
+				});
+				onData(Buffer.from(`ran ${command}\n`));
+				calls.push({ command, timeout, finish: (code) => resolve({ exitCode: code }), aborted: () => aborted });
+			}),
+	};
+	return { ops, calls };
+}
+
+function makeTool(ops: BashOperations, extra: Partial<Parameters<typeof createBackgroundBashTool>[0]> = {}) {
+	const sent: unknown[] = [];
+	const tool = createBackgroundBashTool({
+		cwd: "/work",
+		operations: ops,
+		sendMessage: (message) => sent.push(message),
+		isMain: true,
+		...extra,
+	});
+	return { tool, sent };
+}
+
+const ctx = { sessionManager: { getSessionId: () => "main" } } as never;
+const text = (result: { content: { type: string; text?: string }[] }) => result.content[0]?.text ?? "";
+
+afterEach(() => {
+	vi.unstubAllEnvs();
+	for (const job of backgroundBashJobs.list()) backgroundBashJobs.kill(job.id);
+});
+
+describe("schema and prompt", () => {
+	it("takes timeout in seconds, as pi's own bash does, and CC's parameter texts", () => {
+		const { tool } = makeTool(fakeOps().ops);
+		const props = (tool.parameters as { properties: Record<string, { description?: string }> }).properties;
+		expect(Object.keys(props)).toEqual(["command", "timeout", "description", "run_in_background"]);
+		expect(props.timeout.description).toBe("Timeout in seconds (optional, default 120, max 600)");
+		expect(props.run_in_background.description).toBeUndefined();
+		expect(props.description.description).toMatch(/^Clear, concise description of what this command does/);
+		expect(tool.promptGuidelines).toContain(
+			"`run_in_background` runs the command detached: it keeps running across turns and re-invokes you when it exits. No `&` needed.",
+		);
+		expect(tool.description).toMatch(/ Optionally provide a timeout in seconds\.$/);
+		expect(JSON.stringify([tool.description, tool.promptGuidelines, tool.parameters])).not.toMatch(/milli|\bms\b/i);
+	});
+
+	it("drops every background path when background tasks are disabled", () => {
+		vi.stubEnv("BLUCLAWD_DISABLE_BACKGROUND_TASKS", "1");
+		const { tool } = makeTool(fakeOps().ops);
+		const props = (tool.parameters as { properties: Record<string, unknown> }).properties;
+		expect(props.run_in_background).toBeUndefined();
+		expect(tool.promptGuidelines?.some((g) => g.includes("run_in_background"))).toBe(false);
+	});
+
+	it("honours BASH_DEFAULT_TIMEOUT_MS and never lets the max fall below it", () => {
+		vi.stubEnv("BASH_DEFAULT_TIMEOUT_MS", "900000");
+		const { tool } = makeTool(fakeOps().ops);
+		const props = (tool.parameters as { properties: Record<string, { description?: string }> }).properties;
+		expect(props.timeout.description).toBe("Timeout in seconds (optional, default 900, max 900)");
+	});
+});
+
+describe("timeouts", () => {
+	it("gives the default 120s when the model names none", async () => {
+		const { ops, calls } = fakeOps();
+		const { tool } = makeTool(ops);
+		const run = tool.execute("t1", { command: "echo hi" } as never, undefined, undefined, ctx);
+		await waitFor(() => expect(calls.length).toBe(1));
+		calls[0].finish(0);
+		await run;
+		expect(calls[0].timeout).toBeUndefined();
+	});
+
+	it("moves a command still running at its timeout to the background", async () => {
+		const { ops, calls } = fakeOps();
+		const { tool } = makeTool(ops);
+		const result = await tool.execute(
+			"t2",
+			{ command: "npm run dev", timeout: 0.02 } as never,
+			undefined,
+			undefined,
+			ctx,
+		);
+		expect(text(result)).toMatch(
+			/^Command did not complete within its 1s timeout and was moved to the background \(ID: b[0-9a-z]{8}\)\. Output is being written to: .*\. You will be notified when it completes\. To check interim output, use read on that file path\.$/,
+		);
+		expect(result.details).toMatchObject({ backgroundTaskId: expect.stringMatching(/^b/) });
+		expect(calls[0].aborted()).toBe(false);
+	});
+
+	it("times a leading sleep out as asked, in bluclawd's duration", async () => {
+		const { ops, calls } = fakeOps();
+		const { tool } = makeTool(ops);
+		const err = await tool
+			.execute("t3", { command: "sleep 30", timeout: 0.02 } as never, undefined, undefined, ctx)
+			.catch((e: Error) => e);
+		expect((err as Error).message).toMatch(/Command timed out after 0s$/);
+		expect(calls[0].aborted()).toBe(true);
+	});
+
+	it("runs a run_in_background job with no timeout at all", async () => {
+		const { ops, calls } = fakeOps();
+		const { tool } = makeTool(ops);
+		const result = await tool.execute(
+			"t4",
+			{ command: "tail -f log", run_in_background: true, timeout: 0.02 } as never,
+			undefined,
+			undefined,
+			ctx,
+		);
+		expect(text(result)).toMatch(/^Command running in background with ID: b[0-9a-z]{8}\./);
+		await new Promise((r) => setTimeout(r, 60));
+		expect(calls[0].timeout).toBeUndefined();
+		expect(calls[0].aborted()).toBe(false);
+		expect(backgroundBashJobs.get((result.details as { backgroundTaskId: string }).backgroundTaskId)?.owner).toBe(
+			"main",
+		);
+	});
+
+	it("with background tasks off, kills at the timeout instead, given in seconds and capped at 600", async () => {
+		vi.stubEnv("BLUCLAWD_DISABLE_BACKGROUND_TASKS", "true");
+		const { ops, calls } = fakeOps();
+		const { tool } = makeTool(ops);
+		const run = tool.execute("t5", { command: "npm run dev", timeout: 5 } as never, undefined, undefined, ctx);
+		const capped = tool.execute("t6", { command: "npm run dev", timeout: 5000 } as never, undefined, undefined, ctx);
+		await waitFor(() => expect(calls.length).toBe(2));
+		expect(calls.map((call) => call.timeout)).toEqual([5, 600]);
+		for (const call of calls) call.finish(0);
+		await Promise.all([run, capped]);
+	});
+
+	it("BLUCLAWD_AUTO_BACKGROUND_TIMEOUT_MS moves the main agent's command sooner, never under 2s", async () => {
+		const { autoBackgroundTimeoutMs } = await import("../ext/background-bash/bash-limits.ts");
+		vi.stubEnv("BLUCLAWD_AUTO_BACKGROUND_TIMEOUT_MS", "500");
+		expect(autoBackgroundTimeoutMs(120_000, { isMain: true, canAutoBackground: true })).toBe(2000);
+		expect(autoBackgroundTimeoutMs(120_000, { isMain: false, canAutoBackground: true })).toBe(120_000);
+		expect(autoBackgroundTimeoutMs(120_000, { isMain: true, canAutoBackground: false })).toBe(120_000);
+	});
+});
+
+describe("pi's shellCommandPrefix", () => {
+	const commandPrefix = () => "export PFX=applied";
+
+	it("runs a run_in_background command after the prefix, and lists it as the model wrote it", async () => {
+		const { ops, calls } = fakeOps();
+		const { tool } = makeTool(ops, { commandPrefix });
+		const result = await tool.execute(
+			"p1",
+			{ command: "npm run dev", run_in_background: true } as never,
+			undefined,
+			undefined,
+			ctx,
+		);
+		await waitFor(() => expect(calls.length).toBe(1));
+		expect(calls[0].command).toBe("export PFX=applied\nnpm run dev");
+		const id = (result.details as { backgroundTaskId: string }).backgroundTaskId;
+		expect(backgroundBashJobs.get(id)?.command).toBe("npm run dev");
+	});
+
+	it("runs a foreground command after the prefix once, and keeps it as written when it moves at its timeout", async () => {
+		const { ops, calls } = fakeOps();
+		const { tool } = makeTool(ops, { commandPrefix });
+		const result = await tool.execute(
+			"p2",
+			{ command: "npm run dev", timeout: 0.02 } as never,
+			undefined,
+			undefined,
+			ctx,
+		);
+		expect(calls[0].command).toBe("export PFX=applied\nnpm run dev");
+		const id = (result.details as { backgroundTaskId: string }).backgroundTaskId;
+		expect(backgroundBashJobs.get(id)?.command).toBe("npm run dev");
+	});
+
+	it("runs commands as written when the setting is absent", async () => {
+		const { ops, calls } = fakeOps();
+		const { tool } = makeTool(ops, { commandPrefix: () => undefined });
+		const run = tool.execute("p3", { command: "echo hi" } as never, undefined, undefined, ctx);
+		await waitFor(() => expect(calls.length).toBe(1));
+		calls[0].finish(0);
+		await run;
+		await tool.execute("p4", { command: "tail -f log", run_in_background: true } as never, undefined, undefined, ctx);
+		await waitFor(() => expect(calls.length).toBe(2));
+		expect(calls.map((call) => call.command)).toEqual(["echo hi", "tail -f log"]);
+	});
+});
+
+describe("backgroundStartText", () => {
+	const job = { id: "b12345678", command: "npm run dev", outputFile: "/tmp/o/b12345678.output" } as never;
+
+	it("names the file and what comes next", () => {
+		expect(backgroundStartText(job, { cwd: "/w" })).toBe(
+			"Command running in background with ID: b12345678. Output is being written to: /tmp/o/b12345678.output. You will be notified when it completes. To check interim output, use read on that file path.",
+		);
+	});
+
+	it("says only the first sentence for Ctrl+B", () => {
+		expect(backgroundStartText(job, { cwd: "/w", reason: "user" })).toBe(
+			"Command was manually backgrounded by user with ID: b12345678. Output is being written to: /tmp/o/b12345678.output.",
+		);
+	});
+
+	it("explains a move made for a message", () => {
+		expect(backgroundStartText(job, { cwd: "/w", reason: "message" })).toMatch(
+			/^Command was moved to the background \(ID: b12345678\) so that a message that arrived while it was running can reach you; it was not interrupted\. Output is being written to: /,
+		);
+	});
+
+	it("warns a synchronous subagent that its jobs end with its final response", () => {
+		expect(backgroundStartText(job, { cwd: "/w", endsWithFinalResponse: true })).toContain(
+			"it is terminated when you give your final response and no notification can follow that",
+		);
+	});
+
+	it("adds the cwd hint when the command changes directory", () => {
+		const cd = { ...(job as object), command: "cd web && npm run dev" } as never;
+		expect(backgroundStartText(cd, { cwd: "/w" })).toMatch(
+			/\nSession cwd remains \/w; directory changes made by the backgrounded command do not apply to subsequent commands\.$/,
+		);
+		expect(backgroundStartText(job, { cwd: "/w" })).not.toContain("Session cwd");
+	});
+});
+
+describe("formatTaskDuration", () => {
+	it.each([
+		[0, "0s"],
+		[45_000, "45s"],
+		[120_000, "2m 0s"],
+		[3_905_000, "1h 5m 5s"],
+		[59_600, "59s"],
+		[119_700, "2m 0s"],
+	])("%d → %s", (ms, out) => {
+		expect(formatTaskDuration(ms)).toBe(out);
+	});
+});
+
+describe("structured results for codemode scripts", () => {
+	type Structured = Record<string, unknown>;
+	const structured = (result: unknown) => (result as { structuredContent?: Structured }).structuredContent;
+
+	it("declares pi's bash fields, exit_code optional, and the background fields", () => {
+		const { tool } = makeTool(fakeOps().ops);
+		const schema = tool.outputSchema as { properties: Record<string, unknown>; required?: string[] };
+		expect(Object.keys(schema.properties)).toEqual([
+			"output",
+			"truncated",
+			"full_output_path",
+			"exit_code",
+			"wall_time_seconds",
+			"background_task_id",
+			"output_file",
+		]);
+		expect(schema.required).toEqual(["output", "truncated", "wall_time_seconds"]);
+	});
+
+	it("gives a run_in_background job its task id and output file, without an exit code", async () => {
+		const { tool } = makeTool(fakeOps().ops);
+		const result = await tool.execute(
+			"s2",
+			{ command: "tail -f log", run_in_background: true } as never,
+			undefined,
+			undefined,
+			ctx,
+		);
+		const id = (result.details as { backgroundTaskId: string }).backgroundTaskId;
+		expect(structured(result)).toEqual({
+			output: text(result),
+			truncated: false,
+			wall_time_seconds: expect.any(Number),
+			background_task_id: id,
+			output_file: backgroundBashJobs.get(id)?.outputFile,
+		});
+	});
+
+	it("does the same for a command moved to the background at its timeout", async () => {
+		const { tool } = makeTool(fakeOps().ops);
+		const result = await tool.execute(
+			"s3",
+			{ command: "npm run dev", timeout: 0.02 } as never,
+			undefined,
+			undefined,
+			ctx,
+		);
+		const id = (result.details as { backgroundTaskId: string }).backgroundTaskId;
+		expect(structured(result)).toMatchObject({ output: text(result), truncated: false, background_task_id: id });
+		expect(structured(result)).not.toHaveProperty("exit_code");
+		expect(structured(result)?.wall_time_seconds).toEqual(expect.any(Number));
+	});
+});

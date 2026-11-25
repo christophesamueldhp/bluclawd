@@ -1,0 +1,25 @@
+## Agent skills
+
+### Issue tracker
+
+Issues, and the spec for any design settled in conversation, are tracked in GitHub Issues on christophesamueldhp/bluclawd via the `gh` CLI. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Default vocabulary: `needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+The domain docs are single-context, with one root `GLOSSARY.md` plus `docs/adr/`. See `docs/agents/domain.md`.
+
+### Remote web app
+
+To check a change to `daemon/remote/web/` in a browser, run `node scripts/remote-web-dev.ts`. It runs the app against fake panes and prints its URL and pairing code.
+
+### Flaky tests
+
+To reproduce a test that fails only under load, run `scripts/stress-test.sh <test file> [-t <name>]`. It runs vitest 16-wide and counts the failed runs.
+
+### Linux
+
+To run the tests on Linux, run `scripts/linux-check.sh [<test file> [-t <name>]]`. It runs vitest in an Ubuntu 24.04 container, on the tree as staged in the git index. It runs the tests only, not lint or typecheck. Run it by hand before a release and when a change touches tmux, the sandbox or pane runs.

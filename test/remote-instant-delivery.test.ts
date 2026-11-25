@@ -1,0 +1,192 @@
+import { getEventListeners } from "node:events";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import type { Server } from "node:net";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { handleIpcRequest } from "../daemon/handler.ts";
+import type { PaneMessage } from "../daemon/ipc/protocol.ts";
+import { startIpcServer } from "../daemon/ipc/server.ts";
+import { OrchestratorClient } from "../daemon/orchestrator-client.ts";
+import type { ServerSupervisor } from "../daemon/supervisor.ts";
+import { SelfRegistration } from "../ext/agent-view/self-registration.ts";
+import { testRegistry } from "./helpers/registry.ts";
+import { waitFor } from "./helpers/wait-for.ts";
+
+function blockEventLoop(ms: number): void {
+	const until = Date.now() + ms;
+	while (Date.now() < until);
+}
+
+describe("instant delivery to a pane", () => {
+	let dir: string;
+	let server: Server;
+	let supervisor: ServerSupervisor;
+
+	beforeEach(async () => {
+		dir = await mkdtemp(join(tmpdir(), "bluclawd-wait-"));
+		vi.stubEnv("PI_SERVER_DIR", dir);
+		supervisor = testRegistry(dir);
+		server = await startIpcServer((request) => handleIpcRequest(supervisor, request));
+	});
+
+	afterEach(async () => {
+		supervisor.settleWaits();
+		await new Promise((resolve) => server.close(resolve));
+		vi.unstubAllEnvs();
+		await rm(dir, { recursive: true, force: true });
+	});
+
+	it("refuses a wait for a pane that is not registered", async () => {
+		await expect(new OrchestratorClient().wait("pane-unknown", new AbortController().signal)).rejects.toThrow(
+			"Unknown instance: pane-unknown",
+		);
+	});
+
+	it("hands a queued prompt to the pane at once, not at its next heartbeat", async () => {
+		const handled: Array<{ message: PaneMessage; at: number }> = [];
+		const reg = new SelfRegistration(
+			new OrchestratorClient(),
+			() => ({ cwd: dir }),
+			(message) => handled.push({ message, at: Date.now() }),
+			"pane-wait-e2e",
+		);
+		reg.start();
+		await waitFor(() =>
+			expect(supervisor.listExternalInstances().some((e) => e.record.id === "pane-wait-e2e")).toBe(true),
+		);
+		await new Promise((resolve) => setTimeout(resolve, 50));
+		const sent = Date.now();
+		expect(await supervisor.sendExternal("pane-wait-e2e", { type: "prompt", text: "hi" })).toBe(true);
+		await waitFor(() => expect(handled).toHaveLength(1));
+		expect(handled[0].message).toEqual({ type: "prompt", text: "hi" });
+		expect(handled[0].at - sent).toBeLessThan(500);
+		await reg.stop();
+		expect(supervisor.listExternalInstances().some((e) => e.record.id === "pane-wait-e2e")).toBe(false);
+	});
+
+	it("hands a pane several MB of images, and text cut across many reads, within its register's timeout", async () => {
+		const client = new OrchestratorClient();
+		await client.register({ id: "pane-images", cwd: dir });
+		const png = Buffer.alloc(5 * 1024 * 1024, 7);
+		png.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+		const messages: PaneMessage[] = [
+			{ type: "prompt", text: "look", images: [{ mimeType: "image/png", data: png.toString("base64") }] },
+			{ type: "prompt", text: "✻".repeat(200_000) },
+		];
+		for (const message of messages) await supervisor.sendExternal("pane-images", message);
+		const { messages: delivered } = await client.register({ id: "pane-images", cwd: dir });
+		expect(delivered).toEqual(messages);
+		await client.unregister("pane-images");
+	});
+
+	it("keeps the messages a register drains while the pane is busy for over a second", async () => {
+		const client = new OrchestratorClient();
+		await client.register({ id: "pane-busy", cwd: dir });
+		await supervisor.sendExternal("pane-busy", { type: "prompt", text: "hi" });
+		const registering = client.register({ id: "pane-busy", cwd: dir });
+		blockEventLoop(1500);
+		await expect(registering).resolves.toMatchObject({ messages: [{ type: "prompt", text: "hi" }] });
+		await client.unregister("pane-busy");
+	});
+
+	it("answers a pending wait at shutdown", async () => {
+		const client = new OrchestratorClient();
+		await client.register({ id: "pane-wait-settle", cwd: dir });
+		const waiting = client.wait("pane-wait-settle", new AbortController().signal);
+		await new Promise((resolve) => setTimeout(resolve, 50));
+		supervisor.settleWaits();
+		await expect(waiting).resolves.toBe(false);
+		await client.unregister("pane-wait-settle");
+	});
+
+	it("ends an aborted wait at once", async () => {
+		const client = new OrchestratorClient();
+		await client.register({ id: "pane-wait-abort", cwd: dir });
+		const controller = new AbortController();
+		const waiting = client.wait("pane-wait-abort", controller.signal);
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		controller.abort();
+		await expect(waiting).rejects.toThrow("aborted");
+		await client.unregister("pane-wait-abort");
+	});
+
+	it("does not connect for a wait already aborted, and leaves no listener on a wait's signal", async () => {
+		let connections = 0;
+		server.on("connection", () => connections++);
+		const client = new OrchestratorClient();
+		await client.register({ id: "pane-wait-signal", cwd: dir });
+		connections = 0;
+		const controller = new AbortController();
+		controller.abort();
+		await expect(client.wait("pane-wait-signal", controller.signal)).rejects.toThrow("aborted");
+		await new Promise((resolve) => setTimeout(resolve, 50));
+		expect(connections).toBe(0);
+
+		const signal = new AbortController().signal;
+		const waiting = client.wait("pane-wait-signal", signal);
+		await new Promise((resolve) => setTimeout(resolve, 50));
+		supervisor.settleWaits();
+		await expect(waiting).resolves.toBe(false);
+		expect(getEventListeners(signal, "abort")).toHaveLength(0);
+		await client.unregister("pane-wait-signal");
+	});
+
+	it("lists a quit and resumed session as one row with one id, and delivers to its new pane", async () => {
+		const sessionFile = join(dir, "s.jsonl");
+		await writeFile(sessionFile, "");
+		const client = new OrchestratorClient();
+		const handled: PaneMessage[] = [];
+		const paneOn = (id: string) =>
+			new SelfRegistration(
+				client,
+				() => ({ cwd: dir, sessionFile, label: "fix tests", pane: id }),
+				(message) => handled.push(message),
+				id,
+			);
+		const rows = async () => (await client.list()).filter((i) => i.sessionFile === sessionFile);
+
+		const first = paneOn("pi-a");
+		first.start();
+		await waitFor(async () =>
+			expect(await rows()).toEqual([expect.objectContaining({ id: "pi-a", external: true })]),
+		);
+		await client.setMeta("pi-a", { pinned: true });
+
+		await first.stop({ unregister: true, reason: "quit" });
+		expect(await rows()).toEqual([expect.objectContaining({ id: "pi-a", status: "stopped", pinned: true })]);
+		await client.save({ cwd: dir, label: "fix tests", sessionFile });
+		expect(await rows()).toEqual([expect.objectContaining({ id: "pi-a", status: "stopped", pinned: true })]);
+
+		const resumed = paneOn("pi-b");
+		resumed.start();
+		await waitFor(async () =>
+			expect(await rows()).toEqual([
+				expect.objectContaining({ id: "pi-a", external: true, pane: "pi-b", pinned: true }),
+			]),
+		);
+		await new Promise((resolve) => setTimeout(resolve, 50));
+		await client.send("pi-a", { type: "prompt", text: "hi" });
+		await waitFor(() => expect(handled).toEqual([{ type: "prompt", text: "hi" }]));
+		await resumed.stop();
+	});
+
+	it("does not loop on waits when two live registrations share a pane id", async () => {
+		const waits = vi.spyOn(supervisor, "waitExternal");
+		const regs = [0, 1].map(
+			() =>
+				new SelfRegistration(
+					new OrchestratorClient(),
+					() => ({ cwd: dir }),
+					() => {},
+					"pane-wait-shared",
+				),
+		);
+		for (const reg of regs) reg.start();
+		await new Promise((resolve) => setTimeout(resolve, 1000));
+		for (const reg of regs) await reg.stop();
+		expect(waits.mock.calls.length).toBeGreaterThan(0);
+		expect(waits.mock.calls.length).toBeLessThan(10);
+		waits.mockRestore();
+	});
+});

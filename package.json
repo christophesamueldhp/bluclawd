@@ -1,0 +1,64 @@
+{
+  "name": "bluclawd",
+  "version": "0.0.1",
+  "type": "module",
+  "description": "The bluclawd feature layer as a pi package — install onto a stock pi with `pi install`.",
+  "keywords": ["pi-package"],
+  "pi": {
+    "extensions": [
+      "./ext/tmux-launch/index.ts",
+      "./ext/permissions/index.ts",
+      "./ext/sandbox/index.ts",
+      "./ext/checkpoints/index.ts",
+      "./ext/background-bash/index.ts",
+      "./ext/subagents/index.ts",
+      "./ext/branding/index.ts",
+      "./ext/transcript/index.ts",
+      "./ext/agent-view/index.ts",
+      "./ext/remote/index.ts",
+      "./ext/help/index.ts",
+      "./ext/vibes/index.ts",
+      "./ext/paste/index.ts",
+      "./ext/skills/index.ts",
+      "./ext/prompt-assist/index.ts",
+      "./ext/web/index.ts",
+      "./ext/memory/index.ts",
+      "./ext/accounts/index.ts"
+    ],
+    "themes": ["./themes"]
+  },
+  "imports": {
+    "#remote-web/*.js": {
+      "types": "./.types/remote-web/*.d.ts",
+      "default": "./daemon/remote/web/*.js"
+    }
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.3.5",
+    "@earendil-works/pi-ai": "1.5.2",
+    "@earendil-works/pi-coding-agent": "1.5.2",
+    "@earendil-works/pi-tui": "1.5.2",
+    "@silvia-odwyer/photon-node": "0.3.4",
+    "knip": "6.43.0",
+    "typebox": "*",
+    "typescript": "^5",
+    "vitest": "^4"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc -p daemon/remote/web --noEmit false --declaration --emitDeclarationOnly --outDir .types/remote-web && tsc --noEmit",
+    "lint": "biome check .",
+    "deadcode": "knip --production --include files",
+    "lint:fix": "biome check --write .",
+    "check": "npm run lint && npm run deadcode && npm run typecheck && npm test"
+  },
+  "dependencies": {
+    "@anthropic-ai/sandbox-runtime": "file:vendor/sandbox-runtime/anthropic-ai-sandbox-runtime-0.0.81-bluclawd.4.tgz"
+  }
+}

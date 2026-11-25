@@ -1,0 +1,315 @@
+diff --git a/src/sandbox/macos-sandbox-utils.ts b/src/sandbox/macos-sandbox-utils.ts
+index 1eb0db7..f0bf3c4 100644
+--- a/src/sandbox/macos-sandbox-utils.ts
++++ b/src/sandbox/macos-sandbox-utils.ts
+@@ -1,3 +1,5 @@
++// Modified for bluclawd: a Unix-socket deny that wins over the Unix-socket
++// allows. See BLUCLAWD-NOTICE.txt.
+ import { quote } from '../utils/shell-quote.js'
+ import { spawn } from 'child_process'
+ import * as path from 'path'
+@@ -55,6 +57,8 @@ export interface MacOSSandboxParams {
+   javaAgentJarPath?: string
+   allowUnixSockets?: string[]
+   allowAllUnixSockets?: boolean
++  /** Directories whose Unix sockets cannot be connected to, over the allows. */
++  denyUnixSockets?: string[]
+   allowLocalBinding?: boolean
+   allowMachLookup?: string[]
+   readConfig: FsReadRestrictionConfig | undefined
+@@ -1053,6 +1057,7 @@ function generateSandboxProfile({
+   needsNetworkRestriction,
+   allowUnixSockets,
+   allowAllUnixSockets,
++  denyUnixSockets,
+   allowLocalBinding,
+   allowMachLookup,
+   allowPty,
+@@ -1070,6 +1075,7 @@ function generateSandboxProfile({
+   needsNetworkRestriction: boolean
+   allowUnixSockets?: string[]
+   allowAllUnixSockets?: boolean
++  denyUnixSockets?: string[]
+   allowLocalBinding?: boolean
+   allowMachLookup?: string[]
+   allowPty?: boolean
+@@ -1342,6 +1348,15 @@ function generateSandboxProfile({
+       )
+     }
+   }
++  // Seatbelt is last-match-wins: after every network allow above, this deny
++  // holds over allowAllUnixSockets, allowUnixSockets and `(allow network*)`.
++  // Seatbelt matches the socket's real path, so a symlink or a hard link
++  // elsewhere does not reach it.
++  for (const dir of denyUnixSockets ?? []) {
++    profile.push(
++      `(deny network-outbound (remote unix-socket (subpath ${escapePath(normalizePathForSandbox(dir, { literal: true }))})))`,
++    )
++  }
+   profile.push('')
+ 
+   const writeRoots = writeRootEntries(writeConfig)
+@@ -1423,6 +1438,7 @@ export function wrapCommandWithSandboxMacOS(
+     javaAgentJarPath,
+     allowUnixSockets,
+     allowAllUnixSockets,
++    denyUnixSockets,
+     allowLocalBinding,
+     allowMachLookup,
+     readConfig,
+@@ -1472,6 +1488,7 @@ export function wrapCommandWithSandboxMacOS(
+     (unsetEnvVars !== undefined && unsetEnvVars.length > 0) ||
+     (setEnvVars !== undefined && Object.keys(setEnvVars).length > 0)
+   const hasGitConfig = (gitSafeDirectories?.length ?? 0) > 0
++  const hasUnixSocketDenies = (denyUnixSockets?.length ?? 0) > 0
+ 
+   // No sandboxing needed
+   if (
+@@ -1479,7 +1496,8 @@ export function wrapCommandWithSandboxMacOS(
+     !hasReadRestrictions &&
+     !hasWriteRestrictions &&
+     !hasEnvRestrictions &&
+-    !hasGitConfig
++    !hasGitConfig &&
++    !hasUnixSocketDenies
+   ) {
+     return command
+   }
+@@ -1499,6 +1517,7 @@ export function wrapCommandWithSandboxMacOS(
+     needsNetworkRestriction,
+     allowUnixSockets,
+     allowAllUnixSockets,
++    denyUnixSockets,
+     allowLocalBinding,
+     allowMachLookup,
+     allowPty,
+diff --git a/src/sandbox/sandbox-config.ts b/src/sandbox/sandbox-config.ts
+index 3c4f969..dd3942a 100644
+--- a/src/sandbox/sandbox-config.ts
++++ b/src/sandbox/sandbox-config.ts
+@@ -1,3 +1,5 @@
++// Modified for bluclawd: a Unix-socket deny that wins over the Unix-socket
++// allows. See BLUCLAWD-NOTICE.txt.
+ /**
+  * Configuration for Sandbox Runtime
+  * This is the main configuration interface that consumers pass to SandboxManager.initialize()
+@@ -723,6 +725,13 @@ export const NetworkConfigSchema = z.object({
+     .describe(
+       'If true, allow all Unix sockets (disables blocking on both platforms). On Linux this also unblocks VM sockets (AF_VSOCK).',
+     ),
++  denyUnixSockets: z
++    .array(z.string())
++    .optional()
++    .describe(
++      'macOS only: directories whose Unix sockets cannot be connected to, over allowAllUnixSockets and every allowUnixSockets entry. ' +
++        'Ignored on Linux (seccomp cannot filter by path).',
++    ),
+   allowLocalBinding: z
+     .boolean()
+     .optional()
+diff --git a/src/sandbox/sandbox-manager.ts b/src/sandbox/sandbox-manager.ts
+index 93b516d..55ed7e9 100644
+--- a/src/sandbox/sandbox-manager.ts
++++ b/src/sandbox/sandbox-manager.ts
+@@ -1,4 +1,5 @@
+-// Modified for bluclawd: the requesting command's id in network asks. See
++// Modified for bluclawd: the requesting command's id in network asks, and a
++// Unix-socket deny that wins over the Unix-socket allows. See
+ // BLUCLAWD-NOTICE.txt.
+ import {
+   hasNameReading,
+@@ -2224,6 +2225,10 @@ function getAllowAllUnixSockets(): boolean | undefined {
+   return config?.network?.allowAllUnixSockets
+ }
+ 
++function getDenyUnixSockets(): string[] | undefined {
++  return config?.network?.denyUnixSockets
++}
++
+ function getAllowLocalBinding(): boolean | undefined {
+   return config?.network?.allowLocalBinding
+ }
+@@ -2707,6 +2712,7 @@ async function wrapWithSandboxOnce(
+         degradeToDenyPaths: credentialRestrictions.degradeToDenyPaths,
+         allowUnixSockets: getAllowUnixSockets(),
+         allowAllUnixSockets: getAllowAllUnixSockets(),
++        denyUnixSockets: getDenyUnixSockets(),
+         allowLocalBinding: getAllowLocalBinding(),
+         allowMachLookup: getAllowMachLookup(),
+         ignoreViolations: getIgnoreViolations(),
+diff --git a/test/sandbox/unix-socket-deny.test.ts b/test/sandbox/unix-socket-deny.test.ts
+new file mode 100644
+index 0000000..b194264
+--- /dev/null
++++ b/test/sandbox/unix-socket-deny.test.ts
+@@ -0,0 +1,170 @@
++// Added for bluclawd: a Unix-socket deny that wins over the Unix-socket
++// allows. See BLUCLAWD-NOTICE.txt.
++import { afterAll, afterEach, beforeAll, describe, expect, it } from 'bun:test'
++import { spawn } from 'node:child_process'
++import {
++  linkSync,
++  mkdirSync,
++  realpathSync,
++  rmSync,
++  symlinkSync,
++  writeFileSync,
++} from 'node:fs'
++import { connect, createServer, type Server } from 'node:net'
++import { tmpdir } from 'node:os'
++import { join } from 'node:path'
++import { SandboxManager } from '../../src/index.js'
++import type { SandboxRuntimeConfig } from '../../src/sandbox/sandbox-config.js'
++import { wrapCommandWithSandboxMacOS } from '../../src/sandbox/macos-sandbox-utils.js'
++import { isMacOS } from '../helpers/platform.js'
++
++// Prints CONNECTED, or the errno name the connect failed with.
++const CLIENT = [
++  'import errno, socket, sys',
++  's = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)',
++  'try:',
++  '    s.connect(sys.argv[1])',
++  "    print('CONNECTED')",
++  'except OSError as e:',
++  '    print(errno.errorcode.get(e.errno, e.errno))',
++].join('\n')
++
++function run(wrapped: string): Promise<string> {
++  return new Promise((resolve, reject) => {
++    const child = spawn(wrapped, { shell: true })
++    let out = ''
++    child.stdout.on('data', chunk => (out += chunk))
++    child.on('error', reject)
++    child.on('close', () => resolve(out.trim()))
++  })
++}
++
++/** Whether a connect from outside the sandbox reaches the listener. */
++function connectsOutside(path: string): Promise<boolean> {
++  return new Promise(resolve => {
++    const socket = connect(path, () => {
++      socket.destroy()
++      resolve(true)
++    })
++    socket.on('error', () => resolve(false))
++  })
++}
++
++describe.if(isMacOS)('network.denyUnixSockets on macOS', () => {
++  // Spelled under tmpdir() (/tmp/...), whose real path is /private/tmp/...
++  const base = join(tmpdir(), `usd-${process.pid}`)
++  const denied = join(base, 'denied')
++  const other = join(base, 'other')
++  const deniedSocket = join(denied, 's.sock')
++  const otherSocket = join(other, 'o.sock')
++  const client = join(base, 'client.py')
++  const servers: Server[] = []
++
++  async function listen(path: string) {
++    const server = createServer(socket => socket.destroy())
++    servers.push(server)
++    await new Promise<void>(r => server.listen(path, () => r()))
++  }
++
++  beforeAll(async () => {
++    mkdirSync(denied, { recursive: true })
++    mkdirSync(other)
++    writeFileSync(client, CLIENT)
++    await listen(deniedSocket)
++    await listen(otherSocket)
++    // Made outside the sandbox, in a directory the deny does not name.
++    symlinkSync(deniedSocket, join(other, 'symlink.sock'))
++    linkSync(deniedSocket, join(other, 'hardlink.sock'))
++    symlinkSync(denied, join(base, 'denied-link'))
++  })
++
++  afterAll(() => {
++    for (const server of servers) server.close()
++    rmSync(base, { recursive: true, force: true })
++  })
++
++  afterEach(async () => {
++    await SandboxManager.reset()
++  })
++
++  async function connectInSandbox(
++    network: Partial<SandboxRuntimeConfig['network']>,
++    path: string,
++  ): Promise<string> {
++    await SandboxManager.initialize({
++      network: { allowedDomains: [], deniedDomains: [], ...network },
++      filesystem: { denyRead: [], allowWrite: [], denyWrite: [] },
++    })
++    const wrapped = await SandboxManager.wrapWithSandbox(
++      `python3 ${client} ${path}`,
++    )
++    const result = await run(wrapped)
++    expect(await connectsOutside(deniedSocket)).toBe(true)
++    return result
++  }
++
++  const allows: [string, Partial<SandboxRuntimeConfig['network']>][] = [
++    ['allowAllUnixSockets', { allowAllUnixSockets: true }],
++    ['an allowUnixSockets entry above it', { allowUnixSockets: [base] }],
++  ]
++  for (const [label, allow] of allows) {
++    describe(`with ${label}`, () => {
++      it('denies a socket in the directory', async () => {
++        expect(
++          await connectInSandbox(
++            { ...allow, denyUnixSockets: [denied] },
++            deniedSocket,
++          ),
++        ).toBe('EPERM')
++      })
++
++      it('denies it when the setting names the real path', async () => {
++        expect(
++          await connectInSandbox(
++            { ...allow, denyUnixSockets: [realpathSync(denied)] },
++            deniedSocket,
++          ),
++        ).toBe('EPERM')
++      })
++
++      for (const via of [
++        'other/symlink.sock',
++        'other/hardlink.sock',
++        'denied-link/s.sock',
++      ])
++        it(`denies it through ${via}`, async () => {
++          expect(
++            await connectInSandbox(
++              { ...allow, denyUnixSockets: [denied] },
++              join(base, via),
++            ),
++          ).toBe('EPERM')
++        })
++
++      it('still connects to an allowed socket elsewhere', async () => {
++        expect(
++          await connectInSandbox(
++            { ...allow, denyUnixSockets: [denied] },
++            otherSocket,
++          ),
++        ).toBe('CONNECTED')
++      })
++
++      it('connects to the socket without the setting', async () => {
++        expect(await connectInSandbox(allow, deniedSocket)).toBe('CONNECTED')
++      })
++    })
++  }
++
++  it('denies it when the network is not restricted', async () => {
++    const wrapped = wrapCommandWithSandboxMacOS({
++      command: `python3 ${client} ${deniedSocket}`,
++      needsNetworkRestriction: false,
++      denyUnixSockets: [denied],
++      readConfig: undefined,
++      writeConfig: undefined,
++    })
++    expect(await run(wrapped)).toBe('EPERM')
++    expect(await connectsOutside(deniedSocket)).toBe(true)
++  })
++})

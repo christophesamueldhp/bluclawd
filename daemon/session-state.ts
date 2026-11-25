@@ -1,0 +1,95 @@
+import { closeSync, fstatSync, openSync, readSync } from "node:fs";
+
+export type SessionOutcome = "done" | "failed" | "stopped";
+
+const DETAIL_MAX = 200;
+
+function clip(text: string): string {
+	const oneLine = text.replace(/\s+/g, " ").trim();
+	return oneLine.length > DETAIL_MAX ? `${oneLine.slice(0, DETAIL_MAX - 1)}…` : oneLine;
+}
+
+export function lastLine(text: string): string | undefined {
+	const lines = text
+		.split("\n")
+		.map((line) => line.replace(/^\s*(?:[#>*-]+|\d+\.)\s*/, "").trim())
+		.filter(Boolean);
+	return lines.length ? clip(lines[lines.length - 1]) : undefined;
+}
+
+export function textOf(content: unknown): string {
+	if (typeof content === "string") return content;
+	if (!Array.isArray(content)) return "";
+	return content
+		.filter((part): part is { type: string; text: string } => part?.type === "text" && typeof part.text === "string")
+		.map((part) => part.text)
+		.join("");
+}
+
+export function toolActivity(toolName: string | undefined, args: unknown): string | undefined {
+	const a = (args ?? {}) as Record<string, unknown>;
+	const text = [a.description, a.command, a.path, a.pattern, a.url].find((v) => typeof v === "string" && v.trim());
+	if (typeof text === "string") return lastLine(text);
+	return toolName;
+}
+
+interface MessageLike {
+	role?: string;
+	content?: unknown;
+	stopReason?: string;
+	errorMessage?: string;
+}
+
+function outcomeOf(message: MessageLike): { detail?: string; outcome: SessionOutcome } {
+	if (message.stopReason === "error") {
+		return { detail: clip(message.errorMessage || "the model request failed"), outcome: "failed" };
+	}
+	return { detail: lastLine(textOf(message.content)), outcome: message.stopReason === "aborted" ? "stopped" : "done" };
+}
+
+function tryAssistantOutcome(line: string): ReturnType<typeof outcomeOf> | undefined {
+	try {
+		const entry = JSON.parse(line) as { type?: string; message?: MessageLike };
+		return entry.type === "message" && entry.message?.role === "assistant" ? outcomeOf(entry.message) : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+const TAIL_BYTES = 16 * 1024;
+
+export function readSessionTail(
+	sessionFile: string,
+): { detail?: string; outcome?: SessionOutcome; turns: number } | undefined {
+	let fd: number | undefined;
+	try {
+		fd = openSync(sessionFile, "r");
+		const size = fstatSync(fd).size;
+		let offset = size;
+		let parts: Buffer[] = [];
+		while (offset > 0) {
+			const length = Math.min(offset, TAIL_BYTES);
+			offset -= length;
+			const sentinelNewline = offset === 0 ? 1 : 0;
+			const buffer = Buffer.alloc(length + sentinelNewline);
+			if (sentinelNewline) buffer[0] = 0x0a;
+			readSync(fd, buffer, sentinelNewline, length, offset);
+			let end = buffer.length;
+			for (let i = buffer.length - 1; i >= 0; i--) {
+				if (buffer[i] !== 0x0a) continue;
+				parts.push(buffer.subarray(i + 1, end));
+				const line = Buffer.concat(parts.reverse()).toString("utf8");
+				parts = [];
+				end = i;
+				const outcome = tryAssistantOutcome(line);
+				if (outcome) return { ...outcome, turns: 1 };
+			}
+			if (end > 0) parts.push(buffer.subarray(0, end));
+		}
+		return { turns: 0 };
+	} catch {
+		return undefined;
+	} finally {
+		if (fd !== undefined) closeSync(fd);
+	}
+}

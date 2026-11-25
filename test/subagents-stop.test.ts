@@ -1,0 +1,220 @@
+import { describe, expect, it } from "vitest";
+import { stripAnsi } from "../daemon/ansi.ts";
+import { type AgentTask, publishAgentTasks } from "../ext/_shared/agent-tasks.ts";
+import backgroundBash from "../ext/background-bash/index.ts";
+import { TasksDialog } from "../ext/background-bash/tasks-dialog.ts";
+import type { SubagentRunRecord } from "../ext/subagents/runs.ts";
+import { createEmptySubagentUsage } from "../ext/subagents/usage.ts";
+
+const theme = {
+	fg: (_c: string, t: string) => t,
+	bg: (_c: string, t: string) => t,
+	bold: (t: string) => t,
+} as any;
+
+function getTaskStopTool() {
+	let tool: any;
+	const noop = () => {};
+	backgroundBash({
+		on: noop,
+		registerEntryRenderer: noop,
+		registerCommand: noop,
+		registerMessageRenderer: noop,
+		registerTool: (t: any) => {
+			if (t?.name === "task_stop") tool = t;
+		},
+	} as any);
+	return (params: Record<string, string>, owner = "sess_main") =>
+		tool.execute("call_stop", params, undefined, undefined, {
+			sessionManager: { getSessionId: () => owner },
+		});
+}
+
+function makeAgentRunRecord(overrides: Partial<SubagentRunRecord> = {}): SubagentRunRecord {
+	return {
+		runId: "sub_99_1",
+		parentSessionId: "sess_main",
+		sessionEpoch: 1,
+		parentTurnId: "turn_1",
+		originToolCallId: "call_1",
+		generation: 0,
+		agentName: "explorer",
+		definitionSource: "bundled",
+		provider: "anthropic",
+		modelId: "claude-sonnet-4-5",
+		thinkingLevel: "low",
+		cwd: "/proj",
+		taskSummary: "Inspect architecture",
+		startSnapshot: { headCommit: "1234567", dirty: false, statusDigest: "" },
+		admittedAt: 1000,
+		startedAt: 1010,
+		deliveryMode: "background",
+		status: "running",
+		usage: createEmptySubagentUsage(),
+		backgroundDeliveryAttempted: false,
+		...overrides,
+	};
+}
+
+function taskOf(r: SubagentRunRecord): AgentTask {
+	const finished = { closed: "completed", failed: "failed", interrupted: "failed" } as const;
+	return {
+		id: r.runId,
+		owner: r.parentSessionId,
+		agent: r.agentName,
+		summary: r.taskSummary,
+		startedAt: r.startedAt ?? r.admittedAt,
+		endedAt: r.endedAt,
+		state: r.status in finished ? finished[r.status as keyof typeof finished] : "running",
+		status: r.status,
+		model: `${r.provider}/${r.modelId}`,
+		outputFile: "",
+		output: () => "",
+	};
+}
+
+describe("Task 8 (M2) — Subagent task_stop routing and /tasks dialog integration", () => {
+	it("routes agent IDs through the existing task_stop tool, tracks stop source, enforces session ownership, and rejects finished runs", async () => {
+		const stopTool = getTaskStopTool();
+		const records = new Map<string, SubagentRunRecord>([
+			["sub_10_1", makeAgentRunRecord({ runId: "sub_10_1", parentSessionId: "sess_main", status: "running" })],
+			["sub_10_2", makeAgentRunRecord({ runId: "sub_10_2", parentSessionId: "sess_other", status: "running" })],
+			[
+				"sub_10_3",
+				makeAgentRunRecord({
+					runId: "sub_10_3",
+					parentSessionId: "sess_main",
+					status: "closed",
+				}),
+			],
+		]);
+
+		let observedStopSource: string | undefined;
+		const unpublish = publishAgentTasks({
+			list: (owner) =>
+				Array.from(records.values())
+					.filter((r) => (!owner || r.parentSessionId === owner) && r.status === "running")
+					.map(taskOf),
+			getOwned: () => undefined,
+			closeOwned: (id, opts) => {
+				const rec = records.get(id);
+				if (!rec || (opts?.owner && rec.parentSessionId !== opts.owner)) return { ok: false, reason: "not_found" };
+				if (rec.status === "closed") return { ok: false, reason: "not_running", task: taskOf(rec) };
+				observedStopSource = opts?.source;
+				rec.status = "stopping";
+				return { ok: true, task: taskOf(rec) };
+			},
+			closeAll: () => 0,
+		});
+
+		try {
+			const res = await stopTool({ task_id: "sub_10_1" }, "sess_main");
+			const parsed = JSON.parse(res.content[0].text);
+			expect(parsed).toEqual({
+				message:
+					"Stop requested for task: sub_10_1 (explorer: Inspect architecture); it is stopping, not ended yet, and its session is kept",
+				task_id: "sub_10_1",
+				task_type: "local_agent",
+				command: "explorer: Inspect architecture",
+			});
+			expect(observedStopSource).toBe("model");
+			expect(records.get("sub_10_1")?.status).toBe("stopping");
+
+			await expect(stopTool({ task_id: "sub_10_2" }, "sess_main")).rejects.toThrow(
+				"No task found with ID: sub_10_2",
+			);
+
+			await expect(stopTool({ task_id: "sub_10_3" }, "sess_main")).rejects.toThrow(
+				"Task sub_10_3 is not running (status: closed)",
+			);
+		} finally {
+			unpublish();
+		}
+	});
+
+	it("renders active agent states (starting, running, stopping), sanitized output tails, and retains an open detail view when a child completes", () => {
+		const run1 = makeAgentRunRecord({
+			runId: "sub_20_1",
+			agentName: "explorer",
+			taskSummary: "Scan auth",
+			status: "running",
+			startedAt: 2000,
+		});
+		const run2 = makeAgentRunRecord({
+			runId: "sub_20_2",
+			agentName: "reviewer",
+			taskSummary: "Review diff",
+			status: "starting",
+			startedAt: 3000,
+		});
+
+		const runs = new Map<string, SubagentRunRecord>([
+			[run1.runId, run1],
+			[run2.runId, run2],
+		]);
+
+		let stoppedByDialog: { id: string; source?: string } | undefined;
+		const unpublish = publishAgentTasks({
+			list: (owner) =>
+				Array.from(runs.values())
+					.filter((r) => (!owner || r.parentSessionId === owner) && r.status !== "closed")
+					.map((r) => ({
+						...taskOf(r),
+						output: () => "\x1b[31mScanning src/auth.ts:12\x1b[0m\nFound token check",
+					})),
+			getOwned: (id, owner) => {
+				const r = runs.get(id);
+				if (!r || (owner && r.parentSessionId !== owner)) return undefined;
+				return { ...taskOf(r), output: () => `Final completed report for ${id}\nEvidence: src/auth.ts:12` };
+			},
+			closeOwned: (id, opts) => {
+				const rec = runs.get(id);
+				if (!rec) return { ok: false, reason: "not_found" };
+				stoppedByDialog = { id, source: opts?.source };
+				rec.status = "stopping";
+				return { ok: true, task: taskOf(rec) };
+			},
+			closeAll: () => 0,
+		});
+
+		try {
+			const dialog = new TasksDialog(
+				theme,
+				"sess_main",
+				() => {},
+				() => {},
+			);
+			const renderScreen = () => stripAnsi(dialog.render(100).join("\n"));
+
+			const listOut = renderScreen();
+			expect(listOut).toContain("2 active agents");
+			expect(listOut).toContain("reviewer: Review diff");
+			expect(listOut).toContain("starting");
+			expect(listOut).toContain("explorer: Scan auth");
+			expect(listOut).toContain("running");
+
+			dialog.handleInput("\x1b[B");
+			dialog.handleInput("\r");
+
+			const detailOut = renderScreen();
+			expect(detailOut).toContain("Agent details");
+			expect(detailOut).toContain("Model:    anthropic/claude-sonnet-4-5");
+			expect(detailOut).toContain("Task:     explorer: Scan auth");
+			expect(detailOut).toContain("Scanning src/auth.ts:12");
+			expect(detailOut).not.toContain("\x1b[31m");
+
+			dialog.handleInput("x");
+			expect(stoppedByDialog).toEqual({ id: "sub_20_1", source: "user" });
+			expect(renderScreen()).toContain("Status:   stopping");
+
+			run1.status = "closed";
+			run1.endedAt = 4000;
+			const closedDetailOut = renderScreen();
+			expect(closedDetailOut).toContain("Agent details");
+			expect(closedDetailOut).toContain("Status:   closed");
+			expect(closedDetailOut).toContain("Final completed report for sub_20_1");
+		} finally {
+			unpublish();
+		}
+	});
+});

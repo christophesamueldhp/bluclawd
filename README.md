@@ -1,0 +1,759 @@
+# bluclawd
+
+A feature layer for [pi](https://github.com/earendil-works/pi), installed as an
+ordinary pi package, not a fork. **Nothing here modifies a file pi owns**, and
+nothing here bundles pi's own source. Install pi normally, then install this on
+top.
+
+## Install
+
+```bash
+npm install -g --ignore-scripts @earendil-works/pi-coding-agent   # pi itself
+brew install tmux                                                  # agent view needs it
+npm install --omit=dev --omit=peer --prefix /path/to/this/repo     # the sandbox runtime
+pi install /path/to/this/repo                                     # this layer
+pi                                                                 # run it
+```
+
+Git 2.40 or newer is needed (`subagent_integrate` merges with `git merge-tree --merge-base`); tested with 2.43 and 2.54.
+
+For a Git installation, use `pi install git:github.com/christophesamueldhp/bluclawd`;
+pi installs the package's production dependencies automatically. To update this package, use
+`pi update git:github.com/christophesamueldhp/bluclawd`. Choose host upgrades separately;
+`pi update --all` also updates pi itself. Restart pi or run `/reload` to load updated extensions.
+Prompt assistance is included and enabled by default; no separate extension installation is needed.
+
+Identity is plain pi: `~/.pi/agent` and the `pi` binary. The name "bluclawd"
+shows up in the welcome header and nowhere else; there is no rebrand.
+
+## How it works
+
+bluclawd uses two mechanisms, both pi's own:
+
+| Need | pi's mechanism |
+|---|---|
+| What ships | `package.json`'s `pi.extensions`, an explicit, ordered list of files; pi runs each event's handlers in that order. `tmux-launch` is first. Outside tmux its `session_start` moves the session into an agent-view pane and exits, so the others' startup does not run a second time in a process about to end. That order saves startup cost and does not affect correctness. `permissions` is next, ahead of `sandbox` and `checkpoints`, the other extensions that handle `tool_call`. Pi stops at the first handler that blocks, so a deny rule blocks wherever it sits, but first it is the reason the model is told, and `checkpoints` does no Git scan for a call that never runs. `tmux-launch` handles no tool calls, so being ahead of `permissions` costs nothing |
+| What a feature does | `ExtensionAPI`: `registerCommand`, `registerTool`, `registerShortcut`, `appendEntry` + `registerEntryRenderer`, `ui.custom`, `setHeader`, `resources_discover`, … |
+
+`bin.mjs` is a convenience entry point for trying this out without a separate
+`pi install`. It imports `@earendil-works/pi-coding-agent` as a normal
+dependency, and it is not how `pi install` loads this package.
+
+## What ships
+
+```
+package.json    the pi package manifest (pi.extensions, pi.themes, peer dependencies)
+bin.mjs         convenience entry point for local runs
+themes/         the bluclawd themes: bluclawd's six palettes
+daemon/         agent view's session registry (state in ~/.pi/server, or $PI_SERVER_DIR), and its client, tmux and row code the extensions share
+ext/            the feature layer, one directory per extension
+  _shared/      cross-extension state (via globalThis), settings readers, vendored pi internals
+scripts/        probe-extensions.ts: headless report of what each extension registers
+test/           vitest suites, self-contained: no monorepo, no fixture files
+```
+
+bluclawd has 18 extensions. Pi's own packages are peers; the vendored sandbox runtime is a production dependency.
+
+| Extension | Registers |
+|---|---|
+| `tmux-launch` | outside tmux, `pi` starts its session as an agent-view pane and attaches to it |
+| `permissions` | deny-rule gate on every tool call; Alt+M |
+| `sandbox` | `/sandbox`; the model's `bash` and `monitor` run in the sandbox runtime when it is on |
+| `checkpoints` | `/rewind` |
+| `background-bash` | `/tasks`; the `bash`, `monitor` (off by default), `schedule_wakeup` (off by default) and `task_stop` tools |
+| `subagents` | model-only `subagent` tool (`general-purpose`, `explorer`, `reviewer`, plus trusted `.pi/agents/*.md` and `~/.pi/agent/agents/*.md`) |
+| `branding` | `/theme`; welcome header and mascot |
+| `transcript` | the transcript's tool look, where a collapsed tool call is one `⏺ Name(arg)` line with a `⎿` summary |
+| `agent-view` | `/agent-view` (what `←` twice dispatches) |
+| `remote` | `/remote-control` |
+| `help` | `/help`, `/status`, `/context` |
+| `vibes` | spinner verbs |
+| `skills` | choose `/skill:name` from autocomplete anywhere in a terminal draft; selected markers show scope, package provenance, and instruction-file location, and delete as one unit. Typed or pasted references remain ordinary text, including at the beginning. |
+| `prompt-assist` | `/prompt-assist`; prompt suggestions and automatic session titles with a selectable Pi model; manual rename stays available |
+| `web` | `/web`; the `websearch` (Exa or OpenAI) and `webfetch` (Exa) tools |
+| `memory` | `/memory`; the model-only `memory` tool (off by default), which keeps Memories of the Project across sessions |
+| `accounts` | `/accounts`, `--models`, `--scoped`; named OAuth/API-key accounts and Active model selection in one chooser |
+| `paste` | a ctrl+v image in the prompt shows as `[Image #N]` where pi would insert its temporary file's path, and is sent to the model as an image; pasting the same image again right after shows its file. Pasted text is left to pi. A long paste shows as its `[paste #N …]` marker and is sent in full. Agent view's composer has its own marker, where a paste over 800 characters or 2 lines shows as `[Pasted text #N +L lines]` |
+
+Prompt assistance defaults to **OpenCode Go / Claude Haiku 5.5**, independently of your coding model.
+Use **`/prompt-assist`** to open the built-in Pi TUI picker, showing the current enabled state
+and model. Its first option turns assistance on or off; the remaining options select any available,
+authenticated Pi chat model, including custom providers. The toggle remains available without model credentials. **`/prompt-assist provider/model`** selects one directly (Tab completes IDs), and
+**`/prompt-assist default`** returns to Haiku 5.5. **`/prompt-assist off`** disables both prompt
+suggestions and automatic session naming; **`/prompt-assist on`** enables them again. Disabling
+cancels pending assistance requests and clears ghost text, without changing your draft or an
+existing session name. Model selection does not implicitly enable assistance. Both the enabled
+state (on by default) and the selected model are saved globally in `~/.pi/agent/bluclawd/prompt-assist.json` (under `$PI_CODING_AGENT_DIR`
+when overridden) for future sessions and package updates. Changing it leaves the main coding model unchanged.
+
+After a response has finished, including retries and queued work, assistance
+requests a dim next-prompt suggestion in the empty editor, without requiring you to type first.
+It also refreshes the suggestion when resuming or reloading a conversation. While typing,
+continuations are requested after a 700 ms pause. Provider latency still applies; background
+requests allow up to 30 seconds. Suggestions target **2–12 words**, with no extra character cutoff
+on the draft or returned suggestion. The request still has a 64-output-token budget; these token
+budgets and the bounded conversation excerpt are bluclawd cost controls, not documented bluclawd limits.
+**Right arrow (`→`)** or **Tab** accepts without sending;
+**Enter** submits the accepted text, and **Esc** dismisses. Without a visible suggestion, Right arrow
+keeps its normal cursor movement. Command and file
+completion takes priority. Only a short text-only conversation excerpt and the draft are sent
+to the selected provider; assistance does not read repository files or include tool output.
+The selected provider must be authenticated; unavailable models produce a warning, not a silent fallback.
+
+An unnamed session starts generating an English **2–5 word noun-phrase title** as soon as its
+first prompt is submitted, without waiting for the main response. The background request uses
+the first 1,500 characters of that prompt and a 32-output-token budget; it does not apply a
+separate 80-character cutoff to the returned title. The title appears on the editor's upper border while idle.
+An empty session has no topic to name yet. Rename it at any time with pi's
+**`/name Your title`**, or **Ctrl+R** in agent view. Automatic naming never replaces a manually
+assigned name, including one assigned while generation is still running.
+
+**Web.** `websearch` sends a search to one of two search providers: Exa, which returns ranked pages with
+highlights, or OpenAI, which returns a short cited answer plus its sources through the ChatGPT/Codex
+login pi already holds, whatever model you chat with. Store the Exa key like any other pi key.
+Run **`/login`**, pick *Sign in with an API key*, then **Exa**. Pi saves it in `~/.pi/agent/auth.json`, where a
+`!command` value, for example `"!security find-generic-password -ws exa"`, keeps it in the Keychain
+instead; `EXA_API_KEY` is the fallback. The key stays inside pi, out of the shell commands it runs. Each OpenAI search spends
+Codex quota. `webfetch` reads up to 10 known URLs through Exa. **`/web`** opens a searchable
+picker for the provider and for the Codex model OpenAI searches run on; **`/web exa`**,
+**`/web openai`** and **`/web status`** work without it. The model can pick a provider per call;
+when one cannot answer (rate limit, outage, no credits, no login), the other one does, and the
+result says so. The choice is saved in `~/.pi/agent/bluclawd/web.json`. [ADR-0004](docs/adr/0004-bluclawd-ships-its-own-web-tools.md)
+explains why bluclawd ships its own web tools.
+
+## Provider accounts
+
+Run **`/accounts`** to open the unified **Accounts/Models** chooser. Type to search providers and
+see connection status and active-account names; press **Tab** to move between sections. Choose a
+provider, then **Add account…** to sign in with OAuth or an API key.
+Give each account a name such as Personal or Work. A successful sign-in activates that account,
+and the previous login stays saved. **Save current login…** names the login already
+stored by Pi without signing in again; if already saved, this renames the active account rather
+than duplicating its OAuth grant. Select a saved account to switch; `✓` marks the active one.
+**`/accounts provider-id`** opens that provider directly, for example `/accounts openai-codex`.
+Removing an inactive saved account requires confirmation; the active account cannot be removed.
+
+Open **Models** directly with **`/accounts --models`** to browse across connected providers, or
+**`/accounts --scoped`** to start in the read-only native Scoped view, not Edit scope.
+These routes use the same Accounts/Models chooser and require the terminal UI. Use one route flag
+alone, or a provider ID alone; unknown flags, providers, and combined arguments show usage guidance
+without changing accounts.
+
+**Models** groups the catalog by provider and shows each active account. Type to search, use
+**Ctrl+P** to cycle provider filters, **Ctrl+S** for All/Scoped, and **Enter** to use an available
+model. **Active model**, **Scoped**, and **Unavailable** are separate labels. **Ctrl+A (Show all)**
+reveals models outside scope without changing scope. Successful sign-in opens that provider's
+Models; choosing a model is optional, and closing the chooser keeps the login. Model selection
+changes only the current session's Active model, not scope or defaults. Account switches refresh
+availability and warn about lost access without substituting a model or changing scope.
+The built-in `/login`, `/model`, and `/scoped-models` commands and native model-selection shortcuts
+remain host-owned and unchanged. The `/accounts` routes are bluclawd entry points, not overrides
+of those commands; this chooser does not edit scope or defaults.
+
+Scope display is verified on unmodified stock pi **1.5.2** using the public
+`ExtensionCommandContext.scopedModels` and `modelRegistry.getAll()` / `getAvailable()` contracts;
+explicit selection uses `ExtensionAPI.setModel()`. An empty host scope means unrestricted
+available models. A nonempty scope keeps its membership even when every member is unavailable.
+Those present in the host snapshot stay visible but cannot be selected. References absent from
+that snapshot cannot be reconstructed. Reopening reads the current command context, including
+after native scope changes, `/reload`, or session replacement. Native cycling, startup precedence,
+and scope/default persistence remain pi-owned; the chooser does not infer startup intent.
+See [Accounts compatibility and verification](docs/accounts-compatibility.md) for the exact
+published package set checked, extension contracts, reproducible checks, and installation limits.
+
+Accounts are per provider. Switching OpenAI does not change Anthropic, Exa, or another provider.
+The model, conversation, settings, and extensions stay unchanged. Changes apply to the shared Pi
+credentials, including other sessions and future background requests; wait for other Pi sessions
+to finish requests before switching. The command refuses changes while this session or its
+background subagents are running. Use `/accounts` rather than `/login` to add another account;
+`/login` replaces the currently active login. Environment variables and provider configuration
+can override stored API keys; accounts manage stored logins, not ambient AWS profiles or other
+external credential sources. Providers without interactive sign-in can only save an existing
+stored login. Adding accounts requires the terminal UI; saved-account switching also supports RPC UI.
+
+Saved credentials and account names are stored in `~/.pi/agent/bluclawd/accounts.json`, with
+owner-only file permissions, alongside Pi's active credentials in `auth.json`. Both follow
+`PI_CODING_AGENT_DIR`. These are local plaintext credential files, not an encrypted keychain;
+do not share them or commit them. Entered keys and authorization codes are masked and are not
+sent into the conversation. OAuth sign-in shows the provider's URL or device code; open it in
+the browser account you want to add. Token refresh remains Pi's responsibility; switching away
+saves the latest refreshed credential for reuse.
+
+## What it adds
+
+bluclawd adds these names and behaviours on top of pi's own commands:
+
+| Command | What it does |
+|---|---|
+| `permissions.deny`, Alt+M | deny rules block matching tool calls; the footer shows pi's `defaultProjectTrust` (`⏵⏵ always` / `⏸ ask` / `✕ never`) and Alt+M cycles it; see [Permissions](#permissions) |
+| `/tasks` | background tasks dialog: shells (`run_in_background`, Ctrl+B on the model's running bash, or a foreground command past its `timeout`), monitors, subagents (`subagent` with `background: true`), pending wake-ups (`schedule_wakeup`, `x` cancels one), and the model's bash still running in the foreground once it has run 2s (marked `foreground`; `x` kills it; bluclawd does not list these); running tasks only; Enter shows a task's output tail, `x` stops it and tells the model without starting a turn, and updates wait while the dialog is open. The model's bash is bluclawd's. Its `timeout` is in seconds, as in pi, and is 2 minutes by default. A command still running at its timeout moves to the background instead of being killed, as it does on Ctrl+B after 2s or when you send a message, and the model reads a task's output file with `read`. The footer pill counts the running shells and monitors; ↓ from an empty prompt selects it and Enter opens the dialog. A shell writes its whole output to a file named in its start result and exit notification; `task_stop` stops shells, monitors, and background subagents (`sub_*`), and cancels wake-ups (`w*`). `schedule_wakeup` is for orchestrators only, not runs, and is off by default (see [Tools off by default](#tools-off-by-default)). It schedules a turn of the agent's own from `prompt` plus `delay` in seconds or `at` a local `HH:MM` (its next occurrence), due between 1 minute and 24 hours from now. When it is due, a notice carrying the prompt and due time starts the next turn, after the running one ends. Wake-ups are kept in the session log. They survive a reload and a reopen of the session (`/resume`, or pi started on its file), and one that fell due while the session was closed fires once, late, saying when it was due. Ending the session cancels them: a quit, `/new`, a `/resume` of another session, a fork (the fork gets none), tree navigation, or a stop of its row in agent view. An interactive pi that crashes, or is ended by a signal bluclawd did not send (a closed terminal, a `kill`, a logout), keeps them. The daemon, which scheduling one starts, holds a copy. When one falls due with that pi gone, the daemon reopens the session in agent view's tmux, where it fires, late if the daemon was down. A job notifies the model once when it exits, and once more if it goes quiet for 45s on what reads as an interactive prompt (`(y/n)`, `Press Enter`, …). The `monitor` tool is bluclawd's `Monitor` and is off by default (see [Tools off by default](#tools-off-by-default)). It turns each stdout line of a long-running command, or each frame of a WebSocket (`ws`), into an event that wakes the model. Its stderr goes to the output file. Every monitor expires after `timeout_ms`, 5 minutes by default and at most 30, with one notice so the model can re-arm it |
+| `subagent` tool | model-only delegation (`general-purpose`, `explorer` and `reviewer` bundled, plus custom Markdown definitions in trusted `<cwd>/.pi/agents/*.md` and `~/.pi/agent/agents/*.md`): one run, a `tasks` batch side by side, or a `chain` of steps. Each run is a pi of its own, in a pane you can open from an orchestrator in tmux or else on pi's RPC, with a fresh context and only its role's tools; one that edits works in an isolated Git worktree, which `subagent_integrate` applies to the checkout. It cannot delegate further. It inherits the parent model and thinking level unless the role or the call picks others. A run's process ends once it reports; `subagent_stop` cancels it, `subagent_resume` continues it, and `/clean-workspace` removes a worktree with changes. At most `subagents.maxActive` (4) work at once, the rest queued, never on a turn, tool-call, token, or time limit. A foreground call returns the run's Report; `background: true` returns at once. `/collaborate` links sessions you name. A run's usage is counted in its own session; `/status` shows the runs' total separately (see [Subagents](#subagents)) |
+| `/rewind` (or Esc twice on an empty prompt, when pi's `doubleEscapeAction` is `"none"`) | bluclawd's rewind, with a file checkpoint per message you send. It lists your prompts newest first with what each changed (`a.ts +3 -1`, `No code changes`, `⚠ No code restore`), then Restore code and conversation / Restore conversation (the prompt returns to the editor) / Restore code / Never mind, with no further confirmation. The current files are checkpointed first and listed as `(before rewind)`, so `/rewind` undoes it. New files the agent created since the point (`write`, `bash`) are removed and your own are kept; unlike bluclawd it also restores files changed through bash or by hand. Checkpoints are git commits kept under `refs/bluclawd/checkpoints/<session>/`. Each session keeps its newest 50, and another session's refs are pruned after 30 days. Esc twice is pi's own key. With `doubleEscapeAction` unset or `"tree"` it opens pi's `/tree`, with `"fork"` pi's `/fork`; only `"none"`, which leaves pi nothing to run, gives it to `/rewind`. `/rewind` as a command works whatever the setting |
+| `←` on an empty prompt (or `/agent-view`) | agent view: background sessions in Needs input (blocked on a prompt) / Working (a turn running) / Idle (nothing running) bands (empty ones hidden; ctrl+s groups them by directory, this one first, and is remembered), one line each: `✻`/spinner/`∙` and name, what it is doing (a working session's current tool; an idle one with a wake-up pending, when the earliest is due: `wakes 14:05`), age. Type a task and press enter to start a background session (ctrl+enter starts it and switches to it), shift+enter / alt+enter / ctrl+j adds a line, pi's external-editor key (ctrl+g by default; `app.editor.external` in its `keybindings.json`) writes it in the editor pi opens (its `externalEditor` setting, else `$VISUAL` or `$EDITOR`), ctrl+v attaches a clipboard image to the new-session composer, an unknown `/command` is sent as the task, `!<command>` runs it in your shell as a row of its own (its last output line while it runs, then done, `exit N — …` or stopped; enter shows its output, ctrl+x stops it then removes the row, and it is never run again), space peeks and replies (the reply is the session's next prompt, `/stop` stops it; a reply draft is kept per session), enter/→ switches this terminal to any session at once, including Working and Needs input (see [Session switching](#session-switching)), ↑↓ wrap, alt/ctrl+↑↓ jump between bands, alt+1-9 opens the Nth session in the focused one's directory, ctrl+x stops then deletes (this terminal's own session too, and the terminal then moves to agent view; an orchestrator's runs go with it), an orchestrator's open runs in tmux, from before runs ran on pi's RPC, fold into a `▸ N subagents` line under its row that enter shows and hides, ctrl+t pins, ctrl+r renames, shift+↑↓ reorders the Pinned band and directory view (Needs input, Working and Idle always list most recent first), `s:<state>` / `n:<name>` filter (ctrl+f turns the text into a name search), `/resume` brings a past session back and opens it, `/model <name>` (or `default`) sets the model for new ones, `/cd <dir>` sets the directory they start in (relative to the current one; bare `/cd` goes back), tab completes the model or directory (several matches are listed, and ↑↓ and tab or enter pick one), typing `/` lists these commands (↑↓ to pick, tab or enter completes one that takes an argument, enter runs the rest), the hint line starts with the mode new ones start in (`⏵⏵ always` or `✕ never`; nothing at pi's default, `ask`), `?` shows the shortcuts, esc returns to your session, and ctrl+c twice (or `exit`, `/exit`) leaves tmux with the sessions still running, except the one `pi` started in this terminal, which ends with it while idle. The footer shows `← for agents` / `← N agents` / `← N done`, and `Press ← again to open agents` after the first press. Every session is a pi of its own in tmux, so it keeps running after its terminal leaves or closes; a local daemon (`daemon/`, a Unix socket in `~/.pi/server`) only lists them. Agent view detects both changed daemon code and a changed Pi installation, and restarts an obsolete daemon. A session that was idle when its pi quit is kept as a row with no process, and it resumes when opened or replied to; every row stays until ctrl+x deletes it |
+| `/remote-control` | bluclawd's Remote Control, for every agent-view session. A phone app, a PWA the daemon serves, lists them in agent view's bands, shows a session's conversation and its reply as it streams, sends it a prompt, stops its turn, starts sessions, switches the model, and notifies you; a message once sent is never edited from the phone, only stopped. `/remote-control` turns it on and shows a QR code that pairs your phone; once on, it offers a menu: pair a new phone, the paired phones (remove one or all), start at login (macOS), turn off. See [Remote control](#remote-control) |
+| `/prompt-assist [on\|off\|provider/model\|default]` | enable or disable prompt suggestions and automatic session naming, or choose and save their Pi model without changing the coding model |
+| `/status`, `/context` | `/status`: model, auth, project trust; `/context`: context window usage (session file, messages, tokens and cost stay in pi's `/session`) |
+| `/theme` | bluclawd's theme picker: Auto (match terminal), Dark / Light mode, their colorblind-friendly and ANSI-only variants (bluclawd's six palettes, with the bluclawd mascot cyan as accent), then every other pi theme; the focused theme previews live over a `demo.js` diff, Enter saves it, Esc restores the saved one. `/theme <name>` sets one directly |
+| `exit`, `/exit`, `quit`, `:q`, `:wq` alone at the prompt | works as bluclawd's `/exit`, ending a normal session and detaching from a background one (see [Session switching](#session-switching)) |
+| `/help` | all of the above, grouped |
+
+bluclawd draws no footer of its own. Its footer items go through pi's `setStatus`, keyed so they
+sort in this order: `⏵⏵ always (alt+m to cycle)`, then the background-task pill,
+then `← for agents`. pi's own footer shows them on one line. For the ccstatusline
+status line, install [pistatusline](https://github.com/christophesamueldhp/pistatusline). It draws
+the same items under its lines, and the subagent panel as a block below them. Under pi's own footer,
+which flattens every status onto one line, the panel stays below the prompt.
+
+While the agent works, "Working..." becomes one of bluclawd's 186 spinner verbs, a new one
+each turn, none repeated until all have shown, with the turn's elapsed time and the interrupt
+key as you bound it: `Pondering… (12s · escape to interrupt)`, counted every second. bluclawd's prompt editors keep
+the spinner in the prompt's top border, as pi's own editor does.
+
+The welcome header is bluclawd's, with the mascot beside name, model and cwd. In the
+fullscreen renderer the mascot plays an entrance animation each time pi is launched,
+picked at random from bluclawd's four (skip, jump, look, spin) and bluclawd's own
+hand wave; `"prefersReducedMotion": true` in settings turns it off.
+
+For a quieter start, set `"quietStartup": "header"` in `~/.pi/agent/settings.json`. It hides
+pi's startup details (the `Model scope` line and the `[Context]`, `[Skills]` and `[Extensions]`
+blocks) and keeps bluclawd's welcome header; `true` would hide the header too. bluclawd does not
+change your settings itself.
+
+### Tools off by default
+
+`monitor`, `schedule_wakeup` and `memory` are off by default. Few sessions call them, and a
+declared tool's text goes with every request. Turn one on with pi's own setting, for example
+`"defaultTools": ["+monitor"]` in `~/.pi/agent/settings.json`, or for one session with
+`pi --tools +monitor`; `"defaultTools": ["+schedule_wakeup", "+memory"]` turns on the other two.
+The `+` adds a tool to the tools you have; a plain `--tools monitor` would leave it the only one.
+Tools are chosen when a session starts and stay as they are while it runs, so the provider's prompt
+cache holds.
+
+- Without `monitor`, background shells, `/tasks` and their notices still work.
+- Without `schedule_wakeup`, the agent cannot schedule a wake-up; one scheduled before still fires,
+  and `/tasks` or `task_stop` cancels it.
+- Memory needs both the `memory` tool and `/memory` on. The Memory index and the guidance on keeping
+  Memories reach the model only then. Without the tool, `/memory` still lists and deletes Memories,
+  and says the tool is off.
+- The first session that finds a pending wake-up without `schedule_wakeup`, or the Project's Memories
+  without `memory` (and `/memory` on), tells you once, with the setting that turns the tool on; the
+  model is not told.
+
+
+## Updating
+
+```bash
+npm update    # bump the @earendil-works/pi-* peer/dev dependency versions
+npm test      # confirm nothing broke against the new pi
+```
+
+There is no upstream merge here. This repo owns no pi source to merge into.
+This repo still depends on pi's internals in one way. `ext/_shared/` and
+`daemon/ansi.ts` vendor a handful of small pi functions and tables that pi does not export publicly
+(`stripAnsi`, the built-in slash-command list, a security-relevant path
+resolver). Each is documented in its own file with what drifts
+if pi changes it. Most drift is cosmetic, such as a stale `/help` line. One file
+(`path-resolve.ts`) is copied whole rather than trimmed because it backs
+permission rule matching. `npm run typecheck && npm test` after a pi version
+bump is what would catch a break.
+
+## Running and checking it
+
+```bash
+npm run typecheck   # tsc --noEmit
+npm run lint        # biome check .
+npm test            # vitest
+node --experimental-strip-types scripts/probe-extensions.ts   # what each extension registers
+```
+
+To see how long each extension's handlers take, start pi with `BLUCLAWD_TIMING=1`. Every handler call,
+and each agent-view pane `heartbeat` that a timer runs, is appended to
+`~/.pi/agent/bluclawd/timing.jsonl` (under `$PI_CODING_AGENT_DIR` when set) as
+`{pid, ext, event, ms, sinceProcessStart}`; a pi's prompt is ready at the end of its last `session_start`.
+A pi in agent view's tmux takes the variable from the pi that started that tmux server.
+Without it nothing is wrapped or written. Summarise the log per extension and event, slowest first:
+
+```bash
+jq -s 'group_by(.ext, .event) | map({ext: .[0].ext, event: .[0].event, calls: length, total_ms: (map(.ms) | add | round), max_ms: (map(.ms) | max | round)}) | sort_by(-.total_ms)[]' -c ~/.pi/agent/bluclawd/timing.jsonl
+```
+
+## Session switching
+
+Agent view needs [tmux](https://github.com/tmux/tmux) 3.3 or newer. Every session is a full interactive pi of its
+own, running in a private tmux server next to the daemon's socket (`~/.pi/server/tmux.sock`).
+`pi` in a terminal starts its session there and attaches, so the terminal is only a viewer. All
+sessions run at once, and enter/→ in agent view switches the terminal to another session
+with no delay. Nothing waits, nothing is interrupted, and the one you left keeps working. A new
+session from the composer is a new pane with the task as its first prompt; ctrl+enter switches to
+it. Exit keys follow bluclawd's split between a normal session and a background one. The
+session `pi` starts in a terminal is normal until ← opens agent view. Ctrl+c twice, ctrl+d twice,
+`exit` or `/exit` end it, and so does closing its terminal. Every other session is a background
+one. Ctrl+c twice, `exit` or `/exit` leave tmux while it keeps running, even with the terminal
+closed, and so does a single ctrl+d; running `pi` again starts a new session and lists them all.
+Ctrl+c while a turn runs stops the turn, and `/quit` ends any session. Ending a session kills a
+turn in progress with its pi, and the session stays listed as a stopped row. In agent view,
+ctrl+c twice or `exit` leave tmux, and ctrl+x on a running session ends its pi and keeps its row as
+stopped, and a second press deletes the row; on this terminal's own session the first press stops
+its turn and the second moves the terminal to agent view with no session of its own once the session you came from is deleted. The list can be empty, and esc quits from
+there. A session nothing has been asked in yet ends when its terminal leaves it. A peek reply is
+the session's next prompt. tmux runs with no prefix key and no status line, passing keys through as CSI u.
+
+Without tmux, agent view is off. Pi says so once at startup and again on ←, and the rest of
+bluclawd works as usual.
+
+An empty foreground prompt opens agent view with one ←. Just after editing text or navigating
+history, it asks for a second press so you do not leave the conversation by accident.
+
+## Remote control
+
+The daemon serves a phone app on `127.0.0.1` only (port 7878, or `"remote": { "port": … }` in
+settings); the phone reaches it over [Tailscale](https://tailscale.com), never the LAN or the
+internet. Once, on the Mac, install Tailscale and log in, then run `/remote-control` in any pi
+session. It offers to run `tailscale serve --bg 7878`, which gives this Mac an HTTPS address on
+your tailnet, and shows that address, a QR code and a 6-digit code under it (10 minutes, single
+use), drawn in the terminal's own colours. On the phone, also on your tailnet, scan it with the
+camera.
+
+On an iPhone, Safari then shows how to add the app to the Home Screen (Share, then Add to Home
+Screen). Open it from there and type the 6-digit code, once. iOS gives a Home Screen app storage of
+its own, apart from Safari's, so it is the app that pairs, and only it gets notifications. "Use in
+Safari instead" pairs Safari itself with the QR code's secret, unless the app paired first. On
+Android or a computer, the link pairs the browser at once, as it carries a one-time secret, and the
+app added to the Home Screen from it opens already paired. If you can't scan, type the 6-digit code into
+the app. If either code expired, run `/remote-control` again for a new one.
+
+On the iPhone, turn on VPN On Demand in the Tailscale app, so the phone is on your tailnet whenever
+you open bluclawd, and keep the Mac awake on power. In System Settings, open Battery, then Options, and turn on Prevent
+automatic sleeping when the display is off. If the app cannot reach the Mac, it says so and keeps
+retrying; it stays paired.
+
+The phone keeps a token; the daemon keeps only its hash, in `~/.pi/server/remote.json`. If your tailnet has Serve
+or HTTPS certificates turned off, `/remote-control` shows the link that turns them on, once for
+the tailnet. For more than one Mac, add one Home Screen app per Mac. Each has its own ts.net
+address and pairs on its own.
+
+Once remote control is on, `/remote-control` shows a menu:
+
+- **Pair a new phone**: a new QR code (and 6-digit code).
+- **Paired phones (n)…**: each phone with when it paired and was last used; enter removes one, or
+  all of them with **Remove all phones**, once confirmed. A removed phone has to pair again.
+- **Start at login: on/off** (macOS): starts the daemon at login with a LaunchAgent
+  (`~/Library/LaunchAgents/dev.bluclawd.daemon.plist`, its log in `~/.pi/server/daemon.log`), so
+  the phone reaches the Mac before any `pi` has run.
+- **Turn off remote control**, once confirmed. It leaves `tailscale serve` in place;
+  `tailscale serve --https=443 off` removes it.
+
+The Mac is the root. A phone can disconnect only itself, which signs it out, never another;
+`/remote-control`'s Paired phones removes the others.
+
+Started at login, the daemon runs the node and pi that last ran `/remote-control`. After moving
+either, as a node upgrade does, running `/remote-control` points it at the new ones for the next
+login. The LaunchAgent runs the daemon through your login shell, or through zsh in place of fish or another
+shell that is not POSIX. That shell reads your login profile (`~/.zprofile`, `~/.profile`) but not
+`~/.zshrc`. An API key exported only in `~/.zshrc` is then missing from a
+session the phone starts before any `pi` has run since login. Every session shares
+one tmux server that keeps the environment it started with, so the key is also missing from every session started after it,
+on the Mac too, until that server ends with the last session.
+
+The phone lists every agent-view session in its bands, with what it is doing. A session's chat
+shows its conversation, replies with their markdown rendered (older messages load at the top),
+and streams the reply in progress. It sends a prompt, which reaches the session at once, or within a few seconds right after a move or while an
+older daemon still runs. Stop ends its turn, and the chat then says it was interrupted. A reply
+starting with `/` runs as if typed in the session's prompt on the Mac, once the session is idle and
+that prompt empty, but only for the commands bluclawd's Remote Control runs, which are those whose result is
+the conversation itself. That is pi's `/compact`, `/new` and `/reload`, and any prompt template or
+skill; every other command (a selector such as `/model` or `/resume`, `/tree`, `/fork`, an
+extension's) runs only on the Mac, and the phone's autocomplete lists none of them. A session closed on the Mac shows as disconnected, read only.
+Only the Mac opens it again, and the phone follows it there by itself. While no terminal on the Mac shows pi, the
+phone only reads ("pi closed"). Sessions still running in the background are listed and notify,
+but nothing is sent, stopped or started until a terminal shows pi again. Start begins a new one in a
+recent or typed directory. Tapping the title shows the model,
+context and the session's own tokens and cost, and from there you switch the model and pin or rename the session. The
+phone shows no plan usage that pistatusline does not show on the Mac. A session waiting on a dialog says so, and is
+answered on the Mac. Enable notifications to hear when a session finishes or needs you.
+On iOS they work only in the app opened from the Home Screen, on iOS 16.4 or later. A phone with the app open
+in the foreground, on any screen, gets none; your other phones still do.
+
+A prompt to a running session can carry up to four images (+ beside the reply field); a new
+session's first prompt is text only. The images in a conversation, a prompt's or a
+tool's (`read` on a PNG), show as thumbnails as they scroll into view; tap one for full screen.
+The model gets a phone's image as it gets a pasted one. The Mac shows neither as a picture, in
+any terminal. Pi draws only a prompt's text, though a pasted image at least leaves its `[Image #1]`
+marker in it, and so does a phone's. It draws a tool's image only outside tmux, and every
+agent-view session runs in tmux, where pi turns image protocols off and does not wrap them for
+tmux's passthrough.
+
+A paired phone can read every session, tool output included, and prompt any of them. It amounts
+to a shell as you on this Mac. Its token does not expire; revoke a phone
+from `/remote-control`'s Paired phones.
+
+The phone cannot work without the daemon running and the Mac awake. Any `pi` starts the daemon, and so does login
+with autostart on. A new bluclawd reaches the phone once the daemon restarts,
+which agent view and `/remote-control` do when they find its code changed.
+
+## What this layer cannot do
+
+These limits are recorded so nobody re-litigates them. Each was found by running the thing, not by
+reading the API:
+
+- **Hidden command aliases are impossible.** `registerCommand` has no alias
+  field, and pi's `input` event fires only after the interactive command chain.
+  An alias has to be a second, visible command.
+- **An extension cannot rebind a pi keybinding.** Trust cycling is
+  **Alt+M**, not bluclawd's Shift+Tab, which pi binds to
+  `app.thinking.cycle`; pi refuses the registration and logs a conflict.
+- **An extension cannot add a theme colour.** pi's `ThemeColor` union is fixed,
+  so the `acceptEdits` badge paints bluclawd's `#af87ff` with a raw truecolor
+  escape and falls back to the `success` token on a 256-colour terminal.
+- **A theme contributed through `resources_discover` cannot be the startup
+  theme.** pi resolves the configured theme before that hook runs, so it falls
+  back to dark and prints "Theme not found". The theme is declared in
+  `package.json`'s `pi.themes` instead, which pi registers before startup.
+- **`/theme`'s Auto follows only terminals that report light/dark switches.**
+  pi has no extension API for a light/dark pair setting. `/theme` saves the
+  pair, shows the theme for the terminal's current appearance, and follows the
+  terminal's switch reports (mode 2031) itself until pi restarts and follows the
+  pair on its own. A terminal that sends no such reports gets the other theme
+  only at the next start. bluclawd's
+  syntax-highlighting toggle and its "New custom theme…" editor have no pi
+  counterpart; pi's other themes are listed after bluclawd's six.
+- **Agent view differs from bluclawd's in a few places.** Row text comes from each
+  session's own output, and its state from pi's own signals (a model error is Failed, an
+  interrupted turn Stopped, a blocking prompt Needs input). Nothing is added to the system
+  prompt and there is no Haiku-class summary, so it works with any provider. There are no pull-request badges (no Ready for review band), no `@repo` / `@agent` mentions, and no worktree isolation for background
+  sessions, and there is no mouse support.
+  A peek reply cannot answer a session's open dialog, which enter opens to answer, and each idle
+  session is a running pi process. `tab` does not browse subagents.
+
+## Subagents
+
+The orchestrator, the parent session, delegates work to subagent runs. Each run is a pi of its own
+([ADR-0010](docs/adr/0010-rpc-runs-and-workspace-isolation.md)). A host process holds it, and the run takes its
+task in a fresh session, stores its Report once its work settles, and exits. Its session, Reports and
+any worktree stay for an explicit Resume. A run cannot launch runs of its own. From an orchestrator in
+agent view's tmux, a run is a pane run, an interactive pi in a pane of its own that you can open,
+watch and type in ([ADR-0013](docs/adr/0013-runs-run-in-panes-again.md)); its model sees exactly what
+it would on pi's RPC. Elsewhere (print or json mode, outside tmux, or with `subagents.panes: false`) it
+is an RPC run, on pi's RPC with no pane. Each launch and Resume decides this again, so one run can be
+both in turn. Either way the daemon queues it.
+
+The model calls `subagent` with one of:
+- `{ "agent": "explorer", "task": "…" }`: one run, with optional `name`, `cwd` (its own directory,
+  relative to yours), `model`, `thinkingLevel`, `agentScope` and `background`.
+- `{ "tasks": [{ "agent": "…", "task": "…" }, …] }`: a batch run side by side. One combined report
+  (at most 16 KiB) comes once all have finished; a manifest lists every member's status, Report and
+  transcript as they settle. A member that fails leaves its siblings working.
+- `{ "chain": [{ "agent": "general-purpose", "name": "w", "task": "…" }, { "agent": "reviewer", "task": "…" }, { "resume": "w", "task": "…" }] }`:
+  steps one after another, each given the previous step's Report; when a step edits, all of them work in
+  one worktree, one at a time. A failed, stopped or blocked step halts the chain; a review that finds
+  defects has completed.
+
+A foreground call waits for the Report, and Esc cancels the run; `"background": true` returns at once,
+and the Report arrives as a notice that wakes the orchestrator. Progress a run sends wakes nobody; its
+findings, questions and blockers reach the orchestrator as messages. At most `subagents.maxActive`
+runs (4 by default; a user setting, which project settings cannot raise) work at once, across every
+orchestrator of the daemon, served fairly; the others wait, `queued`. There is no cap on runs in
+total and nothing to close. A run's process ends once it reports.
+
+What a run may do is its role's, held by the run's own pi at every call, nested codemode calls
+included, never by its instructions:
+- A role that names no `tools` only reads: `read`, `grep`, `find`, `ls` and `codemode`, those you
+  have. A run that only reads works in your checkout.
+- A run given `edit`, `write` or `bash` works in an isolated Git worktree of its own, outside the
+  repository (`<getAgentDir()>/bluclawd/worktrees/<run>`), made from your checkout as it was at the call:
+  its staged, unstaged and untracked changes, not its ignored files (`.env` stays where it is). Nothing
+  is committed. Outside a Git repository with a commit such a run is refused, never let loose in your
+  checkout.
+- `bash` is given only where the run's commands can be contained, which is on macOS and Linux (see [Sandbox](#sandbox)).
+  Elsewhere, or where that check fails, runs get no shell. A role naming `bash` is refused, and `general-purpose` edits
+  without running commands, so its Report says no checks ran.
+- MCP tools, tool search and `subagent` are refused.
+- A tool named with a trailing `?` is given only where it can be; any other the run cannot be given
+  refuses it. The bundled `general-purpose` names `read, grep?, find?, ls?, codemode?, edit, write, bash?`.
+- The run is held to your deny rules and those of its own directory, in its project's trust, as
+  admitted. A later change to its role, your settings or your tools never widens a queued or resumed run.
+- Whatever your rules say, no run reads the credentials in your home directory: `~/.ssh`, `~/.aws`,
+  `~/.gnupg`, `~/.config/gh`, `~/.config/gcloud`, `~/.azure`, `~/.kube`, `~/.docker/config.json`, `~/.netrc` and
+  `~/Library/Keychains`, the macOS keychains where `gh` keeps its token;
+  nor `~/.pi/agent/auth.json` and `models.json`, pi's logins and API keys, or bluclawd's server directory (`~/.pi/server`), which holds the remote-control pairing.
+
+Its model and thinking level are chosen independently: the call's, else the role's, else yours
+(`inherit` takes yours). A level set nowhere is yours, so a role naming a model that does not reason
+needs `thinkingLevel: off`. An unknown model, missing auth, a virtual router or a level the model does
+not support is refused before the run starts, and the run's pi checks it got exactly that model and
+level before its first request. Nothing is substituted. A run's pi loads none of your extensions
+(`-ne`), only bluclawd's own for runs, with your agent dir. Pi's built-in providers, `models.json` and
+the logins in `auth.json` (`/accounts` among them) reach it, and so does your environment. A provider an
+extension registers does not, so a run of one is refused at the call, and an API key given only to
+this pi at runtime (`--api-key`) does not reach it.
+
+A Report is the run's last message, cut to 8 KiB, followed by what the runtime saw: `Outcome`,
+`Process`, `Checks` (the commands it ran and their exit codes, or that none ran), its changes or its
+workspace and changes since its baseline, `Transcript` and `Report` (the full text). The rest is the
+run's own claim; always recheck citations before acting on findings.
+
+The orchestrator has these tools:
+- `subagent_status`: each open run's status (queued, running, stopping), task and elapsed time.
+- `subagent_message({ to, content })`: information for a working run, which it gets at its next safe
+  point. It continues no finished run.
+- `subagent_stop`: cancels a run, a batch or chain by its ID, or `"all"`, queued or working, and
+  returns once none of its processes runs. Its session, Reports and worktree are kept.
+- `subagent_resume({ agent, task, model?, thinkingLevel? })`: continues a finished or stopped run in
+  its saved session, with its role and permissions as admitted, narrowed to what you can give now, in
+  its own worktree, made again from its baseline if it was removed unchanged. It never resumes in your checkout as
+  it is now. A run whose changed worktree you removed is refused, and its Reports and transcript are kept for a
+  new run to read.
+- `subagent_integrate({ agent, preview?, keep?, check? })`: applies what a completed run, or a
+  completed chain (`chain_…`), changed since its baseline to your checkout as it is now, keeping your
+  edits there. It applies all or nothing, through a three-way merge. A conflict applies nothing and lists the
+  paths; `keep` leaves paths you resolved yourself, `preview` applies nothing, and `check` runs a
+  command in the checkout afterwards to validate the combined result, as your own bash would, and
+  only while your bash tool is active. Nothing is staged or committed.
+- `subagent_models`: the models a run can use, with auth status and supported thinking levels.
+
+Inside a run, its own `subagent_message` reaches `parent` (its orchestrator) or a sibling by name.
+
+Open runs show in the panel below the status line, as in Claude Code's agent panel: a `main` row for
+the orchestrator, then one row per run (name, role, model, status, elapsed time, latest progress). A
+run that failed stays 30 s, and `x` dismisses it; one that finished or was stopped leaves `/tasks to see
+subagents` for 30 s. Runs also show in `/tasks` with the finished runs of the session. ↓ on an empty
+prompt moves into the panel, where `x` stops a run. Enter on a run, there or in `/tasks`, switches the
+terminal to its pane, and ← comes back. A finished run resumes in a new pane for you to type its next
+instruction in; leaving it without typing ends it with nothing done. A pane run asks for its
+approvals there, and its panel row says `needs input` meanwhile; once its orchestrator has crashed and no
+terminal shows its pane, an approval is blocked after 5 s, as on pi's RPC, unless the orchestrator's session is
+reopened in another pane before then, in which case the run follows it there. An RPC run has no pane. Enter
+shows its latest conversation and asks for an instruction, and Esc only looks. A working run takes the instruction at
+its next safe point, a finished one resumes with it, and the orchestrator is told without starting its turn.
+
+A run that asks to reach a network host no rule allows is asked about in the orchestrator's session,
+naming the run, its generation, the action and the target. Yes holds, until a reload, for every run
+of the session that asks the same; with no one to ask, the request is blocked.
+
+A worktree that holds changes stays, after the run completed, failed or was stopped, until you remove
+it with `/clean-workspace <name or run ID>`, which is refused while the run or another in that worktree works. That
+run can no longer be resumed. One left as it was made is removed once its run ends, and a Resume makes it
+again. Its transcript and Reports always stay.
+
+A run's host outlives its orchestrator. After a reload or a crash, the reopened session takes its
+open runs over: one still working is followed to its Report; one that had not started queues again, if
+the session may still start it; one whose host ended with no Report is reported failed, with what
+became of it uncertain, and is never started again. Its chains go on with their next steps. The daemon
+keeps the runs it started in `run-slots.json`, so one started anew still counts them.
+
+`/collaborate <session>[, <session>…]: <work>` links this session with others you name, for that work
+only. Their models then send each other findings, questions and blockers with `collaborator_message`.
+`/collaborate scope: <work>` changes the work, `/collaborate end` ends it, and `/collaborate` alone
+shows it. Only you open one. Sessions never find each other. It lives in the daemon's memory, so a
+daemon restart ends it.
+
+Runs started by an earlier bluclawd, each an interactive pi in a tmux pane of its own, are legacy
+runs. One still open when its orchestrator's session is reopened is taken over and keeps working
+until it is stopped (`subagent_stop`, `x`) or that session ends; it is never ended silently, and Enter
+switches the terminal to it. Its transcript and Report stay readable, and Enter in `/tasks` shows its
+conversation, but it is not resumed. A Resume or a message points at them instead, for a new run.
+
+Custom roles are Markdown files in `~/.pi/agent/agents/` or a trusted project's `.pi/agents/`. Roles
+are resolved from the run's own directory: an inline role, then the nearest trusted project's, then
+yours, then the bundled one; a project's are searched up to its repository root. For example,
+`.pi/agents/api-review.md`:
+
+```markdown
+---
+name: api-review
+description: Review explicitly supplied API handler files for defects.
+tools: read, grep, find, ls
+model: inherit
+---
+Review only the supplied targets. Cite path:line evidence.
+```
+
+Only `name`, `description`, `tools`, `model`, and `thinkingLevel` are supported; the obsolete
+`maxTurns` field is rejected with a remove-field diagnostic. The body is the run's added instructions.
+Explicit models use `provider/model`; virtual routers and model aliases are unsupported. A run gets a
+fresh conversation, not the parent's history.
+
+The parent can also pass an inline role instead of a name:
+`{ "agent": { "name": "schema-check", "description": "…", "instructions": "…" }, "task": "…" }`,
+with optional `tools`, `model`, and `thinkingLevel`. An inline role is validated like a saved
+one, recorded with source `inline`, and never written to disk.
+
+Each run has a name, unique among the open runs of the session: the call's `name`, or `<role>-<n>`.
+A run's sessions, task, instructions, role as admitted and Reports live outside the repository under
+`<getAgentDir()>/bluclawd/subagents/<parent-session>/<run>/`.
+
+A run's usage is counted in its own session, however its generation ended. `/status` and the phone's
+status sheet show the total of the orchestrator's runs apart from its own totals, from
+`background-usage-ledger.json` in the same directory: each of a run's sessions counted once, however many
+Reports repeat its total. Unpriced usage is labelled unknown, not free; price-table estimates are not
+subscription invoices.
+
+**Evaluation.** `test/subagents-evaluation.test.ts` checks the grading of
+`scripts/eval-subagents.ts`. A run is graded by the fixture's own tests and the final tree, never by what
+the transcript claims, so a run with failing tests is incorrect however confident its report is, and a
+helper written twice is a duplicate even when the tests pass.
+
+## Permissions
+
+pi asks nothing before a tool runs, and bluclawd keeps it that way. There are no
+permission modes and no prompts. It adds one thing: **deny rules**. A tool call
+that matches a `permissions.deny` rule is blocked, and the model is told which rule
+blocked it:
+
+```json
+{
+  "permissions": {
+    "deny": ["Bash(rm -rf *)", "Bash(git push --force *)", "Read(~/.ssh/**)", "mcp__github__delete_*"]
+  }
+}
+```
+
+Rules come from `~/.pi/agent/settings.json` and the project's `.pi/settings.json`
+(read only when the project is trusted); the two lists add up, so a project cannot
+drop your global rules. In the syntax, `Bash(npm test *)` is `npm test` alone or with
+arguments; `*` stays within a path segment and `**` crosses them; `Edit(...)`
+also covers write and `Read(...)` also covers grep, find and ls; `//path` is
+absolute, `~/path` is home, anything else is relative to the working directory;
+`WebFetch(domain:x.com)`, `WebSearch(...)`, `Subagent` or `Subagent(explorer)`, and MCP tools as `mcp__server`,
+`mcp__server__*`, `mcp__server__tool`, `Mcp(server:*)` or `Mcp(server:tool)`. The web rules apply
+to bluclawd's own `websearch` and `webfetch` (each of a fetch's URLs is checked), and the MCP
+rules to the tools of the servers pi connects. MCP is pi's own (`mcp.json`, `/mcp`), every MCP call
+goes through `tool_call`, a `codemode` script's included, and bluclawd adds no MCP tools of its own.
+Server and tool are matched the way pi names the tools, any character other than a letter, digit or
+`_` turned into `_`, so `mcp__dev-radius__*` as written in `mcp.json` blocks `mcp__dev_radius__search`.
+pi gives an over-long or colliding name a hash suffix. An exact-tool rule or a tool glob can miss
+that tool. A server-level rule (`mcp__server`, `mcp__server__*`, `Mcp(server)`, `Mcp(server:*)`)
+and a bare `Mcp` still block it, even once the spelled server name reaches 50 characters and the
+shortened name loses the `__` after it; such a server rule then also blocks any server whose spelled
+name shares those first 50 characters. A server glob (`mcp__*`, `Mcp(long-*)`) covers hashed names
+only if its `*` comes after those first 50 characters; otherwise only a bare `Mcp` does. A server-level rule also covers that server's resources. Pi's
+`list_mcp_resources`, `list_mcp_resource_templates` and `read_mcp_resource` with a `server` are
+judged as `mcp__server__<that tool>`, and a list without `server`, which lists every server, is
+blocked while a rule denies a whole server or names that listing tool, and the model is told to pass
+`server`. A tool glob such as `mcp__github__delete_*` does not block it. `dir/**` covers
+`dir` itself too. A bash rule also matches the command behind wrappers (`sudo`,
+`timeout`, `nice`, `env`, `xargs`, `sh -c '…'`, `eval`, …), shell keywords,
+quoting (`'rm'`, `\rm`), `/bin/…`, `$(…)`, and any part of a `&&`/`;`/`|` chain.
+A file rule also blocks a bash command that names a matching path,
+such as `cat ~/.ssh/id_rsa` or `cd secret && cat key`, except where the command only writes
+it. An output redirect target is never read, so a `Read` rule lets `echo x >> .env`
+and `echo x > .env` through, a `Write` rule only `>>`, and an `Edit` rule neither
+(`echo x > .git/config` is an `Edit` rule's). `Read(**/.env*)` with `Write(**/.env*)`
+keeps `.env` unread and whole while `>>` still appends to it, except under the
+Linux [sandbox](#sandbox), which refuses it. `powershell` is
+judged as bash, and a `grep` over a folder drops the lines it found in a denied
+file. Deny rules
+match text, not behavior. A command that builds the path or name at run time
+(`$(printf rm)`, a variable set earlier, a glob like `~/.ss*`) is not caught.
+
+The footer shows pi's own `defaultProjectTrust` (`⏵⏵ always`, `⏸ ask` or
+`✕ never`), and Alt+M cycles it, saving to global settings. It decides whether a
+project's `.pi` settings and extensions load when no `/trust` decision was saved;
+like `/settings`, the change applies to projects opened from then on.
+
+These are deliberately not ported, because pi already has them: **bash mode** (pi's `!cmd`
+runs a command and sends its output to the model, `!!cmd` runs it without
+sending), **prompt stash** (↑/↓ on the prompt browse earlier prompts, as in
+bluclawd), **MCP** (pi's own, with servers in `mcp.json`, managed with `/mcp`; deny
+rules cover their tools and resources). **PDF input** is not ported either. It would mean reimplementing four
+provider wire formats behind `before_provider_request`, a shared-type change
+in pi's own `packages/ai` that the extension API cannot reach.
+
+### Sandbox
+
+Deny rules match the text of a call, so `grep -r KEY .` or a script that opens `.env`
+still reads it. Turn on the sandbox to have the operating system stop that. The model's
+`bash` and `monitor` commands, and everything they start, then run inside Anthropic's
+[sandbox runtime](https://github.com/anthropics/sandbox-runtime), the one bluclawd uses.
+Run `/sandbox` for a menu, `/sandbox on` to enable, `/sandbox off` to disable, or
+`/sandbox status` to inspect the current runtime. The on or off state is saved globally and applies
+as soon as the agent is idle; existing background jobs must be restarted. The command
+preserves existing policy settings and does not add any deny rules or allowed domains.
+
+Configure the policy in `~/.pi/agent/settings.json`, since a project's settings cannot change it.
+It is read when a session starts, so `/reload` after editing:
+
+```json
+{
+  "sandbox": {
+    "enabled": true,
+    "network": { "allowedDomains": ["registry.npmjs.org", "github.com"] },
+    "filesystem": { "allowWrite": ["~/.npm"], "denyRead": [], "denyWrite": [] }
+  },
+  "permissions": { "deny": ["Read(**/.env*)"] }
+}
+```
+
+- Reads: everything except what a `Read` rule denies, plus `filesystem.denyRead`.
+- Writes: the working directory and the temp directory, plus `filesystem.allowWrite`; never
+  what an `Edit` or `Write` rule denies. Under the sandbox a `Write` rule blocks `>>` too. On
+  Linux a file a `Read` rule or `filesystem.denyRead` denies is not writable either, `>>` included.
+- No write reaches pi's agent directory, whatever `filesystem.allowWrite` says: a command cannot
+  turn the sandbox off in its `settings.json`, add an extension or a skill there, or `pi install`.
+  On Linux the sandbox does not start when a symlink on the way to it lies where commands may write
+  (`~/.pi` linked into a dotfiles directory, with the session in `~`), since a command could swap
+  the link. Replace the link with its directory, or set `PI_CODING_AGENT_DIR` to the real path.
+- Network: hosts in `network.allowedDomains`. For any other host, pi asks once per host and port
+  per session, the one prompt bluclawd adds. Without a UI, the host is refused.
+- Rule paths are anchored at the working directory: `Read(**/.env*)` covers `.env` files
+  under the project. Add others to `filesystem.denyRead`, for example `~/**/.env*`.
+- Every other key of the sandbox runtime's config goes under `sandbox` as written, for example
+  `credentials` to hide environment variables or `network.deniedDomains`. See
+  [docs/sandbox-settings.md](docs/sandbox-settings.md). A key the runtime does not know counts
+  as a malformed setting.
+- bluclawd's own sockets, the daemon's and tmux's in `~/.pi/server` (or a private
+  `PI_SERVER_DIR`, and the default one too), are never a way out of the sandbox, whatever
+  `network.allowUnixSockets` or `network.allowAllUnixSockets` allows. On macOS a command cannot
+  connect to them, nor read their directory unless `filesystem.disabled` is on. On Linux one
+  socket path cannot be denied, and hiding the directory misses one made after a command
+  started, so the sandbox does not start with `network.allowAllUnixSockets` there. See
+  [docs/sandbox-settings.md](docs/sandbox-settings.md#bluclawds-own-sockets).
+- When the sandbox cannot run, or its `sandbox` setting is malformed, the model's `bash` and
+  `monitor` are refused and pi says why. There is no unsandboxed fallback. `bash` is also
+  refused when bluclawd's background-bash extension is disabled, since pi's own `bash` does
+  not run inside the sandbox. pi's `powershell` tool is blocked while it is on. Settings pi
+  cannot parse at all turn the sandbox off, with a warning.
+- Outside the sandbox: commands you type with `!`, pi's own tools (`read`, `grep`, `edit`,
+  …, which the deny rules govern), MCP servers and other extensions; `monitor`'s `ws` source
+  (an in-process WebSocket that reads no files); and background jobs already running when you
+  turn the sandbox on, until they are restarted. An app the model
+  starts cannot read `.env` either; run it yourself with `!`.
+- Process lifetime: when a command ends (it exits, is stopped, times out, or its session ends),
+  its descendants end too, detached or double-forked ones included. On Linux the PID namespace
+  guarantees it. On macOS Seatbelt does not limit process lifetime, so a best-effort reaper
+  ([#29](https://github.com/christophesamueldhp/bluclawd/issues/29)) follows each command's processes by
+  parent unique id, which survives reparenting to launchd, and by a cookie in their environment,
+  then stops and kills them all. It does not catch a descendant that scrubs its environment and
+  whose parent lived and exited between two scans (10 ms apart), for example a very fast double-fork. It
+  reads the parent unique id through private SPI (`proc_pidinfo` flavor 17), which a macOS update
+  could change. It is compiled when the sandbox starts, so without the Command Line Tools
+  (`xcode-select --install`) commands run unreaped, and pi warns at session start. An escaped
+  descendant keeps the sandbox's limits.
+- Subagent runs: a run given `bash` (the bundled
+  `general-purpose`, or a role naming it) runs every command in a sandbox of its own, whether or not this one
+  is on. It writes only in its isolated worktree and a temp directory of its own, never the worktree's `.git`,
+  the Git directory it shares or the run's own state (approvals, inbox, definition). It reads nothing of
+  `~/.pi/agent` but its worktree, nor what a `Read` rule denies, in the checkout or its copy in the worktree,
+  nor the credentials every run is kept from (see above). Its commands see no environment variable with a
+  word in its name that ends in `KEY`, `SECRET`, `TOKEN`, `CREDENTIAL` (or their plurals), `PASSWORD` or
+  `PASSWD`, or is `PASS` (`PGPASSWORD`, `NPM_TOKEN`, `npm_config_//host/:_authToken`), and no setting
+  passes one through. The run's pi keeps them.
+  It opens no Unix socket, so it reaches neither the daemon nor tmux, and a host no rule allows is asked about in the
+  orchestrator. The settings above narrow it further, but never widen what it writes. Each command's processes
+  are found however they left it, detached, double-forked, `setsid` and environment-scrubbed ones alike. They are
+  stopped and killed before the command's result returns, and again before a stopped or ended run gives up its
+  slot. A run whose processes cannot all be confirmed ended is reported failed. Each pi first tests this on a
+  sandboxed probe process, and where the test fails, runs get no shell and a role naming `bash` is refused.
+  - macOS: the run's own Seatbelt profile, which no process can leave, names its processes. It needs the
+    Command Line Tools and relies on private SPI (`sandbox_check`).
+  - Linux: each command runs in bubblewrap's PID namespaces, which no process can leave, so its processes are
+    those under the bubblewrap that binds the run's temp directory. It needs srt's `apply-seccomp`, without
+    which a command could hand work to a service over a Unix socket. A directory a rule denies reads as empty.
+  - Not probed: a command handing work to a system service that runs it outside the sandbox (`launchctl`,
+    `at`, `crontab`).
+
+| Platform | Needs |
+|---|---|
+| macOS | Nothing (Seatbelt); the Command Line Tools for the process reaper |
+| Linux, WSL2 | `bubblewrap`, `socat` and `ripgrep` (`apt install bubblewrap socat ripgrep`). On Ubuntu 24.04+, unprivileged user namespaces must be allowed by AppArmor. See [Anthropic's notes](https://code.claude.com/docs/en/sandboxing). The `apply-seccomp` binary bundled for x64 and arm64 blocks Unix sockets; without it, or with `network.allowAllUnixSockets`, the sandbox does not start |
+| Windows | Not supported; run pi in WSL2 |

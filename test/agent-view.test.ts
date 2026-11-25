@@ -1,0 +1,1637 @@
+import { mkdirSync, mkdtempSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import type { Theme } from "@earendil-works/pi-coding-agent";
+import {
+	type AutocompleteProvider,
+	KeybindingsManager,
+	type KeyId,
+	parseColor,
+	styleText,
+	type TUI,
+} from "@earendil-works/pi-tui";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import {
+	currentDaemonBuildId,
+	type InstanceSummary,
+	type OrchestratorClient,
+	piPackageRoot,
+} from "../daemon/orchestrator-client.ts";
+import {
+	buildBands,
+	collectRows,
+	collectRuns,
+	compactAge,
+	labelFromTask,
+	queryFilter,
+	rowAge,
+	rowFromSummary,
+	STATE_WORDS,
+} from "../daemon/rows.ts";
+import { setSharedTheme } from "../ext/_shared/theme.ts";
+import { AgentView, type PaneOps } from "../ext/agent-view/agent-view.ts";
+import { withoutAgentViewCommand } from "../ext/agent-view/index.ts";
+import { focusedLine } from "./helpers/agent-view-focus.ts";
+import { waitFor } from "./helpers/wait-for.ts";
+
+// Also drops the fake-cursor markers pi-tui's TUI turns into reverse video when it renders.
+const stripAnsi = (s: string) => s.replace(/\x1b\[[0-9;]*m|\x1b_pi:\/?fc\x07/g, "");
+
+const plainTheme = {
+	fg: (_c: string, s: string) => s,
+	bg: (_c: string, s: string) => s,
+	bold: (s: string) => s,
+	getBgAnsi: () => "",
+	getColorMode: () => "truecolor",
+} as unknown as Theme;
+
+const NOW = Date.now();
+const ago = (minutes: number) => new Date(NOW - minutes * 60_000).toISOString();
+const HOME = "/home/me";
+const HERE = `${HOME}/proj/here`;
+const THERE = `${HOME}/proj/there`;
+
+const ENTER = "\r";
+const ESC = "\x1b";
+const CTRL_X = "\x18";
+const CTRL_S = "\x13";
+const CTRL_T = "\x14";
+const DOWN = "\x1b[B";
+const CTRL_J = "\n";
+const SHIFT_ENTER_KITTY = "\x1b[13;2u";
+const BACKSPACE = "\x7f";
+const ALT_2 = "\x1b2";
+const HOME_KEY = "\x1b[H";
+const CTRL_R = "\x12";
+
+const sessions: InstanceSummary[] = [
+	{
+		id: "ask",
+		status: "online",
+		external: true,
+		pane: "p-ask",
+		activity: "awaiting_input",
+		cwd: HERE,
+		label: "power-up design",
+		createdAt: ago(1),
+		detail: "Allow bash: npm test?",
+	},
+	{
+		id: "work",
+		status: "online",
+		external: true,
+		pane: "p-work",
+		activity: "working",
+		cwd: THERE,
+		label: "collision detection",
+		detail: "Adding swept-AABB checks",
+		createdAt: ago(2),
+	},
+	{
+		id: "done",
+		status: "online",
+		external: true,
+		pane: "p-done",
+		activity: "idle",
+		cwd: HERE,
+		label: "title screen",
+		outcome: "done",
+		turns: 1,
+		detail: "menu done",
+		createdAt: ago(9),
+		finishedAt: ago(3),
+	},
+	{
+		id: "gone",
+		status: "stopped",
+		cwd: HERE,
+		label: "sound effects",
+		outcome: "failed",
+		detail: "build broke",
+		createdAt: ago(240),
+		finishedAt: ago(200),
+	},
+];
+
+type Calls = Array<[string, ...unknown[]]>;
+
+function fakeClient(calls: Calls, list: () => InstanceSummary[] = () => sessions): OrchestratorClient {
+	const record =
+		(name: string) =>
+		async (...args: unknown[]) => {
+			calls.push([name, ...args]);
+		};
+	return {
+		list: async () => list(),
+		ensureDaemon: async () => true,
+		getDaemonInfo: async () => ({ running: false }),
+		delete: record("delete"),
+		rename: record("rename"),
+		setMeta: record("setMeta"),
+		send: record("send"),
+		start: async (spec: { pane?: string }) => spec.pane ?? "claimed",
+		startFailed: record("startFailed"),
+	} as unknown as OrchestratorClient;
+}
+
+function fakePanes(calls: Calls): PaneOps {
+	let n = 0;
+	return {
+		current: "pane-self",
+		switchTo: (pane) => calls.push(["switchTo", pane]),
+		start: (cwd, args, env) => {
+			calls.push(["start", cwd, args, ...(env ? [env] : [])]);
+			return `pane-${++n}`;
+		},
+		waitForView: async (pane) => {
+			calls.push(["waitForView", pane]);
+		},
+		end: (pane) => calls.push(["end", pane]),
+		kill: (pane) => calls.push(["kill", pane]),
+		unlist: async () => {
+			calls.push(["unlist"]);
+		},
+		detach: () => calls.push(["detach"]),
+		startShell: (cwd, command) => {
+			calls.push(["startShell", cwd, command]);
+			return "sh-new";
+		},
+		listShells: () => [],
+		listShellsAsync: async () => [],
+		stopShell: () => {},
+		captureAsync: async () => [],
+	};
+}
+
+function makeView(
+	opts: {
+		self?: InstanceSummary;
+		rows?: number;
+		list?: () => InstanceSummary[];
+		readClipboard?: () => Promise<{ image?: { type: "image"; data: string; mimeType: string }; text?: string }>;
+		mode?: string;
+		listModels?: () => Array<{ provider: string; id: string }>;
+		instances?: InstanceSummary[];
+		externalEditor?: () => string;
+		keybindings?: KeybindingsManager;
+	} = {},
+) {
+	const calls: Calls = [];
+	const instances = opts.instances ?? sessions;
+	const opened: string[] = [];
+	const resumed: boolean[] = [];
+	let stopped = 0;
+	let closed = 0;
+	const ui = {
+		terminal: { rows: opts.rows ?? 40 },
+		requestRender: () => {},
+		stop: () => {},
+		start: () => {},
+	} as unknown as TUI;
+	const view = new AgentView({
+		ui,
+		client: fakeClient(calls, opts.list ?? (() => instances)),
+		panes: fakePanes(calls),
+		appName: "bluclawd",
+		version: "1.0.0",
+		model: { provider: "opencode-go", id: "kimi" },
+		cwd: HERE,
+		home: HOME,
+		self: opts.self ? () => opts.self : undefined,
+		onClose: () => closed++,
+		onStopSelf: () => stopped++,
+		readClipboard: opts.readClipboard,
+		isKnownCommand: (name) => name === "compact",
+		mode: opts.mode,
+		listModels: opts.listModels,
+		instances,
+		externalEditor: opts.externalEditor ?? (() => "true"),
+		keybindings: opts.keybindings,
+	});
+	const flush = () => new Promise((r) => setTimeout(r, 0));
+	return {
+		view,
+		calls,
+		opened,
+		resumed,
+		closed: () => closed,
+		stopped: () => stopped,
+		text: () => view.render(100).map(stripAnsi),
+		flush,
+	};
+}
+
+function editorScript(body: string): string {
+	const file = join(mkdtempSync(join(tmpdir(), "bluclawd-editor-")), "editor.sh");
+	writeFileSync(file, `#!/bin/sh\n${body}\n`, { mode: 0o755 });
+	return file;
+}
+
+beforeAll(() => setSharedTheme(plainTheme));
+afterEach(() => vi.unstubAllEnvs());
+
+describe("rows", () => {
+	it("maps daemon state onto bluclawd's six states", () => {
+		const state = (inst: Partial<InstanceSummary>) =>
+			rowFromSummary({ id: "x", status: "online", cwd: HERE, ...inst }, undefined).state;
+		expect(state({ activity: "working" })).toBe("working");
+		expect(state({ activity: "awaiting_input" })).toBe("needs");
+		expect(state({ activity: "idle", turns: 0 })).toBe("idle");
+		expect(state({ activity: "idle", turns: 1 })).toBe("done");
+		expect(state({ activity: "idle", outcome: "failed" })).toBe("failed");
+		expect(state({ activity: "idle", outcome: "stopped", turns: 1 })).toBe("stopped");
+		expect(state({ status: "stopped" })).toBe("stopped");
+		expect(state({ status: "stopped", outcome: "done" })).toBe("done");
+		expect(state({ status: "starting" })).toBe("working");
+	});
+
+	it("names untitled sessions from the first three words of the task", () => {
+		expect(labelFromTask("fix the flaky settings test")).toBe("fix the flaky…");
+		expect(labelFromTask("refactor")).toBe("refactor");
+		expect(labelFromTask("   ")).toBe("untitled session");
+	});
+
+	it("bands: a blocking prompt, a turn running, or nothing running — an unprompted session is Idle", () => {
+		const fresh: InstanceSummary = { id: "fresh", status: "online", activity: "idle", cwd: HERE, turns: 0 };
+		const rows = collectRows([...sessions, fresh], undefined);
+		const bands = buildBands(rows, "state", (p) => p);
+		expect(bands.map((b) => [b.title, b.rows.map((r) => r.id).sort()])).toEqual([
+			["Needs input", ["ask"]],
+			["Working", ["work"]],
+			["Idle", ["done", "fresh", "gone"]],
+		]);
+	});
+
+	it("pinned sessions get their own band on top; the directory view groups by cwd", () => {
+		const pinned = sessions.map((s) => (s.id === "gone" ? { ...s, pinned: true } : s));
+		const bands = buildBands(collectRows(pinned, undefined), "directory", (p) => p.replace(HOME, "~"));
+		expect(bands.map((b) => b.title)).toEqual(["Pinned", "~/proj/here", "~/proj/there"]);
+	});
+
+	it("lists every row the daemon lists, merging none by its session file", () => {
+		const rows = collectRows(
+			[
+				{ id: "stopped", status: "stopped", cwd: HERE, sessionFile: "/a.jsonl", pinned: true },
+				{ id: "live", status: "online", cwd: HERE, sessionFile: "/a.jsonl", external: true, pane: "p" },
+			],
+			undefined,
+		);
+		expect(rows.map((r) => [r.id, r.alive, r.pinned])).toEqual([
+			["stopped", false, true],
+			["live", true, false],
+		]);
+	});
+
+	it("lists this window's session once, as its own, when the daemon lists its pane under the row it resumed", () => {
+		const self: InstanceSummary = {
+			id: "me",
+			status: "online",
+			cwd: HERE,
+			sessionFile: "/a.jsonl",
+			external: true,
+			pane: "p-me",
+		};
+		const rows = collectRows(
+			[
+				{
+					id: "row",
+					status: "online",
+					cwd: HERE,
+					sessionFile: "/a.jsonl",
+					external: true,
+					pane: "p-me",
+					pinned: true,
+					sortOrder: 2,
+				},
+			],
+			self,
+		);
+		expect(rows.map((r) => [r.id, r.self, r.pinned, r.sortOrder, r.livePanes])).toEqual([
+			["row", true, true, 2, undefined],
+		]);
+	});
+
+	it("lists every live pi on one session file, each flagged, instead of hiding one", () => {
+		const rows = collectRows(
+			[
+				{ id: "p1", status: "online", cwd: HERE, sessionFile: "/a.jsonl", external: true, pane: "p1" },
+				{ id: "p2", status: "online", cwd: HERE, sessionFile: "/a.jsonl", external: true, pane: "p2" },
+			],
+			undefined,
+		);
+		expect(rows.map((r) => [r.id, r.livePanes])).toEqual([
+			["p1", 2],
+			["p2", 2],
+		]);
+	});
+
+	it("flags this window's own session when a pane also runs its file", () => {
+		const self: InstanceSummary = { id: "me", status: "online", cwd: HERE, sessionFile: "/a.jsonl", external: true };
+		const rows = collectRows(
+			[{ id: "pane", status: "online", cwd: HERE, sessionFile: "/a.jsonl", external: true, pane: "p" }],
+			self,
+		);
+		expect(rows.map((r) => [r.id, r.livePanes])).toEqual([
+			["me", 2],
+			["pane", 2],
+		]);
+	});
+
+	it("never flags live sessions without a file", () => {
+		const rows = collectRows(
+			[
+				{ id: "m1", status: "online", cwd: HERE, external: true },
+				{ id: "m2", status: "online", cwd: HERE, external: true },
+			],
+			undefined,
+		);
+		expect(rows.map((r) => [r.id, r.livePanes])).toEqual([
+			["m1", undefined],
+			["m2", undefined],
+		]);
+	});
+
+	it("ages count from creation and freeze when a run finishes", () => {
+		const done = rowFromSummary(
+			{ id: "d", status: "online", cwd: HERE, turns: 1, createdAt: ago(9), finishedAt: ago(3) },
+			undefined,
+		);
+		expect(rowAge(done, NOW)).toBe("6m");
+		expect(compactAge(42_000)).toBe("42s");
+		expect(compactAge(3 * 3_600_000)).toBe("3h");
+	});
+
+	it("a live row mid-turn counts from its turn's start, when its pane reports one", () => {
+		const turnStartedAt = new Date(NOW - 20_000).toISOString();
+		const row = (activity: "working" | "awaiting_input") =>
+			rowFromSummary(
+				{ id: "w", status: "online", cwd: HERE, activity, createdAt: ago(180), turnStartedAt },
+				undefined,
+			);
+		expect(rowAge(row("working"), NOW)).toBe("20s");
+		expect(rowAge(row("awaiting_input"), NOW)).toBe("20s");
+		for (const outcome of ["done", "failed"] as const) {
+			const ended = rowFromSummary(
+				{
+					id: "d",
+					status: "online",
+					cwd: HERE,
+					outcome,
+					createdAt: ago(9),
+					finishedAt: ago(3),
+					turnStartedAt: ago(5),
+				},
+				undefined,
+			);
+			expect(ended.state).toBe(outcome);
+			expect(rowAge(ended, NOW), outcome).toBe("6m");
+		}
+	});
+
+	it.each([
+		["working", ["work"]],
+		["active", ["work"]],
+		["needs", ["ask"]],
+		["blocked", ["ask"]],
+		["input", ["ask"]],
+		["idle", ["done", "gone", "fresh", "stopped"]],
+		["done", ["done"]],
+		["completed", ["done"]],
+		["failed", ["gone"]],
+		["stopped", ["stopped"]],
+		["d", ["done"]],
+		["comp", ["done"]],
+		["f", ["gone"]],
+		["stop", ["stopped"]],
+		["unknown", []],
+		["idle s:failed", ["gone"]],
+		["done s:failed", []],
+		["FAILED", ["gone"]],
+	])("s:%s selects only matching states or activity groups", (filter, expected) => {
+		const rows = collectRows(
+			[
+				...sessions,
+				{ id: "fresh", status: "online", activity: "idle", cwd: HERE },
+				{ id: "stopped", status: "stopped", outcome: "stopped", cwd: HERE },
+			],
+			undefined,
+		);
+		expect(rows.filter(queryFilter(`s:${filter}`) ?? (() => false)).map((r) => r.id)).toEqual(expected);
+	});
+
+	it("lists each open run under its orchestrator's row, this window's own too, and never as a row", () => {
+		const self: InstanceSummary = { id: "me", status: "online", pane: "p-me", cwd: HERE, activity: "idle" };
+		const run = (id: string, parent: string, status: "online" | "stopped" = "online"): InstanceSummary => ({
+			id,
+			status,
+			external: status === "online",
+			pane: `p-${id}`,
+			parent,
+			cwd: HERE,
+			label: id,
+			activity: "working",
+		});
+		const instances = [
+			...sessions,
+			run("r1", "p-work"),
+			run("r2", "p-me"),
+			run("r3", "p-gone"),
+			run("r4", "p-work", "stopped"),
+		];
+		const rows = collectRows(instances, self);
+		expect(rows.map((r) => r.id)).toEqual(["self:p-me", "ask", "work", "done", "gone"]);
+		const runs = collectRuns(instances, rows);
+		expect([...runs].map(([id, list]) => [id, list.map((r) => r.id)])).toEqual([
+			["work", ["r1"]],
+			["self:p-me", ["r2"]],
+		]);
+	});
+
+	it("lists a run's own window under its orchestrator, as this window's row", () => {
+		const run: InstanceSummary = {
+			id: "r1",
+			status: "online",
+			external: true,
+			pane: "p-r1",
+			parent: "p-work",
+			cwd: HERE,
+			label: "probe",
+			activity: "idle",
+		};
+		const self: InstanceSummary = { ...run, external: undefined };
+		const rows = collectRows([...sessions, run], self);
+		expect(rows.map((r) => r.id)).toEqual(["ask", "work", "done", "gone"]);
+		expect(collectRuns([...sessions, run], rows, self).get("work")).toMatchObject([{ id: "r1", self: true }]);
+	});
+
+	it("s:<state> filters; plain text is a task, not a filter", () => {
+		const rows = collectRows(sessions, undefined);
+		expect(rows.filter(queryFilter("s:blocked") ?? (() => false)).map((r) => r.id)).toEqual(["ask"]);
+		expect(rows.filter(queryFilter("s:idle") ?? (() => false)).map((r) => r.id)).toEqual(["done", "gone"]);
+		expect(queryFilter("fix the tests")).toBeUndefined();
+	});
+});
+
+describe("AgentView render", () => {
+	it.each([
+		{ state: "working", color: "accent", hex: "#00c0e8", activity: "working" },
+		{ state: "needs", color: "warning", hex: "#ffc107", activity: "awaiting_input" },
+		{ state: "idle", color: "muted", hex: "#999999", activity: "idle" },
+		{ state: "done", color: "success", hex: "#4eba65", outcome: "done" },
+		{ state: "failed", color: "error", hex: "#ff6b80", outcome: "failed" },
+		{ state: "stopped", color: "warning", hex: "#ffc107", outcome: "stopped" },
+	] as const)("colors $state icons and directory status in dark and light themes", (status) => {
+		const instance: InstanceSummary = {
+			id: "colored",
+			status: "online",
+			cwd: HERE,
+			label: "colored session",
+			...("activity" in status ? { activity: status.activity } : { outcome: status.outcome }),
+		};
+		try {
+			for (const light of [false, true]) {
+				const fg = vi.fn((_color: string, text: string) => text);
+				setSharedTheme({
+					...plainTheme,
+					fg,
+					getBgAnsi: () => (light ? "\x1b[48;2;255;255;255m" : ""),
+				} as unknown as Theme);
+				const { view } = makeView({ instances: [instance] });
+				const glyph = status.state === "working" ? "·" : "✻";
+				const colored = (text: string) => styleText(text, { fg: parseColor(status.hex) }, "truecolor");
+				for (const directory of [false, true]) {
+					if (directory) view.handleInput(CTRL_S);
+					for (let focus = 0; focus < 2; focus++) {
+						fg.mockClear();
+						const line = view.render(100).find((line) => line.includes("colored session"));
+						if (light) {
+							expect(fg).toHaveBeenCalledWith(status.color, glyph);
+							if (directory) expect(fg).toHaveBeenCalledWith(status.color, STATE_WORDS[status.state]);
+						} else {
+							expect(line).toContain(colored(glyph));
+							if (directory) expect(line).toContain(colored(STATE_WORDS[status.state]));
+						}
+						view.handleInput(DOWN);
+					}
+				}
+			}
+		} finally {
+			setSharedTheme(plainTheme);
+		}
+	});
+
+	it("shows the header, the three bands and one line per session", () => {
+		const text = makeView().text();
+		expect(text[0]).toBe("");
+		expect(text[1]).toContain("bluclawd");
+		expect(text[2]).toContain("opencode-go/kimi · ~/proj/here");
+		expect(text[3]).toContain("1 awaiting input · 1 working · 2 idle");
+		const body = text.join("\n");
+		expect(body).toMatch(/Needs input\n.*power-up design\s+Allow bash: npm test\?\s+1m/);
+		expect(body).toMatch(/Working\n.*collision detection\s+Adding swept-AABB checks/);
+		expect(body).toMatch(/Idle\n.*title screen\s+menu done\s+6m/);
+		expect(body).toContain("∙ sound effects");
+		expect(body).not.toContain("describe a task for a new session");
+		expect(text.at(-1)).toContain("? for shortcuts");
+		expect(text.at(-1)).not.toMatch(/space to reply|ctrl\+x|ctrl\+f/);
+	});
+
+	it("shows when an idle session next wakes, in place of its last answer; a working or ended one shows its own line", () => {
+		const wakesAt = new Date(2026, 10, 11, 14, 5).getTime();
+		const [, work, done, gone] = sessions;
+		const { text } = makeView({
+			instances: [
+				{ ...done, wakesAt },
+				{ ...work, wakesAt },
+				{ ...gone, wakesAt },
+			],
+		});
+		const body = text().join("\n");
+		expect(body).toMatch(/Idle\n.*title screen\s+wakes 14:05\s+6m/);
+		expect(body).toMatch(/collision detection\s+Adding swept-AABB checks/);
+		expect(body).toMatch(/sound effects\s+build broke/);
+	});
+
+	it("warns on each row when two panes run one session file", () => {
+		const twin = (id: string): InstanceSummary => ({
+			id,
+			status: "online",
+			activity: "working",
+			cwd: HERE,
+			label: `twin ${id}`,
+			detail: "editing",
+			sessionFile: "/twin.jsonl",
+			external: true,
+			pane: id,
+		});
+		const { text } = makeView({ instances: [twin("p1"), twin("p2")] });
+		const body = text().join("\n");
+		expect(body).toMatch(/twin p1\s+⚠ 2 panes on one session · editing/);
+		expect(body).toMatch(/twin p2\s+⚠ 2 panes on one session · editing/);
+	});
+
+	it("prefixes the state word in the directory view", () => {
+		const { view, text } = makeView();
+		view.handleInput(CTRL_S);
+		const shown = text().join("\n");
+		expect(shown).toMatch(
+			/~\/proj\/here\n.*sound effects\s+Failed · build broke[\s\S]*power-up design\s+Needs input · Allow bash[\s\S]*~\/proj\/there/,
+		);
+	});
+
+	it("with nothing running, shows the bands without onboarding explanations", () => {
+		const { text } = makeView({ instances: [] });
+		const shown = text().join("\n");
+		for (const band of ["Needs input", "Working", "Idle"]) expect(shown).toContain(band);
+		expect(shown).not.toContain("Sessions that");
+		expect(shown).not.toContain("Sessions actively");
+		expect(shown).not.toContain("Sessions with");
+		expect(shown).not.toContain("A different way to work");
+	});
+
+	it.each([
+		{ outcome: "done", label: "Done" },
+		{ outcome: "failed", label: "Failed" },
+		{ outcome: "stopped", label: "Stopped" },
+	] as const)("shows $label in directory view while keeping the session in the Idle band", ({ outcome, label }) => {
+		const { view, text } = makeView({
+			instances: [
+				{ id: "ended", status: "stopped", cwd: HERE, label: "ended session", outcome, detail: "last result" },
+			],
+		});
+		expect(text().join("\n")).toMatch(/Idle\n.*ended session/);
+		view.handleInput(CTRL_S);
+		expect(text().join("\n")).toMatch(new RegExp(`ended session\\s+${label} · last result`));
+	});
+
+	it("hides an empty band once anything is listed", () => {
+		const { text } = makeView({ instances: sessions.filter((s) => s.id !== "ask") });
+		expect(text().join("\n")).not.toContain("Needs input");
+	});
+
+	it("folds completed sessions that don't fit, keeping runs that finished together", () => {
+		const many: InstanceSummary[] = Array.from({ length: 30 }, (_, i) => ({
+			id: `d${i}`,
+			status: "stopped" as const,
+			cwd: HERE,
+			label: `task ${i}`,
+			outcome: "done" as const,
+			finishedAt: ago(i * 2 + 1),
+		}));
+		expect(makeView({ rows: 24, instances: many }).text().join("\n")).toContain("… 18 more");
+		const together = many.map((s, i) => ({ ...s, finishedAt: new Date(NOW - i * 30_000).toISOString() }));
+		expect(makeView({ rows: 24, instances: together }).text().join("\n")).not.toContain("more");
+	});
+});
+
+describe("AgentView keys", () => {
+	it("typing then enter starts a session in a pane of its own, the task its first prompt", async () => {
+		const { view, calls, text, flush } = makeView();
+		for (const ch of "fix the flaky test") view.handleInput(ch);
+		view.handleInput(ENTER);
+		await flush();
+		expect(calls[0]).toEqual(["start", HERE, ["--model", "opencode-go/kimi", "--", "fix the flaky test"]]);
+		expect(text().join("\n")).not.toContain("❯ fix the flaky test");
+	});
+
+	it("ctrl+j and shift+enter add lines to the task; backspace on an empty line joins them back", async () => {
+		const { view, calls, text, flush } = makeView();
+		for (const ch of "write the menu") view.handleInput(ch);
+		view.handleInput(CTRL_J);
+		for (const ch of "then the credits") view.handleInput(ch);
+		expect(text().join("\n")).toMatch(/❯ write the menu\nthen the credits/);
+		view.handleInput(SHIFT_ENTER_KITTY);
+		view.handleInput(BACKSPACE);
+		view.handleInput(ENTER);
+		await flush();
+		expect((calls[0]?.[2] as string[]).at(-1)).toBe("write the menu\nthen the credits");
+	});
+
+	it("the hint line leads with the mode new sessions start in, as bluclawd's", () => {
+		const { view, text } = makeView({ mode: "⏵⏵ always" });
+		for (const ch of "fix it") view.handleInput(ch);
+		expect(text().at(-1)).toMatch(/^ {2}⏵⏵ always · enter to create · esc to clear/);
+		expect(makeView().text().at(-1)).not.toContain("⏵⏵");
+	});
+
+	it("an s: filter's footer offers esc", () => {
+		const { view, text } = makeView();
+		for (const ch of "s:blocked") view.handleInput(ch);
+		expect(text().at(-1)).toContain("esc to clear");
+	});
+
+	it("folds an orchestrator's runs into a line under its row, which enter opens and closes", async () => {
+		const run = (id: string): InstanceSummary => ({
+			id,
+			status: "online",
+			external: true,
+			pane: `p-${id}`,
+			parent: "p-work",
+			activity: "working",
+			cwd: THERE,
+			label: `probe ${id}`,
+			createdAt: ago(1),
+		});
+		const { view, text } = makeView({ instances: [...sessions, run("r1"), run("r2")] });
+		const screen = () => text().join("\n");
+		expect(screen()).not.toContain("probe r1");
+		for (let i = 0; i < 10 && !focusedLine(view)?.includes("subagents"); i++) view.handleInput(DOWN);
+		expect(focusedLine(view)).toContain("▸ 2 subagents");
+		expect(text().at(-1)).toContain("enter to show subagents");
+		view.handleInput(ENTER);
+		expect(focusedLine(view)).toContain("▾ 2 subagents");
+		expect(screen()).toMatch(
+			/collision detection[^\n]*\n[^\n]*▾ 2 subagents[^\n]*\n[^\n]*probe r1[^\n]*\n[^\n]*probe r2/,
+		);
+		view.handleInput(DOWN);
+		expect(focusedLine(view)).toContain("probe r1");
+		view.handleInput("\x1b[A");
+		view.handleInput(ENTER);
+		expect(screen()).not.toContain("probe r1");
+	});
+
+	it("reaches its own runs' line when this window's session is the only one listed", () => {
+		const self: InstanceSummary = { id: "me", status: "online", pane: "p-me", cwd: HERE, activity: "working" };
+		const run: InstanceSummary = {
+			id: "r1",
+			status: "online",
+			external: true,
+			pane: "p-r1",
+			parent: "p-me",
+			activity: "idle",
+			cwd: HERE,
+			label: "probe r1",
+		};
+		const { view } = makeView({ self, instances: [run] });
+		view.handleInput(DOWN);
+		expect(focusedLine(view)).toContain("▸ 1 subagent");
+		view.handleInput(ENTER);
+		view.handleInput(DOWN);
+		expect(focusedLine(view)).toContain("probe r1");
+	});
+
+	it("opened in a run, shows its orchestrator's runs with the run focused", () => {
+		const run: InstanceSummary = {
+			id: "r1",
+			status: "online",
+			external: true,
+			pane: "p-r1",
+			parent: "p-work",
+			activity: "idle",
+			cwd: THERE,
+			label: "probe r1",
+			createdAt: ago(1),
+		};
+		const { view, text } = makeView({ self: { ...run, external: undefined }, instances: [...sessions, run] });
+		expect(focusedLine(view)).toContain("probe r1");
+		expect(text().join("\n")).toMatch(/collision detection[^\n]*\n[^\n]*▾ 1 subagent[^\n]*\n[^\n]*probe r1/);
+	});
+
+	it("alt+N opens the Nth session in the focused session's directory", async () => {
+		const done = (id: string, cwd: string, minutes: number): InstanceSummary => ({
+			id,
+			status: "stopped",
+			cwd,
+			label: `session ${id}`,
+			sessionFile: `/${id}.jsonl`,
+			outcome: "done",
+			finishedAt: ago(minutes),
+		});
+		const { view, calls, flush } = makeView({
+			instances: [done("a", HERE, 1), done("b", THERE, 2), done("c", HERE, 3)],
+		});
+		expect(focusedLine(view)).toContain("session a");
+		view.handleInput(ALT_2);
+		for (let i = 0; i < 5; i++) await flush();
+		expect(calls).toContainEqual(["start", HERE, ["--session", "/c.jsonl"]]);
+		expect(calls).toContainEqual(["switchTo", "pane-1"]);
+	});
+
+	it("ignores a late roster response after closing rather than reading the replaced session context", async () => {
+		let invalidated = false;
+		let answer!: (rows: InstanceSummary[]) => void;
+		const client = fakeClient([]);
+		client.list = () =>
+			new Promise((resolve) => {
+				answer = resolve;
+			});
+		const view = new AgentView({
+			ui: { terminal: { rows: 40 }, requestRender: () => {} } as unknown as TUI,
+			client,
+			appName: "bluclawd",
+			cwd: HERE,
+			home: HOME,
+			externalEditor: () => "true",
+			onClose: () => {},
+			panes: fakePanes([]),
+			self: () => {
+				if (invalidated) throw new Error("stale session context");
+				return undefined;
+			},
+		});
+		const showing = view.onShow();
+		await waitFor(() => expect(answer).toBeDefined());
+		view.close();
+		invalidated = true;
+		answer([]);
+		await expect(showing).resolves.toBeUndefined();
+	});
+
+	it("explains how to recover a legacy Failed row that never recorded its file", async () => {
+		const { view, text, opened, flush } = makeView({
+			instances: [{ id: "legacy", status: "stopped", outcome: "failed", cwd: HERE }],
+		});
+		view.handleInput(ENTER);
+		await flush();
+		expect(opened).toEqual([]);
+		expect(text().join("\n")).toContain("/resume");
+	});
+
+	it("Ctrl+V attaches an image as an [Image #N] token, including an image-only prompt; the image goes along", async () => {
+		const image = { type: "image" as const, mimeType: "image/png", data: "aW1hZ2U=" };
+		const { view, calls, text, flush } = makeView({ readClipboard: async () => ({ image }) });
+		view.handleInput("\x16");
+		await flush();
+		expect(text().join("\n")).toContain("❯ [Image #1]");
+		view.handleInput(ENTER);
+		await flush();
+		expect(calls[0]?.[0]).toBe("start");
+		expect((calls[0]?.[2] as string[]).slice(-2)).toEqual([expect.stringMatching(/^@.*\.png$/), "[Image #1]"]);
+		expect(text().join("\n")).not.toContain("❯ [Image #1]");
+	});
+
+	it("the same image again shows its file instead of the token", async () => {
+		const image = { type: "image" as const, mimeType: "image/png", data: "aW1hZ2U=" };
+		const { view, text, flush } = makeView({ readClipboard: async () => ({ image }) });
+		view.handleInput("\x16");
+		await flush();
+		view.handleInput("\x16");
+		await flush();
+		expect(text().join("\n")).toMatch(/❯ \/\S+\.png/);
+	});
+
+	it("a long paste is a [Pasted text] token: deleted in one go, shown by pasting again, sent in full", async () => {
+		const pasted = "first line\nsecond line\nthird line";
+		const { view, calls, text, flush } = makeView();
+		for (const ch of "fix ") view.handleInput(ch);
+		view.handleInput(`\x1b[200~${pasted}\x1b[201~`);
+		expect(text().join("\n")).toContain("❯ fix [Pasted text #1 +2 lines]");
+		view.handleInput(BACKSPACE);
+		expect(text().join("\n")).toContain("❯ fix ");
+		expect(text().join("\n")).not.toContain("[Pasted text");
+		view.handleInput(`\x1b[200~${pasted}\x1b[201~`);
+		view.handleInput(`\x1b[200~${pasted}\x1b[201~`);
+		expect(text().join("\n")).toContain("❯ fix first line\nsecond line\nthird line");
+		view.handleInput(`\x1b[200~${"x".repeat(900)}\x1b[201~`);
+		view.handleInput(ENTER);
+		await flush();
+		expect((calls[0]?.[2] as string[]).at(-1)).toBe(`fix ${pasted}${"x".repeat(900)}`);
+	});
+
+	it("Ctrl+V only attaches images, and keeps the composer text", async () => {
+		const { view, text, flush } = makeView({ readClipboard: async () => ({ text: " image" }) });
+		for (const ch of "describe") view.handleInput(ch);
+		view.handleInput("\x16");
+		await flush();
+		const shown = text().join("\n");
+		expect(shown).toContain("No image found in clipboard");
+		expect(shown).toContain("❯ describe");
+	});
+
+	it("Ctrl+G writes the prompt in the external editor pi's settings name", async () => {
+		const editor = editorScript(`printf 'from the editor' > "$1"`);
+		const { view, text } = makeView({ externalEditor: () => editor });
+		for (const ch of "draft") view.handleInput(ch);
+		view.handleInput("\x07");
+		await waitFor(() => expect(text().join("\n")).toContain("❯ from the editor"));
+	});
+
+	describe("pi's external-editor key", () => {
+		const editorKey = (key?: KeyId) =>
+			new KeybindingsManager(
+				{ "app.editor.external": { defaultKeys: "ctrl+g" } },
+				key ? { "app.editor.external": key } : {},
+			);
+		const counted = (editor: string) => {
+			const launches = { count: 0 };
+			return {
+				launches,
+				externalEditor: () => {
+					launches.count++;
+					return editor;
+				},
+			};
+		};
+		const openPeek = (view: AgentView) => {
+			for (let i = 0; i < 4; i++) view.handleInput(DOWN);
+			view.handleInput(" ");
+		};
+
+		it("rebound to ctrl+e, ctrl+e opens the editor and ctrl+g does not", async () => {
+			const { launches, externalEditor } = counted(editorScript(`printf 'from the editor' > "$1"`));
+			const { view, text } = makeView({ externalEditor, keybindings: editorKey("ctrl+e") });
+			for (const ch of "draft") view.handleInput(ch);
+			view.handleInput("\x07");
+			expect(launches.count).toBe(0);
+			view.handleInput("\x05");
+			expect(launches.count).toBe(1);
+			await waitFor(() => expect(text().join("\n")).toContain("❯ from the editor"));
+		});
+
+		it.each([
+			{ name: "Ctrl+G by default", keybindings: editorKey(), key: "\x07" },
+			{ name: "the rebound key", keybindings: editorKey("ctrl+e"), key: "\x05" },
+		])("$name closes the peek without opening the editor", ({ keybindings, key }) => {
+			const { launches, externalEditor } = counted("true");
+			const { view, text } = makeView({ externalEditor, keybindings });
+			openPeek(view);
+			expect(text().join("\n")).toContain("╭");
+			view.handleInput(key);
+			expect(text().join("\n")).not.toContain("╭");
+			expect(launches.count).toBe(0);
+		});
+
+		it("bound to ctrl+s, ctrl+s keeps agent view's meaning: it switches to the directory view", () => {
+			const { launches, externalEditor } = counted("true");
+			const { view, text } = makeView({ externalEditor, keybindings: editorKey("ctrl+s") });
+			const directoryBand = /~\/proj\/here\n.*sound effects/;
+			expect(text().join("\n")).not.toMatch(directoryBand);
+			view.handleInput(CTRL_S);
+			expect(launches.count).toBe(0);
+			expect(text().join("\n")).toMatch(directoryBand);
+		});
+
+		it("bound to ctrl+f, ctrl+f keeps agent view's meaning: it starts a name search", () => {
+			const { launches, externalEditor } = counted("true");
+			const { view, text } = makeView({ externalEditor, keybindings: editorKey("ctrl+f") });
+			view.handleInput("\x06");
+			expect(launches.count).toBe(0);
+			expect(text().join("\n")).toContain("❯ n:");
+		});
+	});
+
+	it("Ctrl+G with an editor that cannot start says so and keeps the prompt", async () => {
+		const missing = "bluclawd-no-such-editor";
+		const { view, text } = makeView({ externalEditor: () => missing });
+		for (const ch of "draft") view.handleInput(ch);
+		view.handleInput("\x07");
+		await waitFor(() => expect(text().join("\n")).toContain(`Failed to launch external editor: ${missing}`));
+		view.handleInput("s");
+		expect(text().join("\n")).toContain("❯ drafts");
+	});
+
+	it("Ctrl+G with an editor that exits non-zero says so and keeps the prompt", async () => {
+		const editor = editorScript(`printf 'discarded' > "$1"; exit 3`);
+		const { view, text } = makeView({ externalEditor: () => editor });
+		for (const ch of "draft") view.handleInput(ch);
+		view.handleInput("\x07");
+		await waitFor(() => expect(text().join("\n")).toContain("External editor exited with code 3; prompt unchanged"));
+		expect(text().join("\n")).toContain("❯ draft");
+	});
+
+	it("Esc clears pasted images rather than unexpectedly opening the selected session", async () => {
+		const image = { type: "image" as const, mimeType: "image/png", data: "aW1hZ2U=" };
+		const { view, closed, text, flush } = makeView({ readClipboard: async () => ({ image }) });
+		view.handleInput("\x16");
+		await flush();
+		view.handleInput(ESC);
+		expect(closed()).toBe(0);
+		expect(text().join("\n")).not.toContain("[Image #1]");
+		view.handleInput(ESC);
+		expect(closed()).toBe(1);
+	});
+
+	it("does not submit while clipboard image data is still loading", async () => {
+		let finish!: (value: { image: { type: "image"; mimeType: string; data: string } }) => void;
+		const { view, calls, flush } = makeView({
+			readClipboard: () =>
+				new Promise((resolve) => {
+					finish = resolve;
+				}),
+		});
+		for (const ch of "describe image") view.handleInput(ch);
+		view.handleInput("\x16");
+		view.handleInput(ENTER);
+		expect(calls).toEqual([]);
+		finish({ image: { type: "image", mimeType: "image/png", data: "aW1hZ2U=" } });
+		await flush();
+		view.handleInput(ENTER);
+		await flush();
+		expect(calls[0]?.[0]).toBe("start");
+		expect(calls[0]?.[2]).toEqual(
+			expect.arrayContaining(["describe image[Image #1]", expect.stringMatching(/^@.*\.png$/)]),
+		);
+	});
+
+	it("ctrl+c clears the draft and arms the exit at once; a second press leaves tmux", () => {
+		const { view, calls } = makeView();
+		for (const ch of "draft") view.handleInput(ch);
+		view.handleInput("\x03");
+		const shown = view.render(100).map(stripAnsi).join("\n");
+		expect(shown).not.toContain("❯ draft");
+		expect(shown).toContain("Press Ctrl-C again to exit · 2 agents will keep running");
+		view.handleInput("\x03");
+		expect(calls).toEqual([["detach"]]);
+	});
+
+	it("exit words quit; an unknown /command is a task, not an error", async () => {
+		const { view, calls, closed, flush } = makeView();
+		for (const ch of "/brainstorm a menu") view.handleInput(ch);
+		view.handleInput(ENTER);
+		await flush();
+		expect(calls[0]).toEqual(["start", HERE, ["--model", "opencode-go/kimi", "--", "/brainstorm a menu"]]);
+		for (const ch of "exit") view.handleInput(ch);
+		view.handleInput(ENTER);
+		expect(closed()).toBe(1);
+		expect(calls.at(-1)).toEqual(["detach"]);
+	});
+
+	it("↑ wraps from the top to the bottom", () => {
+		const { view } = makeView();
+		view.handleInput(HOME_KEY);
+		view.handleInput("\x1b[A");
+		expect(focusedLine(view)).toContain("sound effects");
+	});
+
+	it("ctrl+r renames inline in the row, with the footer saying how to finish", async () => {
+		const { view, calls, text, flush } = makeView();
+		view.handleInput(CTRL_R);
+		for (const ch of " v2") view.handleInput(ch);
+		const shown = text();
+		expect(shown.join("\n")).toMatch(/✻ power-up design v2/);
+		expect(shown.at(-1)).toContain("enter to save · esc to cancel");
+		view.handleInput(ENTER);
+		await flush();
+		expect(calls[0]).toEqual(["send", "ask", { type: "rename", name: "power-up design v2" }]);
+	});
+
+	it("while renaming, the dimmed composer shows no cursor of its own", () => {
+		const { view } = makeView();
+		for (const ch of "draft") view.handleInput(ch);
+		view.handleInput(CTRL_R);
+		const composer = view.render(100).find((line) => stripAnsi(line).startsWith("❯ draft"));
+		expect(composer).toBeDefined();
+		expect(composer).not.toMatch(/\x1b_pi:fc\x07|\x1b\[7m/);
+	});
+
+	it("refuses a too-short task", () => {
+		const { view, calls, text } = makeView();
+		for (const ch of "hi") view.handleInput(ch);
+		view.handleInput(ENTER);
+		expect(calls).toEqual([]);
+		expect(text().join("\n")).toContain("Too short — describe the task");
+	});
+
+	it("a peek reply goes to a running session as a prompt when idle", async () => {
+		const { view, calls, flush } = makeView();
+		for (let i = 0; i < 4; i++) view.handleInput(DOWN);
+		expect(focusedLine(view)).toContain("title screen");
+		view.handleInput(" ");
+		for (const ch of "now add sound") view.handleInput(ch);
+		view.handleInput(ENTER);
+		await flush();
+		expect(calls[0]).toEqual(["send", "done", { type: "prompt", text: "now add sound" }]);
+	});
+
+	it("ctrl+x ends a running session's pi, whose row stays, stopped; a second press deletes that row", async () => {
+		const work = { ...sessions[1], sessionFile: "/w.jsonl" };
+		let instances: InstanceSummary[] = [sessions[0], work];
+		const { view, calls, text, flush } = makeView({ list: () => instances, instances });
+		view.handleInput(DOWN);
+		view.handleInput(DOWN);
+		view.handleInput(CTRL_X);
+		await flush();
+		expect(calls).toEqual([["end", "p-work"]]);
+		expect(text().join("\n")).toContain("stopped · ctrl+x again to delete");
+		instances = [
+			sessions[0],
+			{ id: work.id, status: "stopped", cwd: THERE, sessionFile: "/w.jsonl", outcome: "stopped" },
+		];
+		view.handleInput(CTRL_X);
+		await waitFor(() => expect(calls.at(-1)).toEqual(["delete", work.id]));
+	});
+
+	it("esc dismisses an armed delete instead of closing", () => {
+		const { view, closed } = makeView();
+		for (let i = 0; i < 5; i++) view.handleInput(DOWN);
+		view.handleInput(CTRL_X);
+		view.handleInput(ESC);
+		expect(closed()).toBe(0);
+		view.handleInput(ESC);
+		expect(closed()).toBe(1);
+	});
+
+	it("ctrl+t pins your own session like any other: it is a pane too", async () => {
+		const self: InstanceSummary = {
+			id: "me",
+			status: "online",
+			activity: "idle",
+			cwd: HERE,
+			label: "current",
+			turns: 1,
+			external: true,
+			pane: "pane-self",
+		};
+		const { view, calls, flush } = makeView({ self, instances: [...sessions, self] });
+		expect(focusedLine(view)).toContain("current");
+		view.handleInput(CTRL_T);
+		await flush();
+		expect(calls).toEqual([["setMeta", "me", { pinned: true }]]);
+	});
+
+	it("ctrl+x stops your own session's turn, a second press deletes it", async () => {
+		const self: InstanceSummary = {
+			id: "me",
+			status: "online",
+			activity: "working",
+			cwd: HERE,
+			external: true,
+			pane: "pane-self",
+		};
+		const { view, calls, text, stopped } = makeView({ self, instances: [] });
+		view.handleInput(CTRL_X);
+		expect(stopped()).toBe(1);
+		expect(text().join("\n")).toContain("ctrl+x again to delete");
+		view.handleInput(CTRL_X);
+		await waitFor(() => expect(calls.at(-1)).toEqual(["kill", "pane-self"]));
+	});
+
+	it("ctrl+x ends the pi of a live session that finished a turn, whose row stays, stopped", async () => {
+		const { view, calls, text, flush } = makeView();
+		for (let i = 0; i < 10 && !focusedLine(view)?.includes("title screen"); i++) view.handleInput(DOWN);
+		view.handleInput("?");
+		expect(text().join("\n")).toContain("ctrl+x to stop");
+		view.handleInput("?");
+		view.handleInput(CTRL_X);
+		await flush();
+		expect(calls).toEqual([["end", "p-done"]]);
+		expect(text().join("\n")).toContain("stopped · ctrl+x again to delete");
+	});
+
+	it("ctrl+x ends the pi of a live session whose last turn failed or was stopped", async () => {
+		for (const outcome of ["failed", "stopped"] as const) {
+			const live: InstanceSummary = {
+				id: "x",
+				status: "online",
+				external: true,
+				pane: "p-x",
+				activity: "idle",
+				outcome,
+				turns: 1,
+				cwd: HERE,
+				label: "live one",
+			};
+			const { view, calls, flush } = makeView({ instances: [live] });
+			for (let i = 0; i < 5 && !focusedLine(view)?.includes("live one"); i++) view.handleInput(DOWN);
+			view.handleInput(CTRL_X);
+			await flush();
+			expect(calls).toEqual([["end", "p-x"]]);
+		}
+	});
+
+	it("ctrl+x closes a run that has reported; a quick second press does not reach the row after it", async () => {
+		const run = (id: string, activity: "idle" | "working"): InstanceSummary => ({
+			id,
+			status: "online",
+			external: true,
+			pane: `p-${id}`,
+			parent: "p-work",
+			activity,
+			turns: 1,
+			cwd: THERE,
+			label: `probe ${id}`,
+		});
+		let instances = [...sessions, run("r1", "idle"), run("r2", "working")];
+		const { view, calls, flush } = makeView({ list: () => instances, instances });
+		for (let i = 0; i < 10 && !focusedLine(view)?.includes("2 subagents"); i++) view.handleInput(DOWN);
+		view.handleInput(ENTER);
+		view.handleInput(DOWN);
+		expect(focusedLine(view)).toContain("probe r1");
+		instances = instances.map((i) => (i.id === "r1" ? { ...i, status: "stopped" as const } : i));
+		view.handleInput(CTRL_X);
+		await waitFor(() => expect(focusedLine(view)).toContain("probe r2"));
+		expect(calls).toEqual([["end", "p-r1"]]);
+		view.handleInput(CTRL_X);
+		await flush();
+		expect(calls).toEqual([["end", "p-r1"]]);
+	});
+
+	it("ctrl+x never deletes a run: one still listed after its first press reads closing", async () => {
+		const run: InstanceSummary = {
+			id: "r1",
+			status: "online",
+			external: true,
+			pane: "p-r1",
+			parent: "p-work",
+			activity: "idle",
+			turns: 1,
+			cwd: THERE,
+			label: "probe r1",
+		};
+		const { view, calls, flush } = makeView({ instances: [...sessions, run] });
+		for (let i = 0; i < 10 && !focusedLine(view)?.includes("1 subagent"); i++) view.handleInput(DOWN);
+		view.handleInput(ENTER);
+		view.handleInput(DOWN);
+		view.handleInput(CTRL_X);
+		await flush();
+		expect(focusedLine(view)).toContain("closing…");
+		view.handleInput(CTRL_X);
+		await flush();
+		expect(calls).toEqual([["end", "p-r1"]]);
+	});
+
+	it("ctrl+x on your own session with no turn running only arms the delete", async () => {
+		for (const self of [
+			{ id: "me", status: "online", activity: "idle", cwd: HERE, external: true, pane: "pane-self" },
+			{ id: "me", status: "online", activity: "idle", turns: 1, cwd: HERE, external: true, pane: "pane-self" },
+		] satisfies InstanceSummary[]) {
+			const { view, text, stopped } = makeView({ self, instances: [...sessions, self] });
+			view.handleInput("?");
+			expect(text().join("\n")).toContain("ctrl+x to delete");
+			view.handleInput("?");
+			view.handleInput(CTRL_X);
+			expect(stopped()).toBe(0);
+			expect(text().join("\n")).toContain("ctrl+x again to delete");
+			expect(text().join("\n")).not.toContain("stopped ·");
+		}
+	});
+
+	it("enter on your own session returns to it; on another it opens there", async () => {
+		const self: InstanceSummary = { id: "me", status: "online", cwd: HERE, turns: 1, external: true };
+		const withSelf = makeView({ self });
+		withSelf.view.handleInput(ENTER);
+		await withSelf.flush();
+		expect(withSelf.closed()).toBe(1);
+
+		const { view, calls, flush } = makeView({
+			instances: sessions.map((s) => (s.id === "gone" ? { ...s, sessionFile: "/gone.jsonl" } : s)),
+		});
+		for (let i = 0; i < 5; i++) view.handleInput(DOWN);
+		expect(focusedLine(view)).toContain("sound effects");
+		view.handleInput(ENTER);
+		await flush();
+		expect(calls).toEqual([
+			["start", HERE, ["--session", "/gone.jsonl"]],
+			["switchTo", "pane-1"],
+		]);
+	});
+
+	it("/model sets the dispatch model for this view only; other slash commands point to attaching", () => {
+		const { view, text } = makeView();
+		for (const ch of "/model openai/gpt-5") view.handleInput(ch);
+		view.handleInput(ENTER);
+		expect(text()[2]).toContain("openai/gpt-5 (session)");
+		for (const ch of "/compact") view.handleInput(ch);
+		view.handleInput(ENTER);
+		expect(text().join("\n")).toContain("/compact isn't available in agent view — open a session to run it");
+	});
+
+	it("/cd sets the directory new sessions start in; bare /cd goes back", () => {
+		const { view, calls, text } = makeView();
+		const where = () => stripAnsi(view.render(200)[2]);
+		const type = (s: string) => {
+			for (const ch of s) view.handleInput(ch);
+			view.handleInput(ENTER);
+		};
+		const root = realpathSync(mkdtempSync(join(tmpdir(), "pi-cd-")));
+		mkdirSync(join(root, "api"));
+		type(`/cd ${root}`);
+		type("/cd api");
+		expect(where()).toContain(join(root, "api"));
+		type("write the tests");
+		type("!ls");
+		expect(calls.filter(([op]) => op === "start" || op === "startShell")).toEqual([
+			["start", join(root, "api"), ["--model", "opencode-go/kimi", "--", "write the tests"]],
+			["startShell", join(root, "api"), "ls"],
+		]);
+
+		type("/cd nope");
+		expect(text().join("\n")).toContain(`No such directory: ${join(root, "api", "nope")}`);
+		expect(where()).toContain(join(root, "api"));
+
+		type("/cd");
+		expect(where()).toContain("~/proj/here");
+	});
+
+	it("/ suggests agent view's commands: tab or enter completes, enter on an exact one runs it", () => {
+		const { view, text } = makeView();
+		const typed = (s: string) => {
+			for (const ch of s) view.handleInput(ch);
+		};
+		const menu = () => text().filter((line) => /^\s+\/\w/.test(line));
+		typed("/");
+		expect(menu().map((line) => line.trim().split(/\s+/)[0])).toEqual(["/cd", "/model", "/resume", "/exit"]);
+		typed("m");
+		expect(menu()).toEqual([expect.stringMatching(/\/model <name>\s+Set the model for new sessions/)]);
+		view.handleInput(ENTER);
+		expect(text().join("\n")).toContain("❯ /model ");
+		expect(text().join("\n")).not.toContain("Usage");
+		expect(menu()).toEqual([]);
+		view.handleInput(ESC);
+
+		typed("/");
+		view.handleInput(DOWN);
+		view.handleInput(DOWN);
+		view.handleInput(ENTER);
+		expect(text().join("\n")).toContain("Resume a past session");
+		view.handleInput(ESC);
+
+		typed("/c");
+		view.handleInput("\t");
+		expect(text().join("\n")).toContain("❯ /cd ");
+		view.handleInput(ESC);
+
+		typed("/cd");
+		view.handleInput(ENTER);
+		expect(text().join("\n")).toContain("New sessions start in ~/proj/here");
+
+		typed("/zz");
+		expect(menu()).toEqual([]);
+	});
+
+	it("tab after /cd completes the directory as a shell does, listing them when several match", () => {
+		const { view, text } = makeView();
+		const typed = (s: string) => {
+			for (const ch of s) view.handleInput(ch);
+		};
+		const composer = () => (text().find((line) => line.startsWith("❯")) ?? "").trimEnd();
+		const menu = () =>
+			text()
+				.filter((line) => /^\s+\S+\/$/.test(line))
+				.map((line) => line.trim());
+		const root = realpathSync(mkdtempSync(join(tmpdir(), "pi-cd-tab-")));
+		for (const dir of ["api", "app", "docs", ".git"]) mkdirSync(join(root, dir));
+		writeFileSync(join(root, "apple.txt"), "");
+
+		typed(`/cd ${root}/d`);
+		view.handleInput("\t");
+		expect(composer()).toBe(`❯ /cd ${root}/docs/`);
+		view.handleInput(ESC);
+
+		typed(`/cd ${root}/a`);
+		view.handleInput("\t");
+		expect(composer()).toBe(`❯ /cd ${root}/ap`);
+		expect(menu()).toEqual(["api/", "app/"]);
+		view.handleInput(DOWN);
+		view.handleInput("\t");
+		expect(composer()).toBe(`❯ /cd ${root}/app/`);
+		expect(menu()).toEqual([]);
+		view.handleInput(ENTER);
+		expect(stripAnsi(view.render(200)[2])).toContain(join(root, "app"));
+
+		typed("/cd ../");
+		view.handleInput("\t");
+		expect(menu()).toEqual(["api/", "app/", "docs/"]);
+		view.handleInput(ENTER);
+		expect(composer()).toBe("❯ /cd ../api/");
+		view.handleInput(ESC);
+		typed("/cd ../.");
+		view.handleInput("\t");
+		expect(composer()).toBe("❯ /cd ../.git/");
+	});
+
+	it("/model opens a searchable picker and applies its selection to new sessions", async () => {
+		const { view, text, calls, flush } = makeView({
+			listModels: () => [
+				{ provider: "opencode-go", id: "kimi" },
+				{ provider: "anthropic", id: "claude-opus" },
+				{ provider: "anthropic", id: "claude-sonnet" },
+			],
+		});
+		for (const ch of "/model") view.handleInput(ch);
+		view.handleInput(ENTER);
+		expect(text().join("\n")).toContain("Select model");
+		expect(text().join("\n")).toMatch(/opencode-go\/kimi\s+current/);
+		for (const ch of "claude") view.handleInput(ch);
+		expect(text().join("\n")).toContain("anthropic/claude-opus");
+		expect(text().join("\n")).not.toContain("opencode-go/kimi  current");
+		view.handleInput(DOWN);
+		view.handleInput(ENTER);
+		expect(text().join("\n")).toContain("Model set to anthropic/claude-sonnet");
+		expect(text().join("\n")).not.toContain("Select model");
+		for (const ch of "new task") view.handleInput(ch);
+		view.handleInput(ENTER);
+		await flush();
+		expect(calls[0]).toEqual(["start", HERE, ["--model", "anthropic/claude-sonnet", "--", "new task"]]);
+	});
+
+	it.each([ESC, "\x03"])("cancels the model picker without changing models or exiting (%j)", async (cancel) => {
+		const { view, text, calls, closed, flush } = makeView({
+			listModels: () => [{ provider: "openai", id: "gpt-5" }],
+		});
+		for (const ch of "/model") view.handleInput(ch);
+		view.handleInput(ENTER);
+		view.handleInput(cancel);
+		expect(text().join("\n")).not.toContain("Select model");
+		expect(closed()).toBe(0);
+		for (const ch of "new task") view.handleInput(ch);
+		view.handleInput(ENTER);
+		await flush();
+		expect(calls[0]).toEqual(["start", HERE, ["--model", "opencode-go/kimi", "--", "new task"]]);
+	});
+
+	it("keeps an unmatched model search open and allows resetting to the default", () => {
+		const { view, text } = makeView({ listModels: () => [] });
+		for (const ch of "/model") view.handleInput(ch);
+		view.handleInput(ENTER);
+		for (const ch of "missing") view.handleInput(ch);
+		view.handleInput(ENTER);
+		expect(text().join("\n")).toContain("Select model");
+		for (let i = 0; i < "missing".length; i++) view.handleInput(BACKSPACE);
+		view.handleInput(ENTER);
+		expect(text().join("\n")).toContain("Model reset to default");
+	});
+
+	it("tab after /model completes the model, by provider/id or by id alone", () => {
+		const { view, text } = makeView({
+			listModels: () => [
+				{ provider: "anthropic", id: "claude-opus" },
+				{ provider: "anthropic", id: "claude-sonnet" },
+				{ provider: "openai", id: "gpt-5" },
+			],
+		});
+		const typed = (s: string) => {
+			for (const ch of s) view.handleInput(ch);
+		};
+		const composer = () => (text().find((line) => line.startsWith("❯")) ?? "").trimEnd();
+		const menu = () =>
+			text()
+				.filter((line) => /^\s+[\w-]+(\/[\w-]+)?$/.test(line))
+				.map((line) => line.trim());
+
+		typed("/model gpt");
+		view.handleInput("\t");
+		expect(composer()).toBe("❯ /model openai/gpt-5");
+		view.handleInput(ESC);
+
+		typed("/model an");
+		view.handleInput("\t");
+		expect(composer()).toBe("❯ /model anthropic/claude-");
+		expect(menu()).toEqual(["anthropic/claude-opus", "anthropic/claude-sonnet"]);
+		view.handleInput(DOWN);
+		view.handleInput("\t");
+		expect(composer()).toBe("❯ /model anthropic/claude-sonnet");
+		view.handleInput(ENTER);
+		expect(text().join("\n")).toContain("Model set to anthropic/claude-sonnet");
+
+		typed("/model ");
+		view.handleInput("\t");
+		expect(menu()).toEqual(["anthropic/claude-opus", "anthropic/claude-sonnet", "openai/gpt-5", "default"]);
+	});
+});
+
+describe("piPackageRoot", () => {
+	it("finds the running pi's package root from its entry script, or nothing outside pi", () => {
+		const piRoot = dirname(dirname(fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent"))));
+		expect(piPackageRoot(join(piRoot, "dist", "bundle", "cli.js"))).toBe(realpathSync(piRoot));
+		expect(piPackageRoot(resolve("bin.mjs"))).toBeUndefined();
+		expect(piPackageRoot(undefined)).toBeUndefined();
+		expect(piPackageRoot("/nonexistent/pi")).toBeUndefined();
+		const link = join(mkdtempSync(join(tmpdir(), "pi-bin-")), "pi");
+		symlinkSync(join(piRoot, "dist", "bundle", "cli.js"), link);
+		expect(piPackageRoot(link)).toBe(realpathSync(piRoot));
+	});
+});
+
+describe("withoutAgentViewCommand", () => {
+	it("keeps the plumbing command out of slash autocomplete", async () => {
+		const base = {
+			getSuggestions: async () => ({
+				prefix: "/a",
+				items: [
+					{ value: "agent-view", label: "agent-view" },
+					{ value: "agents", label: "agents" },
+				],
+			}),
+			applyCompletion: () => ({ lines: [], cursorLine: 0, cursorCol: 0 }),
+		} as unknown as AutocompleteProvider;
+		const got = await withoutAgentViewCommand(base).getSuggestions(["/a"], 0, 2, { force: false } as never);
+		expect(got?.items.map((i) => i.value)).toEqual(["agents"]);
+	});
+});
+
+describe("daemon runtime identity", () => {
+	it("detects a different Pi installation even when bluclawd source is unchanged", () => {
+		vi.stubEnv("PI_PACKAGE_ROOT", "/old/pi");
+		const old = currentDaemonBuildId();
+		vi.stubEnv("PI_PACKAGE_ROOT", "/new/pi");
+		expect(currentDaemonBuildId()).not.toBe(old);
+	});
+});
+
+describe("AgentView look", () => {
+	it("draws the mascot beside the header and the ? grid under the composer, list still visible", () => {
+		vi.stubEnv("TERM_PROGRAM", "ghostty");
+		vi.stubEnv("TERM", "xterm-ghostty");
+		const { view, text } = makeView();
+		expect(text().slice(1, 5)).toEqual([
+			expect.stringMatching(/^ {2}▗▄▟█▙▄▖ {4}bluclawd v1\.0\.0$/),
+			expect.stringMatching(/^▄██▀███▀██▄ {2}\S/),
+			expect.stringMatching(/^🮂█████████🮂 {2}\d+ awaiting input/u),
+			expect.stringMatching(/^ {2}🮅.{5}🮅 +$/u),
+		]);
+		expect(stripAnsi(view.render(60)[1]!)).toMatch(/^bluclawd v1\.0\.0/);
+		view.handleInput("?");
+		const shown = text().join("\n");
+		expect(shown).toContain("power-up design");
+		expect(shown).toMatch(/ctrl\+r to rename\s/);
+		expect(text().at(-1)).not.toContain("? for shortcuts");
+		view.handleInput("?");
+		expect(text().at(-1)).toContain("? for shortcuts");
+	});
+
+	it("lays the ? grid out: three to a column, whole phrases, alt count from the focused directory", () => {
+		const { view } = makeView();
+		view.handleInput("?");
+		const grid = (width: number) => {
+			const lines = view.render(width).map(stripAnsi);
+			return lines.slice(lines.map((l) => l.startsWith("─")).lastIndexOf(true) + 1);
+		};
+		for (const width of [100, 120, 160]) {
+			const text = grid(width).join("\n");
+			for (const item of [
+				"ctrl+r to rename",
+				"ctrl+f to find",
+				"ctrl+j for newline",
+				"ctrl+x to stop",
+				"? to close",
+			]) {
+				expect(text).toContain(item);
+			}
+			expect(text).toContain("alt+1-3 to open");
+			expect(text).not.toContain("shift+↑↓ to reorder");
+		}
+		const rows = grid(160);
+		expect(rows).toHaveLength(3);
+		expect(rows[0]).toMatch(/^ {2}ctrl\+r to rename {10}ctrl\+s to switch views {4}/);
+		expect(rows[1]).toMatch(/^ {2}ctrl\+f to find {12}ctrl\+j for newline {8}/);
+		expect(rows[2]).toMatch(/^ {2}(opt|alt)\+↑\/↓ to jump groups {4}ctrl\+t to pin to top/);
+	});
+
+	it("? leaves shift+↑↓ out for a row it can't move: this window before its first prompt, or a run", () => {
+		const blank: InstanceSummary = { id: "me", status: "online", cwd: HERE, label: "current session", pane: "p-me" };
+		const run: InstanceSummary = {
+			id: "r1",
+			status: "online",
+			external: true,
+			pane: "p-r1",
+			parent: "p-work",
+			activity: "working",
+			cwd: THERE,
+			label: "probe r1",
+			createdAt: ago(1),
+		};
+		const { view, text } = makeView({ self: blank, instances: [...sessions, run] });
+		const screen = () => text().join("\n");
+		expect(focusedLine(view)).toContain("current session");
+		view.handleInput("?");
+		expect(screen()).toContain("? to close");
+		expect(screen()).not.toContain("shift+↑↓");
+		view.handleInput("?");
+		for (let i = 0; i < 10 && !focusedLine(view)?.includes("subagent"); i++) view.handleInput(DOWN);
+		view.handleInput(ENTER);
+		view.handleInput(DOWN);
+		expect(focusedLine(view)).toContain("probe r1");
+		view.handleInput("?");
+		expect(screen()).toContain("? to close");
+		expect(screen()).not.toContain("shift+↑↓");
+	});
+
+	it("with only this session listed, omits the intro and idle prompting hints", () => {
+		const self: InstanceSummary = { id: "me", status: "online", cwd: HERE, label: "current session", external: true };
+		const { text } = makeView({ self, instances: [] });
+		const shown = text().join("\n");
+		expect(shown).toContain("current session");
+		expect(shown).not.toContain("different way");
+		expect(shown).not.toMatch(/send a prompt|space to send/);
+	});
+
+	it("draws a roster listed before it opened in its first frame, intro and all left out", () => {
+		const self: InstanceSummary = { id: "me", status: "online", cwd: HERE, label: "current session", external: true };
+		const view = new AgentView({
+			ui: { terminal: { rows: 40 }, requestRender: () => {} } as unknown as TUI,
+			client: fakeClient([]),
+			panes: fakePanes([]),
+			appName: "bluclawd",
+			cwd: HERE,
+			home: HOME,
+			externalEditor: () => "true",
+			self: () => self,
+			onClose: () => {},
+			instances: sessions,
+		});
+		const shown = view.render(100).map(stripAnsi).join("\n");
+		expect(shown).toContain("power-up design");
+		expect(shown).not.toContain("different way");
+	});
+
+	it("keeps the intro hidden before and after the roster loads", async () => {
+		const self: InstanceSummary = { id: "me", status: "online", cwd: HERE, label: "current session", external: true };
+		const view = new AgentView({
+			ui: { terminal: { rows: 40 }, requestRender: () => {} } as unknown as TUI,
+			client: fakeClient([], () => []),
+			panes: fakePanes([]),
+			appName: "bluclawd",
+			cwd: HERE,
+			home: HOME,
+			externalEditor: () => "true",
+			self: () => self,
+			onClose: () => {},
+		});
+		const text = () => view.render(100).map(stripAnsi).join("\n");
+		expect(text()).toContain("current session");
+		expect(text()).not.toContain("different way");
+		await view.onShow();
+		expect(text()).not.toContain("different way");
+		view.close();
+	});
+
+	it("keeps a pane's row through a daemon restart until that pane heartbeats again", async () => {
+		vi.useFakeTimers({ toFake: ["Date"] });
+		try {
+			const pane: InstanceSummary = {
+				id: "pi-a",
+				status: "online",
+				cwd: HERE,
+				label: "carried on",
+				external: true,
+				pane: "pi-a",
+				activity: "working",
+			};
+			let listed: InstanceSummary[] = [];
+			const client = {
+				...fakeClient([], () => listed),
+				getDaemonInfo: async () => ({ running: true, buildId: "an older build" }),
+				restartDaemon: async () => ({ restarted: true }),
+			} as unknown as OrchestratorClient;
+			const view = new AgentView({
+				ui: { terminal: { rows: 40 }, requestRender: () => {} } as unknown as TUI,
+				client,
+				panes: fakePanes([]),
+				appName: "bluclawd",
+				cwd: HERE,
+				home: HOME,
+				externalEditor: () => "true",
+				onClose: () => {},
+				instances: [pane],
+			});
+			const text = () => view.render(100).map(stripAnsi).join("\n");
+			const refresh = () => view.refresh();
+			listed = [{ id: "pi-a", status: "stopped", cwd: HERE, label: "stored behind it" }];
+			await view.onShow();
+			expect(text()).toContain("carried on");
+			expect(text()).not.toContain("stored behind it");
+			listed = [{ ...pane, label: "re-registered" }];
+			await refresh();
+			expect(text()).toContain("re-registered");
+			listed = [];
+			vi.setSystemTime(Date.now() + 10_000);
+			await refresh();
+			expect(text()).not.toContain("re-registered");
+			view.close();
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+});

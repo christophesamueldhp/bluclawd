@@ -1,0 +1,540 @@
+import { closeSync, openSync, readSync, statSync } from "node:fs";
+import type { Theme } from "@earendil-works/pi-coding-agent";
+import {
+	type Component,
+	getKeybindings,
+	matchesKey,
+	rgbColor,
+	styleText,
+	styleTextWithAnsi,
+	truncateToWidth,
+	visibleWidth,
+	wrapTextWithAnsi,
+} from "@earendil-works/pi-tui";
+import { stripAnsi } from "../../daemon/ansi.ts";
+import { type AgentTask, agentTasks } from "../_shared/agent-tasks.ts";
+import { type BackgroundJobInfo, backgroundBashJobs, jobOutcome } from "./background-bash.ts";
+import { formatTaskDuration } from "./bash-limits.ts";
+import { FOREGROUND_TASK_AFTER_MS, type ForegroundShell, runningForegroundShells } from "./foreground-shells.ts";
+import { type Wakeup, wakeupClock, wakeups } from "./wakeups.ts";
+
+const DETAIL_TAIL_BYTES = 8192;
+const DETAIL_TAIL_LINES = 10;
+const MAX_COMMAND_CHARS = 280;
+const PAD = 2;
+const TABLE_GAP = 2;
+const META_GAP = 3;
+const MIN_VISIBLE_LINES = 7;
+
+const SUGGESTION = (text: string) => styleText(text, { fg: rgbColor(177, 185, 249) }, "truecolor");
+const BACKGROUND = (text: string) => styleText(text, { fg: rgbColor(0, 204, 204) }, "truecolor");
+const ITALIC = (text: string) => styleTextWithAnsi(text, undefined, undefined, { italic: true });
+const POINTER = "❯";
+const RUNNING_ICON = process.platform === "darwin" ? "⏺" : "●";
+
+type TaskKind = "shell" | "monitor" | "agent" | "wakeup";
+type TaskState = "running" | "completed" | "failed" | "killed";
+
+export interface TaskRow {
+	id: string;
+	kind: TaskKind;
+	label: string;
+	state: TaskState;
+	statusText?: string;
+	model?: string;
+	outputFile?: string;
+	agentOutput?: () => string;
+	startedAt: number;
+	endedAt?: number;
+	job?: BackgroundJobInfo;
+	foreground?: ForegroundShell;
+}
+
+export function taskRows(owner: string | undefined): TaskRow[] {
+	const jobs = backgroundBashJobs
+		.list()
+		.filter((job) => owner === undefined || job.owner === owner || job.agentId !== undefined);
+	const shells: TaskRow[] = jobs.map((job) => ({
+		id: job.id,
+		kind: job.kind === "monitor" ? "monitor" : "shell",
+		label: job.kind === "monitor" ? job.description?.trim() || job.command : job.command,
+		state: jobOutcome(job).state,
+		startedAt: job.startedAt,
+		endedAt: job.exit?.at,
+		job,
+	}));
+	const agents: TaskRow[] = (agentTasks()?.list(owner) ?? []).map(agentRow);
+	return [...shells, ...agents].reverse().sort((a, b) => b.startedAt - a.startedAt);
+}
+
+export function foregroundRows(owner: string | undefined, now = Date.now()): TaskRow[] {
+	return runningForegroundShells()
+		.filter((shell) => now - shell.startedAt >= FOREGROUND_TASK_AFTER_MS)
+		.filter((shell) => owner === undefined || shell.owner === owner || shell.agentId !== undefined)
+		.map((shell) => ({
+			id: shell.id,
+			kind: "shell",
+			label: shell.command,
+			state: "running",
+			startedAt: shell.startedAt,
+			foreground: shell,
+		}));
+}
+
+function formatSize(bytes: number): string {
+	const kb = bytes / 1024;
+	if (kb < 1) return `${bytes} bytes`;
+	if (kb < 1024) return `${kb.toFixed(1).replace(/\.0$/, "")}KB`;
+	const mb = kb / 1024;
+	if (mb < 1024) return `${mb.toFixed(1).replace(/\.0$/, "")}MB`;
+	return `${(mb / 1024).toFixed(1).replace(/\.0$/, "")}GB`;
+}
+
+const clean = (s: string) => stripAnsi(s).replace(/[\x00-\x08\x0b-\x1f\x7f]/g, "");
+
+function outputTail(row: TaskRow): { lines: string[]; size: number; read: number } {
+	const job = row.job;
+	let text = "";
+	let size = 0;
+	if (row.foreground) {
+		text = row.foreground.output();
+		size = Buffer.byteLength(text);
+	} else if (row.kind === "agent") {
+		if (row.agentOutput) {
+			text = row.agentOutput();
+			size = Buffer.byteLength(text);
+		} else if (row.outputFile) {
+			try {
+				size = statSync(row.outputFile).size;
+				const length = Math.min(size, DETAIL_TAIL_BYTES);
+				const buffer = Buffer.alloc(length);
+				const fd = openSync(row.outputFile, "r");
+				try {
+					readSync(fd, buffer, 0, length, size - length);
+				} finally {
+					closeSync(fd);
+				}
+				text = buffer.toString("utf-8");
+			} catch {
+				text = "";
+				size = 0;
+			}
+		}
+	} else if (!job) return { lines: [], size: 0, read: 0 };
+	else if (job.outputFile) {
+		try {
+			size = statSync(job.outputFile).size;
+			const length = Math.min(size, DETAIL_TAIL_BYTES);
+			const buffer = Buffer.alloc(length);
+			const fd = openSync(job.outputFile, "r");
+			try {
+				readSync(fd, buffer, 0, length, size - length);
+			} finally {
+				closeSync(fd);
+			}
+			text = buffer.toString("utf-8");
+			// The write stream flushes asynchronously, so output that has not reached the file yet is still in memory.
+			if (size === 0) {
+				text = backgroundBashJobs.peek(job.id) ?? "";
+				size = Buffer.byteLength(text);
+			}
+		} catch {
+			text = backgroundBashJobs.peek(job.id) ?? "";
+			size = Buffer.byteLength(text);
+		}
+	} else {
+		text = backgroundBashJobs.peek(job.id) ?? "";
+		size = Buffer.byteLength(text);
+	}
+	const pieces = text.split("\n").slice(-DETAIL_TAIL_LINES);
+	const lines = pieces.filter((line) => line !== "").map((line) => clean(line.replace(/\r$/, "")));
+	return { lines, size, read: Buffer.byteLength(text) };
+}
+
+const stopVerb = (row: TaskRow) => (row.kind === "wakeup" ? "cancel" : "stop");
+
+export function stopTask(row: TaskRow, owner?: string, source: "user" | "remote" = "user"): void {
+	if (row.kind === "agent") agentTasks()?.closeOwned(row.id, { owner, source });
+	else if (row.kind === "wakeup") wakeups.take(row.id, owner);
+	else if (row.foreground) row.foreground.stop();
+	else backgroundBashJobs.kill(row.id, { byUser: true });
+}
+
+function agentRow(task: AgentTask): TaskRow {
+	return {
+		id: task.id,
+		kind: "agent",
+		label: `${task.agent}: ${task.summary}`,
+		state: task.state === "stopped" ? "killed" : task.state,
+		statusText: task.status,
+		model: task.model,
+		outputFile: task.outputFile,
+		agentOutput: task.output,
+		startedAt: task.startedAt,
+		endedAt: task.endedAt,
+	};
+}
+
+function wakeupRow(wakeup: Wakeup): TaskRow {
+	return {
+		id: wakeup.id,
+		kind: "wakeup",
+		label: wakeup.prompt.replace(/\s+/g, " ").trim(),
+		state: "running",
+		statusText: `wakes ${wakeupClock(wakeup.dueAt)}`,
+		startedAt: wakeup.scheduledAt,
+	};
+}
+
+function agentRowById(id: string, owner: string | undefined): TaskRow | undefined {
+	const task = agentTasks()?.getOwned(id, owner);
+	return task && agentRow(task);
+}
+
+type Section = "shells" | "monitors" | "agents" | "wakeups" | "done";
+const SECTIONS: [Section, string][] = [
+	["shells", "Shells"],
+	["monitors", "Monitors"],
+	["agents", "Local agents"],
+	["wakeups", "Wake-ups"],
+	["done", "Done"],
+];
+
+function sectionOf(row: TaskRow): Section {
+	if (row.kind === "agent") return row.state === "running" ? "agents" : "done";
+	if (row.kind === "wakeup") return "wakeups";
+	return row.id.startsWith("s") ? "monitors" : "shells";
+}
+
+const hasDetail = (row: TaskRow) => sectionOf(row) !== "monitors" && sectionOf(row) !== "wakeups";
+
+const opensRun = (row: TaskRow) => row.kind === "agent" && agentTasks()?.open !== undefined;
+
+const rowKey = (row: TaskRow) => `${sectionOf(row)}:${row.id}`;
+
+export function visibleRows(owner: string | undefined): TaskRow[] {
+	const rows = [...foregroundRows(owner), ...taskRows(owner).filter((row) => row.state === "running")].sort(
+		(a, b) => b.startedAt - a.startedAt,
+	);
+	return SECTIONS.flatMap(([section]) => rows.filter((row) => sectionOf(row) === section));
+}
+
+function dialogRows(owner: string | undefined): TaskRow[] {
+	const done = (agentTasks()?.listDone?.(owner) ?? []).map(agentRow).sort((a, b) => b.startedAt - a.startedAt);
+	return [...visibleRows(owner), ...wakeups.list(owner).map(wakeupRow), ...done];
+}
+
+const META: Record<TaskState, string> = {
+	running: "running",
+	completed: "done",
+	failed: "error",
+	killed: "stopped",
+};
+
+const metaOf = (row: TaskRow) => {
+	if (row.foreground) return "foreground";
+	if (row.kind === "wakeup") return row.statusText ?? META[row.state];
+	if (row.kind !== "agent") return META[row.state];
+	return [row.model, row.statusText ?? META[row.state]].filter(Boolean).join(" · ");
+};
+
+type ListLine = { kind: "gap" } | { kind: "heading"; text: string } | { kind: "row"; row: TaskRow; index: number };
+
+export interface TasksDialogOptions {
+	notify?: (message: string) => void;
+	held?: () => string | undefined;
+	rows?: () => number;
+}
+
+export class TasksDialog implements Component {
+	private focusId: string | undefined;
+	private focusIndex = 0;
+	private focusLost = false;
+	private windowStart = 0;
+	private detail: string | undefined;
+	private direct = false;
+	private readonly theme: Theme;
+	private readonly owner: string | undefined;
+	private readonly done: () => void;
+	private readonly requestRender: () => void;
+	private readonly notify: (message: string) => void;
+	private readonly held: () => string | undefined;
+	private readonly terminalRows: (() => number) | undefined;
+
+	constructor(
+		theme: Theme,
+		owner: string | undefined,
+		done: () => void,
+		requestRender: () => void,
+		options: TasksDialogOptions = {},
+	) {
+		this.theme = theme;
+		this.owner = owner;
+		this.done = done;
+		this.requestRender = requestRender;
+		this.notify = options.notify ?? (() => {});
+		this.held = options.held ?? (() => undefined);
+		this.terminalRows = options.rows;
+		const rows = dialogRows(owner);
+		if (rows.length === 1 && hasDetail(rows[0]) && !opensRun(rows[0])) {
+			this.detail = rows[0].id;
+			this.direct = true;
+		}
+	}
+
+	invalidate(): void {}
+
+	private cursor(rows: TaskRow[]): number {
+		if (rows.length === 0) return 0;
+		const byId = this.focusId === undefined ? -1 : rows.findIndex((r) => rowKey(r) === this.focusId);
+		if (byId >= 0) {
+			this.focusIndex = byId;
+			return byId;
+		}
+		if (this.focusId !== undefined) this.focusLost = true;
+		this.focusIndex = Math.min(this.focusIndex, rows.length - 1);
+		this.focusId = rowKey(rows[this.focusIndex]);
+		return this.focusIndex;
+	}
+
+	private focus(rows: TaskRow[], index: number): void {
+		this.focusIndex = Math.max(0, Math.min(rows.length - 1, index));
+		const row = rows[this.focusIndex];
+		this.focusId = row && rowKey(row);
+		this.focusLost = false;
+	}
+
+	private leaveDetail(rows: TaskRow[]): void {
+		this.detail = undefined;
+		if (this.direct && rows.length <= 1) this.done();
+		this.direct = false;
+	}
+
+	private closeFromDetail(): void {
+		this.notify("Shell details dismissed");
+		this.done();
+	}
+
+	handleInput(data: string): void {
+		const kb = getKeybindings();
+		const rows = dialogRows(this.owner);
+		if (this.detail !== undefined) {
+			const row = rows.find((r) => r.id === this.detail) ?? agentRowById(this.detail, this.owner);
+			if (matchesKey(data, "left")) this.leaveDetail(rows);
+			else if (kb.matches(data, "tui.select.cancel") || data === "\r" || data === " ") {
+				this.closeFromDetail();
+				return;
+			} else if (data === "x" && row?.state === "running") stopTask(row, this.owner);
+			this.requestRender();
+			return;
+		}
+		if (kb.matches(data, "tui.select.cancel")) {
+			this.done();
+			return;
+		}
+		if (rows.length === 0) return;
+		const index = this.cursor(rows);
+		const current = rows[index];
+		if (kb.matches(data, "tui.select.up")) this.focus(rows, index - 1);
+		else if (kb.matches(data, "tui.select.down")) this.focus(rows, index + 1);
+		else if (data === "\r" && opensRun(current)) {
+			this.done();
+			void agentTasks()?.open?.(current.id, this.owner);
+			return;
+		} else if (data === "\r" && hasDetail(current)) this.detail = current.id;
+		else if (data === "X" && rows.some((row) => row.kind === "agent" && row.state === "running")) {
+			agentTasks()?.closeAll({ owner: this.owner, source: "user" });
+		} else if (data === "x") {
+			if (this.focusLost) this.focusLost = false;
+			else if (sectionOf(current) === "done") agentTasks()?.dismiss?.(current.id, this.owner);
+			else stopTask(current, this.owner);
+		}
+		this.requestRender();
+	}
+
+	render(width: number): string[] {
+		const rows = dialogRows(this.owner);
+		if (this.detail !== undefined) {
+			const row = rows.find((r) => r.id === this.detail) ?? agentRowById(this.detail, this.owner);
+			if (row) return this.frame(width, this.renderDetail(row, width - 2 * PAD), this.detailHints(row));
+			if (this.direct) {
+				this.detail = undefined;
+				this.direct = false;
+				this.done();
+				return [];
+			}
+			this.detail = undefined;
+		}
+		return this.frame(width, this.renderList(rows, width - 2 * PAD), this.listHints(rows));
+	}
+
+	private frame(width: number, body: string[], hints: string[]): string[] {
+		const t = this.theme;
+		const pad = " ".repeat(PAD);
+		const inner = Math.max(1, width - 2 * PAD);
+		const held = this.held();
+		const out = ["", BACKGROUND("─".repeat(Math.max(0, width)))];
+		for (const line of body) out.push(line === "" ? "" : truncateToWidth(`${pad}${line}`, width, "…"));
+		out.push("");
+		if (held) out.push(truncateToWidth(`${pad}${t.fg("dim", held)}`, width, "…"));
+		out.push(`${pad}${truncateToWidth(t.fg("dim", ITALIC(hints.join(" · "))), inner, "…")}`);
+		return out;
+	}
+
+	private titled(title: string, subtitle: string | undefined, content: string[]): string[] {
+		const t = this.theme;
+		const out = [t.bold(BACKGROUND(title))];
+		if (subtitle) out.push(t.fg("dim", subtitle));
+		out.push("", ...content);
+		return out;
+	}
+
+	private listHints(rows: TaskRow[]): string[] {
+		const current = rows.length > 0 ? rows[this.cursor(rows)] : undefined;
+		return [
+			"↑/↓ to select",
+			...(!current || hasDetail(current) ? ["Enter to view"] : []),
+			...(current ? [sectionOf(current) === "done" ? "x to dismiss" : `x to ${stopVerb(current)}`] : []),
+			...(rows.some((row) => row.kind === "agent" && row.state === "running") ? ["X to stop all agents"] : []),
+			"Esc to close",
+		];
+	}
+
+	private detailHints(row: TaskRow): string[] {
+		return [
+			"← to go back",
+			"Esc/Enter/Space to close",
+			...(row.state === "running" ? [`x to ${stopVerb(row)}`] : []),
+		];
+	}
+
+	private renderList(rows: TaskRow[], width: number): string[] {
+		const t = this.theme;
+		const count = (section: Section) => rows.filter((r) => sectionOf(r) === section).length;
+		const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
+		const shells = count("shells");
+		const agents = count("agents");
+		const subtitle = [
+			shells ? plural(shells, "active shell", "active shells") : "",
+			agents ? plural(agents, "active agent", "active agents") : "",
+		]
+			.filter(Boolean)
+			.join(" · ");
+		if (rows.length === 0) return this.titled("Background", subtitle, [t.fg("dim", "No tasks currently running")]);
+
+		const cursor = this.cursor(rows);
+		const lines: ListLine[] = [];
+		let index = 0;
+		for (const [section, title] of SECTIONS) {
+			const items = rows.filter((r) => sectionOf(r) === section);
+			if (items.length === 0) continue;
+			if (lines.length > 0) lines.push({ kind: "gap" });
+			if (section !== "shells" || agents + count("wakeups") + count("done") > 0) {
+				lines.push({ kind: "heading", text: `${t.bold(title)}${t.fg("dim", ` (${items.length})`)}` });
+			}
+			for (const row of items) lines.push({ kind: "row", row, index: index++ });
+		}
+
+		const labels = rows.map((r) => clean(r.label));
+		const labelWidth = Math.max(0, ...labels.map(visibleWidth));
+		const metaWidth = Math.max(0, ...rows.map((r) => visibleWidth(metaOf(r))));
+		const rowWidth = Math.max(1, width - 2);
+		const columns = 2 + labelWidth + META_GAP + metaWidth <= rowWidth;
+
+		const renderRow = (row: TaskRow, i: number) => {
+			const focused = i === cursor;
+			const pointer = focused ? SUGGESTION(POINTER) : " ";
+			const icon = row.state === "running" ? t.fg("dim", RUNNING_ICON) : " ";
+			const meta = metaOf(row);
+			const room = columns ? labelWidth : Math.max(1, rowWidth - 2 - META_GAP - visibleWidth(meta));
+			const label = truncateToWidth(labels[i], room, "…");
+			const gap = columns
+				? labelWidth + META_GAP - visibleWidth(label)
+				: rowWidth - 2 - visibleWidth(label) - visibleWidth(meta);
+			const shown = focused ? SUGGESTION(label) : label;
+			return `${pointer} ${icon} ${shown}${" ".repeat(Math.max(1, gap))}${t.fg("dim", meta)}`;
+		};
+		const renderLine = (line: ListLine) => {
+			if (line.kind === "gap") return "";
+			if (line.kind === "heading") return `  ${t.fg("dim", line.text)}`;
+			return renderRow(line.row, line.index);
+		};
+
+		const terminal = this.terminalRows?.();
+		const visible =
+			terminal === undefined
+				? lines.length
+				: Math.min(lines.length, Math.max(MIN_VISIBLE_LINES, Math.floor(terminal / 2)));
+		if (lines.length <= visible) return this.titled("Background", subtitle, lines.map(renderLine));
+		const size = Math.max(1, visible - 2);
+		const at = lines.findIndex((l) => l.kind === "row" && l.index === cursor);
+		if (at < this.windowStart) this.windowStart = at;
+		if (at >= this.windowStart + size) this.windowStart = at - size + 1;
+		this.windowStart = Math.max(0, Math.min(this.windowStart, lines.length - size));
+		const rowsIn = (from: number, to: number) => lines.slice(from, to).filter((l) => l.kind === "row").length;
+		const above = rowsIn(0, this.windowStart);
+		const below = rowsIn(this.windowStart + size, lines.length);
+		const content = [
+			...(above > 0 ? [`  ${t.fg("dim", `↑ ${above} more above`)}`] : []),
+			...lines.slice(this.windowStart, this.windowStart + size).map(renderLine),
+			...(below > 0 ? [`  ${t.fg("dim", `↓ ${below} more below`)}`] : []),
+		];
+		return this.titled("Background", subtitle, content);
+	}
+
+	private renderDetail(row: TaskRow, width: number): string[] {
+		const t = this.theme;
+		const monitor = row.job?.kind === "monitor";
+		const title = row.kind === "agent" ? "Agent details" : monitor ? "Monitor details" : "Shell details";
+		const code = row.job?.exit?.code;
+		const baseStatus = row.kind === "agent" && row.statusText ? row.statusText : row.state;
+		const statusText = `${baseStatus}${row.foreground ? " (foreground)" : ""}${code !== undefined && code !== null ? ` (exit code: ${code})` : ""}`;
+		const status =
+			row.state === "running"
+				? BACKGROUND(statusText)
+				: t.fg(row.state === "completed" ? "success" : "error", statusText);
+		const fields: [string, string][] = [
+			["Status:", status],
+			["Runtime:", formatTaskDuration((row.endedAt ?? Date.now()) - row.startedAt)],
+		];
+		if (row.kind === "agent" && row.model) {
+			fields.push(["Model:", clean(row.model)]);
+		}
+		const shell = row.job ?? row.foreground;
+		if (shell) {
+			const command = clean(shell.command);
+			fields.push([
+				monitor ? "Script:" : "Command:",
+				command.length > MAX_COMMAND_CHARS ? `${command.slice(0, MAX_COMMAND_CHARS)}…` : command,
+			]);
+		} else fields.push(["Task:", clean(row.label)]);
+
+		const labelWidth = Math.max(...fields.map(([name]) => visibleWidth(name)));
+		const valueWidth = Math.max(1, width - 2 - labelWidth - TABLE_GAP);
+		const table: string[] = [];
+		for (const [name, value] of fields) {
+			const wrapped = wrapTextWithAnsi(value, valueWidth);
+			const lead = `${t.bold(name)}${" ".repeat(labelWidth - visibleWidth(name) + TABLE_GAP)}`;
+			const indent = " ".repeat(labelWidth + TABLE_GAP);
+			for (const [i, part] of wrapped.entries()) table.push(`${i === 0 ? lead : indent}${part}`);
+		}
+		if (!shell && row.kind !== "agent") return this.titled(title, undefined, table);
+
+		const out = [...table, "", t.bold("Output:")];
+		const { lines, size, read } = outputTail(row);
+		if (lines.length === 0) {
+			out.push(t.fg("dim", "No output available"));
+			return this.titled(title, undefined, out);
+		}
+		const boxWidth = Math.max(6, width - 2);
+		const text = boxWidth - 4;
+		out.push(`╭${"─".repeat(boxWidth - 2)}╮`);
+		for (let i = 0; i < DETAIL_TAIL_LINES; i++) {
+			const line = truncateToWidth(lines[i] ?? "", text, "…");
+			out.push(`│ ${line}${" ".repeat(Math.max(0, text - visibleWidth(line)))} │`);
+		}
+		out.push(`╰${"─".repeat(boxWidth - 2)}╯`);
+		out.push(t.fg("dim", ITALIC(`Showing ${lines.length} lines${size > read ? ` of ${formatSize(size)}` : ""}`)));
+		return this.titled(title, undefined, out);
+	}
+}

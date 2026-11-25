@@ -1,0 +1,634 @@
+import { execFileSync } from "node:child_process";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { getAgentDir, type SettingsManager } from "@earendil-works/pi-coding-agent";
+import { createMcpToolName } from "@earendil-works/pi-mcp";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { denyRules, invalidDenyScopes } from "../ext/_shared/settings.ts";
+import permissions, { TRUST_CHANGED, trustStatusText } from "../ext/permissions/index.ts";
+import { deniedBy, GLOB_LEVEL_TIMEOUT_MS } from "../ext/permissions/rules.ts";
+
+const cwd = "/proj";
+const denied = (rules: string[], tool: string, input: Record<string, unknown>) =>
+	deniedBy(rules, tool, input, cwd) !== undefined;
+
+describe("denyRules: global and project lists", () => {
+	const sm = (global: unknown, project: unknown) =>
+		({
+			getGlobalSettings: () => ({ permissions: global }),
+			getProjectSettings: () => (project === undefined ? {} : { permissions: project }),
+		}) as unknown as SettingsManager;
+
+	it("combines both scopes, deduped", () => {
+		expect(denyRules(sm({ deny: ["Bash(rm *)"] }, { deny: ["Bash(rm *)", "WebFetch"] }))).toEqual([
+			"Bash(rm *)",
+			"WebFetch",
+		]);
+	});
+
+	it("an empty project list cannot drop the user's global rules", () => {
+		expect(denyRules(sm({ deny: ["Read(~/.ssh/**)"] }, { deny: [] }))).toEqual(["Read(~/.ssh/**)"]);
+	});
+
+	it("reads a lone rule as one rule, never as its letters, and skips what is not a rule", () => {
+		expect(denyRules(sm({ deny: "Bash(rm *)" }, { deny: ["WebFetch", 3] }))).toEqual(["Bash(rm *)", "WebFetch"]);
+	});
+
+	it("names each scope whose deny is not a list of rules", () => {
+		expect(invalidDenyScopes(sm({ deny: { rm: true } }, { deny: ["WebFetch"] }))).toEqual(["global"]);
+		expect(invalidDenyScopes(sm({ deny: "Bash(rm *)" }, undefined))).toEqual([]);
+	});
+
+	it("reads nothing but deny", () => {
+		expect(denyRules(sm({ allow: ["Bash(**)"], ask: ["Bash(**)"] }, undefined))).toEqual([]);
+	});
+});
+
+describe("deniedBy", () => {
+	it("matches bash through its respellings", () => {
+		const rules = ["Bash(rm *)"];
+		for (const command of ["rm", "rm -rf build", "ls && rm x", "env X=1 rm x", "nohup rm x", "/bin/rm x", "\\rm x"]) {
+			expect(denied(rules, "bash", { command })).toBe(true);
+		}
+		expect(denied(rules, "bash", { command: "sh -c 'rm -rf x'" })).toBe(true);
+		expect(denied(rules, "bash", { command: "rmdir x" })).toBe(false);
+	});
+
+	it("an Edit rule covers write, a Read rule covers grep/find/ls", () => {
+		expect(denied(["Edit(./x)"], "write", { path: "./x" })).toBe(true);
+		expect(denied(["Read(.env)"], "grep", { pattern: "k", path: ".env" })).toBe(true);
+		expect(denied(["Read(/proj/**)"], "ls", { path: "sub" })).toBe(true);
+		expect(denied(["Read(/proj)"], "grep", { pattern: "k" })).toBe(true);
+		expect(denied(["Write(./x)"], "edit", { path: "./x" })).toBe(false);
+	});
+
+	it("matches paths resolved against the working directory, and //abs", () => {
+		expect(denied(["Read(/proj/secrets/**)"], "read", { path: "secrets/a" })).toBe(true);
+		expect(denied(["Read(//etc/**)"], "read", { path: "/etc/hosts" })).toBe(true);
+	});
+
+	it("a relative path rule matches every spelling of the path it names", () => {
+		for (const path of [".env", "./.env", "/proj/.env", "sub/../.env"]) {
+			expect(denied(["Read(.env)"], "read", { path }), path).toBe(true);
+		}
+		expect(denied(["Read(.env)"], "bash", { command: "cat ./.env" })).toBe(true);
+		expect(denied(["Edit(src/**)"], "write", { path: "/proj/src/a.ts" })).toBe(true);
+		expect(denied(["Read(.env)"], "read", { path: "/proj/sub/.env" })).toBe(false);
+	});
+
+	it("names MCP tools either way, and fetches by domain", () => {
+		expect(denied(["mcp__github__*"], "mcp__github__get_me", {})).toBe(true);
+		expect(denied(["Mcp(github:get_me)"], "mcp__github__get_me", {})).toBe(true);
+		expect(denied(["mcp__github"], "mcp__gitlab__get_me", {})).toBe(false);
+		expect(denied(["WebFetch(domain:*.evil.com)"], "webfetch", { url: "https://a.evil.com/x" })).toBe(true);
+	});
+
+	it("names an MCP server or tool as written in mcp.json, the way pi names its tools", () => {
+		for (const [server, tool] of [
+			["dev-radius", "search"],
+			["my.server", "list"],
+			["a--b", "run"],
+			["github", "get-me"],
+		]) {
+			const name = createMcpToolName(server, tool);
+			for (const rule of [
+				`mcp__${server}`,
+				`mcp__${server}__*`,
+				`mcp__${server}__${tool}`,
+				`Mcp(${server}:*)`,
+				`Mcp(${server}:${tool})`,
+			]) {
+				expect(denied([rule], name, {}), `${rule} vs ${name}`).toBe(true);
+			}
+		}
+		expect(createMcpToolName("a--b", "run")).toBe("mcp__a__b__run");
+		expect(denied(["mcp__dev-radius__*"], "mcp__dev_radiusx__search", {})).toBe(false);
+		expect(denied(["Mcp(github:get-me)"], "mcp__github__get_mex", {})).toBe(false);
+	});
+
+	describe("a tool name pi shortened with a hash, past a 50-character server", () => {
+		const longServer = (length: number) => "s".repeat(length);
+		const hashedName = (server: string) => {
+			const name = createMcpToolName(server, "a_tool_long_enough_to_be_hashed");
+			expect(name).toHaveLength(64);
+			expect(name.startsWith(`mcp__${server.replace(/[^A-Za-z0-9_]/g, "_")}__`)).toBe(false);
+			return name;
+		};
+
+		it("is blocked by a bare Mcp rule", () => {
+			for (const length of [50, 55, 60]) {
+				expect(denied(["Mcp"], hashedName(longServer(length)), {}), `${length}`).toBe(true);
+			}
+		});
+
+		it("is blocked by every server-level rule for its server", () => {
+			for (const length of [50, 55, 60]) {
+				const server = longServer(length);
+				const name = hashedName(server);
+				for (const rule of [`mcp__${server}`, `mcp__${server}__*`, `Mcp(${server})`, `Mcp(${server}:*)`]) {
+					expect(denied([rule], name, {}), `${rule} vs ${name}`).toBe(true);
+				}
+			}
+		});
+
+		it("is blocked by a server rule written as in mcp.json, with - or .", () => {
+			for (const server of [`dev-${"r".repeat(46)}`, `my.${"s".repeat(52)}`]) {
+				const name = hashedName(server);
+				for (const rule of [`mcp__${server}`, `mcp__${server}__*`, `Mcp(${server})`, `Mcp(${server}:*)`]) {
+					expect(denied([rule], name, {}), `${rule} vs ${name}`).toBe(true);
+				}
+			}
+		});
+
+		it("is blocked by a rule for a server sharing its first 50 spelled characters, not by other servers", () => {
+			const name = hashedName(longServer(55));
+			expect(denied([`mcp__${longServer(50)}x`], name, {})).toBe(true);
+			expect(denied(["mcp__github", "Mcp(github:*)"], name, {})).toBe(false);
+			expect(denied([`mcp__x${longServer(54)}`], name, {})).toBe(false);
+		});
+
+		it("is not matched by an exact-tool rule or a tool glob", () => {
+			const server = longServer(55);
+			const name = hashedName(server);
+			expect(denied([`Mcp(${server}:a_tool_long_enough_to_be_hashed)`], name, {})).toBe(false);
+			expect(denied([`mcp__${server}__a_tool_*`], name, {})).toBe(false);
+		});
+
+		it("is blocked by a server glob whose `*` comes after the first 50 spelled characters", () => {
+			const name = hashedName(longServer(60));
+			expect(denied([`Mcp(${longServer(55)}*)`], name, {})).toBe(true);
+			expect(denied([`Mcp(${longServer(40)}*)`], name, {})).toBe(false);
+		});
+	});
+
+	it("a rule for an MCP server covers its tool with an empty name", () => {
+		for (const rule of ["mcp__srv", "mcp__srv__*", "Mcp"]) {
+			expect(denied([rule], "mcp__srv__", {}), rule).toBe(true);
+		}
+	});
+
+	it("reads `Mcp(server:tool)` around spaces", () => {
+		for (const rule of ["Mcp(srv: tool)", "Mcp( srv :*)", "Mcp( srv )"]) {
+			expect(denied([rule], "mcp__srv__tool", {}), rule).toBe(true);
+		}
+		expect(denied(["Mcp(srv: tool)"], "mcp__srv__other", {})).toBe(false);
+	});
+
+	it("leaves a longer command name alone, and ungoverned tools", () => {
+		expect(denied(["Bash(ls *)"], "bash", { command: "lsof" })).toBe(false);
+		expect(denied(["Bash(**)"], "task_stop", {})).toBe(false);
+	});
+
+	it("matches Subagent and Subagent(agentName) deny rules against the delegated agent name", () => {
+		expect(denied(["Subagent"], "subagent", { agent: "explorer" })).toBe(true);
+		expect(denied(["Subagent(explorer)"], "subagent", { agent: "explorer" })).toBe(true);
+		expect(denied(["Subagent(explorer)"], "subagent", { agent: "reviewer" })).toBe(false);
+		expect(denied(["Subagent(rev*)"], "subagent", { agent: "reviewer" })).toBe(true);
+	});
+
+	it("sees through exec wrappers and shell keywords, flag values included", () => {
+		const rules = ["Bash(rm *)"];
+		for (const command of [
+			"timeout 5 rm x",
+			"timeout -s KILL 5 rm x",
+			"sudo -u root rm x",
+			"doas rm x",
+			"nice -n 10 rm x",
+			"time rm x",
+			"command rm x",
+			"builtin exec rm x",
+			"stdbuf -oL rm x",
+			"strace -f -o out rm x",
+			"watch -n 5 rm x",
+			"env -u HOME rm x",
+			"eval 'rm x'",
+			"sudo timeout 5 nice rm x",
+			"if rm x; then echo; fi",
+			"for f in a; do rm $f; done",
+			"! rm x",
+		]) {
+			expect(denied(rules, "bash", { command }), command).toBe(true);
+		}
+	});
+
+	it("sees through quoting and command substitution", () => {
+		const rules = ["Bash(rm *)"];
+		for (const command of [
+			"'rm' x",
+			'"rm" x',
+			'r""m x',
+			"$'rm' x",
+			"r\\m x",
+			"echo $(rm x)",
+			"echo `rm x`",
+			"(rm x)",
+		]) {
+			expect(denied(rules, "bash", { command }), command).toBe(true);
+		}
+		expect(denied(["Bash(rm -rf *)"], "bash", { command: "rm '-rf' x" })).toBe(true);
+		expect(denied(rules, "bash", { command: "echo 'rmdir'" })).toBe(false);
+	});
+
+	it("a Read or Edit rule guards the paths a bash command names", () => {
+		const home = process.env.HOME ?? "";
+		const ssh = ["Read(~/.ssh/**)"];
+		for (const command of [
+			"cat ~/.ssh/id_rsa",
+			'cat "$HOME/.ssh/id_rsa"',
+			`cat \${HOME}/.ssh/id_rsa`,
+			`base64 < ${home}/.ssh/id_rsa`,
+			"ls ~/.ssh",
+			"cp ~/.ssh/id_rsa /tmp/k",
+			"tar czf out.tgz ~/.ssh",
+		]) {
+			expect(denied(ssh, "bash", { command }), command).toBe(true);
+		}
+		expect(denied(["Edit(/proj/.git/**)"], "bash", { command: "echo x > .git/config" })).toBe(true);
+		expect(denied(["Edit(//etc/**)"], "bash", { command: "dd if=x of=/etc/hosts" })).toBe(true);
+		expect(denied(ssh, "bash", { command: "cat ~/.sshx/key" })).toBe(false);
+		expect(denied(["Read(/proj/**)"], "bash", { command: "npm test" })).toBe(false);
+	});
+
+	it("preserves quoted and escaped whitespace in bash paths", () => {
+		const rules = ["Read(private dir/**)"];
+		for (const command of [
+			"cat 'private dir/key'",
+			'cat "private dir/key"',
+			"cat private\\ dir/key",
+			"cat 'private 'dir/key",
+			"cd 'private dir' && cat ./key",
+		]) {
+			expect(denied(rules, "bash", { command }), command).toBe(true);
+		}
+		expect(denied(["Edit(private file)"], "bash", { command: "echo x > 'private file'" })).toBe(true);
+		expect(denied(rules, "bash", { command: "cat 'public dir/key'" })).toBe(false);
+	});
+
+	it("reads a bash output redirect target as written, not read", () => {
+		const read = ["Read(**/.env*)"];
+		const write = ["Write(**/.env*)"];
+		const edit = ["Edit(**/.env*)"];
+		for (const command of [
+			"echo B=2 >> .env",
+			"printf 'B=2\\n' >>.env",
+			"cat >> .env <<'EOF'",
+			"timeout 5 echo B=2 >> .env",
+			"if true; then echo B=2 >> .env; fi",
+		]) {
+			expect(denied(read, "bash", { command }), command).toBe(false);
+			expect(denied(write, "bash", { command }), command).toBe(false);
+			expect(denied(edit, "bash", { command }), command).toBe(true);
+		}
+		for (const command of ["echo B=2 > .env", "echo B=2 2> .env"]) {
+			expect(denied(read, "bash", { command }), command).toBe(false);
+			expect(denied(write, "bash", { command }), command).toBe(true);
+			expect(denied(edit, "bash", { command }), command).toBe(true);
+		}
+		for (const command of [
+			"cat < .env",
+			"cat .env >> out",
+			"cat .env >> .env",
+			"echo x >> .env; cat .env",
+			"sed -i s/a/b/ .env",
+			"tee -a .env",
+		]) {
+			expect(denied(read, "bash", { command }), command).toBe(true);
+		}
+	});
+
+	it("expands a command's globs the way the shell will", () => {
+		const dir = mkdtempSync(join(tmpdir(), "deny-glob-"));
+		try {
+			mkdirSync(join(dir, ".ssh"));
+			writeFileSync(join(dir, ".ssh", "id_rsa"), "");
+			writeFileSync(join(dir, "secrets.txt"), "");
+			const ssh = [`Read(${dir}/.ssh/**)`];
+			for (const command of [`cat ${dir}/.ss*/id_rsa`, "cat .s?h/id_rsa", "cat .[s]sh/id_rsa", "cat .ssh/id_*"]) {
+				expect(deniedBy(ssh, "bash", { command }, dir), command).toBeDefined();
+			}
+			expect(deniedBy(ssh, "bash", { command: "cat */id_rsa" }, dir)).toBeUndefined();
+			expect(deniedBy(["Read(secrets.txt)"], "bash", { command: "cat secret*" }, dir)).toBeDefined();
+			expect(deniedBy(["Read(secrets.txt)"], "bash", { command: "cat other*" }, dir)).toBeUndefined();
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("expands braces the way the shell will", () => {
+		const ssh = ["Read(~/.ssh/**)"];
+		for (const command of [
+			"cat ~/.{ssh,x}/id_rsa",
+			"cat ~/.{s,t}sh/id_rsa",
+			"cat ~/.{x,{y,ssh}}/id_rsa",
+			"cat ~/.ssh/id_rsa{,.pub}",
+		]) {
+			expect(denied(ssh, "bash", { command }), command).toBe(true);
+		}
+		for (const command of ["{rm,-rf,x}", "r{m,} x", "sudo {rm,x}"]) {
+			expect(denied(["Bash(rm *)"], "bash", { command }), command).toBe(true);
+		}
+		for (const command of [`echo \${HOME}`, "find . -exec cat {} ;", "echo {rm}", "echo {rm,x"]) {
+			expect(denied(["Bash(rm *)"], "bash", { command }), command).toBe(false);
+		}
+		expect(denied(["Bash(rm *)"], "bash", { command: "for i in {1..100}; do echo $i; done" })).toBe(false);
+	});
+
+	it("expands brace sequences, and denies one too long to check", () => {
+		const rules = ["Bash(rm *f05*)"];
+		expect(denied(rules, "bash", { command: "rm f{01..10}" })).toBe(true);
+		expect(denied(rules, "bash", { command: "rm f{01..10..2}" })).toBe(true);
+		expect(denied(rules, "bash", { command: "rm f{02..10..2}" })).toBe(false);
+		expect(denied(["Bash(rm *c*)"], "bash", { command: "rm {a..e}" })).toBe(true);
+		expect(denied(["Bash(rm *)"], "bash", { command: "echo {1..20000}" })).toBe(true);
+	});
+
+	it("denies a glob too broad to check rather than half-checking it", () => {
+		const dir = mkdtempSync(join(tmpdir(), "deny-glob-wide-"));
+		try {
+			mkdirSync(join(dir, "many"));
+			for (let i = 0; i <= 10_000; i++) writeFileSync(join(dir, "many", `f${i}`), "");
+			expect(deniedBy(["Read(/nowhere/**)"], "bash", { command: "cat many/*/x" }, dir)).toBeDefined();
+			expect(deniedBy(["Read(/nowhere/**)"], "bash", { command: "cat many/f1" }, dir)).toBeUndefined();
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("denies a glob whose directory read never returns, once the read times out", () => {
+		const dir = mkdtempSync(join(tmpdir(), "deny-glob-hung-"));
+		const fifo = join(dir, "never-written");
+		try {
+			execFileSync("mkfifo", [fifo]);
+			writeFileSync(join(dir, "find"), `#!/bin/sh\nexec cat '${fifo}'\n`, { mode: 0o755 });
+			vi.stubEnv("PATH", `${dir}:${process.env.PATH}`);
+			const start = Date.now();
+			expect(deniedBy(["Read(/nowhere/**)"], "bash", { command: "ls /*/x" }, dir)).toBe("Read(/nowhere/**)");
+			expect(Date.now() - start).toBeGreaterThanOrEqual(GLOB_LEVEL_TIMEOUT_MS);
+			expect(Date.now() - start).toBeLessThan(GLOB_LEVEL_TIMEOUT_MS + 2000);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("skips a directory it cannot read, as the shell does", () => {
+		const dir = mkdtempSync(join(tmpdir(), "deny-glob-locked-"));
+		try {
+			mkdirSync(join(dir, "locked", "x"), { recursive: true });
+			mkdirSync(join(dir, "open", "x"), { recursive: true });
+			writeFileSync(join(dir, "open", "x", "key"), "");
+			chmodSync(join(dir, "locked"), 0);
+			expect(deniedBy([`Read(${dir}/open/**)`], "bash", { command: "cat */x/key" }, dir)).toBeDefined();
+			expect(deniedBy([`Read(${dir}/locked/**)`], "bash", { command: "cat */*/key" }, dir)).toBeUndefined();
+		} finally {
+			chmodSync(join(dir, "locked"), 0o700);
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("follows cd, and a bare file name that exists", () => {
+		const dir = mkdtempSync(join(tmpdir(), "deny-cd-"));
+		try {
+			mkdirSync(join(dir, "secret"));
+			writeFileSync(join(dir, "secret", "key"), "");
+			const rules = [`Read(${join(dir, "secret")}/**)`];
+			expect(deniedBy(rules, "bash", { command: "cd secret && cat key" }, dir)).toBeDefined();
+			expect(deniedBy(rules, "bash", { command: "cat secret" }, dir)).toBeDefined();
+			expect(deniedBy(rules, "bash", { command: "cat other" }, dir)).toBeUndefined();
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("a dir/** rule covers the directory itself, not a sibling prefix", () => {
+		expect(denied(["Read(~/.ssh/**)"], "ls", { path: "~/.ssh" })).toBe(true);
+		expect(denied(["Read(//**)"], "read", { path: "/etc/hosts" })).toBe(true);
+		expect(denied(["Read(/proj/sec/**)"], "read", { path: "secrets" })).toBe(false);
+	});
+});
+
+describe("the extension", () => {
+	let home: string;
+	let dir: string;
+	const saved: Record<string, string | undefined> = {};
+
+	beforeEach(() => {
+		home = mkdtempSync(join(tmpdir(), "bluclawd-deny-home-"));
+		dir = mkdtempSync(join(tmpdir(), "bluclawd-deny-cwd-"));
+		saved.HOME = process.env.HOME;
+		for (const key of Object.keys(process.env)) {
+			if (key.endsWith("_CODING_AGENT_DIR")) {
+				saved[key] = process.env[key];
+				delete process.env[key];
+			}
+		}
+		process.env.HOME = home;
+		mkdirSync(getAgentDir(), { recursive: true });
+	});
+	afterEach(() => {
+		for (const [key, value] of Object.entries(saved)) {
+			if (value === undefined) delete process.env[key];
+			else process.env[key] = value;
+		}
+		rmSync(home, { recursive: true, force: true });
+		rmSync(dir, { recursive: true, force: true });
+	});
+
+	const globalSettings = () => join(getAgentDir(), "settings.json");
+
+	function load(settings: Record<string, unknown>) {
+		writeFileSync(globalSettings(), JSON.stringify(settings));
+		const handlers: Record<string, (event: any, ctx: any) => Promise<any>> = {};
+		let shortcut: ((ctx: any) => Promise<void>) | undefined;
+		const status: Record<string, string | undefined> = {};
+		const notes: string[] = [];
+		const announced: unknown[] = [];
+		permissions({
+			on: (event: string, handler: any) => {
+				handlers[event] = handler;
+			},
+			registerShortcut: (_key: unknown, def: any) => {
+				shortcut = def.handler;
+			},
+			events: { emit: (name: string, data: unknown) => announced.push([name, data]) },
+		} as any);
+		const ctx = {
+			cwd: dir,
+			isProjectTrusted: () => true,
+			ui: {
+				setStatus: (key: string, text: string | undefined) => {
+					status[key] = text;
+				},
+				notify: (text: string) => notes.push(text),
+				theme: { fg: (_c: string, t: string) => t, getColorMode: () => "256" },
+			},
+		};
+		const call = (toolName: string, input: Record<string, unknown>) => handlers.tool_call({ toolName, input }, ctx);
+		return { handlers, ctx, call, status, notes, announced, press: () => shortcut?.(ctx) };
+	}
+
+	it("blocks a denied call with the rule, and runs everything else", async () => {
+		const { handlers, ctx, call } = load({ permissions: { deny: ["Bash(rm *)"] } });
+		await handlers.session_start({}, ctx);
+		expect(await call("bash", { command: "rm -rf x" })).toEqual({
+			block: true,
+			reason: "Blocked by permission rule (deny): Bash(rm *)",
+		});
+		expect(await call("bash", { command: "npm test" })).toBeUndefined();
+		expect(await call("write", { path: ".git/hooks/pre-commit" })).toBeUndefined();
+	});
+
+	it("warns when a settings file cannot be read, and keeps the other file's rules", async () => {
+		const { handlers, ctx, call, notes } = load({});
+		writeFileSync(globalSettings(), '{ "permissions": { "deny": ["Bash(rm *)"] ');
+		mkdirSync(join(dir, ".pi"));
+		writeFileSync(join(dir, ".pi", "settings.json"), JSON.stringify({ permissions: { deny: ["WebFetch"] } }));
+		await handlers.session_start({}, ctx);
+		expect(notes.some((n) => n.includes("deny rules") && n.includes(globalSettings()))).toBe(true);
+		expect((await call("webfetch", { url: "https://example.com" }))?.block).toBe(true);
+	});
+
+	it("blocks with a lone rule, and warns when deny is not rules at all", async () => {
+		const lone = load({ permissions: { deny: "Bash(rm *)" } });
+		await lone.handlers.session_start({}, lone.ctx);
+		expect((await lone.call("bash", { command: "rm x" }))?.block).toBe(true);
+		expect(lone.notes).toEqual([]);
+
+		const broken = load({ permissions: { deny: { rm: true } } });
+		await broken.handlers.session_start({}, broken.ctx);
+		expect(broken.notes).toEqual(["global permissions.deny is not a list of rules: none of it is in effect"]);
+	});
+
+	it("judges a monitor as bash, and a websearch batch query by query", async () => {
+		const { handlers, ctx, call } = load({ permissions: { deny: ["Bash(rm *)", "WebSearch(*secret*)"] } });
+		await handlers.session_start({}, ctx);
+		expect((await call("monitor", { command: "rm x", description: "d" }))?.block).toBe(true);
+		expect((await call("websearch", { queries: ["vitest", "the secret plan"] }))?.block).toBe(true);
+		expect(await call("websearch", { queries: ["vitest"] })).toBeUndefined();
+	});
+
+	it("judges a webfetch batch url by url, never by its query", async () => {
+		const { handlers, ctx, call } = load({
+			permissions: { deny: ["WebFetch(domain:evil.com)", "WebFetch(*secret*)"] },
+		});
+		await handlers.session_start({}, ctx);
+		expect((await call("webfetch", { urls: ["https://ok.dev", "https://evil.com/x"] }))?.block).toBe(true);
+		expect(await call("webfetch", { urls: ["https://ok.dev"], query: "the secret" })).toBeUndefined();
+	});
+
+	it("judges powershell as bash", async () => {
+		const { handlers, ctx, call } = load({ permissions: { deny: ["Read(**/.env*)"] } });
+		writeFileSync(join(dir, ".env"), "A=1\n");
+		await handlers.session_start({}, ctx);
+		expect((await call("powershell", { command: "Get-Content .env" }))?.block).toBe(true);
+		expect((await call("powershell", { command: "Select-String -Path .env -Pattern A" }))?.block).toBe(true);
+		expect(await call("powershell", { command: "Get-ChildItem" })).toBeUndefined();
+	});
+
+	it("judges a resource call on a server as that server's MCP tool", async () => {
+		const resourceTools = ["list_mcp_resources", "list_mcp_resource_templates", "read_mcp_resource"];
+		for (const rule of ["mcp__dev-radius", "mcp__dev-radius__*", "Mcp(dev-radius:*)"]) {
+			const { handlers, ctx, call } = load({ permissions: { deny: [rule] } });
+			await handlers.session_start({}, ctx);
+			for (const tool of resourceTools) {
+				expect(await call(tool, { server: " dev-radius ", uri: "x://a" }), `${rule} vs ${tool}`).toEqual({
+					block: true,
+					reason: `Blocked by permission rule (deny): ${rule}`,
+				});
+				expect(await call(tool, { server: "github", uri: "x://a" }), `${rule} vs ${tool}`).toBeUndefined();
+			}
+		}
+	});
+
+	it("blocks listing every server's resources while a rule denies a whole server", async () => {
+		for (const rule of [
+			"mcp__dev-radius",
+			"mcp__dev-radius__*",
+			"Mcp(dev-radius:*)",
+			"Mcp(dev-radius)",
+			"Mcp",
+			"mcp__*",
+			"mcp__a__b__*",
+			"Mcp(a--b:*)",
+		]) {
+			const { handlers, ctx, call } = load({ permissions: { deny: [rule] } });
+			await handlers.session_start({}, ctx);
+			for (const tool of ["list_mcp_resources", "list_mcp_resource_templates"]) {
+				for (const input of [{}, { server: "" }, { server: "  " }]) {
+					expect(await call(tool, input), `${rule} vs ${tool} ${JSON.stringify(input)}`).toEqual({
+						block: true,
+						reason: `Blocked by permission rule (deny): ${rule}. Pass \`server\` to list one server's resources.`,
+					});
+				}
+			}
+		}
+		for (const rule of ["Mcp(dev-radius:list_mcp_resources)", "mcp__srv__list_mcp_*"]) {
+			const listing = load({ permissions: { deny: [rule] } });
+			await listing.handlers.session_start({}, listing.ctx);
+			expect((await listing.call("list_mcp_resources", {}))?.block, rule).toBe(true);
+		}
+		const listing = load({ permissions: { deny: ["Mcp(dev-radius:list_mcp_resources)"] } });
+		await listing.handlers.session_start({}, listing.ctx);
+		expect(await listing.call("list_mcp_resource_templates", {})).toBeUndefined();
+		for (const [rule, server] of [
+			["mcp__srv__x*", "srv--xy"],
+			["Mcp(*:x*)", "a--xyz"],
+			["Mcp(*:delete_*)", "a--delete-me"],
+			["mcp__github__delete_*", "github--delete-x"],
+		]) {
+			const { handlers, ctx, call } = load({ permissions: { deny: [rule] } });
+			await handlers.session_start({}, ctx);
+			expect((await call("list_mcp_resources", { server }))?.block, `${rule} vs ${server}`).toBe(true);
+			expect(await call("list_mcp_resources", {}), rule).toBeUndefined();
+		}
+		for (const deny of [[], ["mcp__github__delete_repo"], ["Mcp(github:get_me)"], ["Bash(rm *)"]]) {
+			const { handlers, ctx, call } = load({ permissions: { deny } });
+			await handlers.session_start({}, ctx);
+			expect(await call("list_mcp_resources", {}), JSON.stringify(deny)).toBeUndefined();
+		}
+	});
+
+	it("leaves a Read-denied file's lines out of a folder grep", async () => {
+		const { handlers, ctx } = load({ permissions: { deny: ["Read(**/.env*)"] } });
+		mkdirSync(join(dir, "sub"));
+		await handlers.session_start({}, ctx);
+		const grep = (input: Record<string, unknown>, text: string, toolName = "grep") =>
+			handlers.tool_result({ toolName, input, content: [{ type: "text", text }], isError: false }, ctx);
+
+		expect(
+			await grep({ pattern: "A" }, ".env:1: A=1\nsub/.env-1- B=2\nsrc/a-1-b.ts:3: A\n\n[Some lines truncated]"),
+		).toEqual({ content: [{ type: "text", text: "src/a-1-b.ts:3: A\n\n[Some lines truncated]" }] });
+		expect(await grep({ pattern: "A", path: "sub" }, ".env.local:2: A=1\nx.ts:1: A")).toEqual({
+			content: [{ type: "text", text: "x.ts:1: A" }],
+		});
+		expect(await grep({ pattern: "A", path: "." }, ".env:1: A=1\n\n[100 matches limit reached]")).toEqual({
+			content: [{ type: "text", text: "No matches found" }],
+		});
+		expect(await grep({ pattern: "A" }, "src/a.ts:3: A")).toBeUndefined();
+		expect(await grep({ pattern: "A" }, ".env:1: A=1", "read")).toBeUndefined();
+	});
+
+	it("shows defaultProjectTrust and cycles it with Alt+M, saved to global settings and announced", async () => {
+		const { handlers, ctx, status, press, notes, announced } = load({ defaultProjectTrust: "always" });
+		await handlers.session_start({}, ctx);
+		expect(status["1-mode"]).toBe("⏵⏵ always (alt+m to cycle)");
+		await press();
+		expect(JSON.parse(readFileSync(globalSettings(), "utf8")).defaultProjectTrust).toBe("ask");
+		expect(status["1-mode"]).toBe("⏸ ask (alt+m to cycle)");
+		expect(notes.at(-1)).toContain("ask");
+		await press();
+		expect(status["1-mode"]).toBe("✕ never (alt+m to cycle)");
+		await press();
+		expect(JSON.parse(readFileSync(globalSettings(), "utf8")).defaultProjectTrust).toBe("always");
+		expect(announced).toEqual([
+			[TRUST_CHANGED, "ask"],
+			[TRUST_CHANGED, "never"],
+			[TRUST_CHANGED, "always"],
+		]);
+	});
+
+	it("paints always amber in truecolor", () => {
+		const ctx = { ui: { theme: { fg: (_c: string, t: string) => t, getColorMode: () => "truecolor" } } } as any;
+		expect(trustStatusText(ctx, "always")).toContain("\x1b[38;2;255;193;7m⏵⏵ always");
+	});
+});

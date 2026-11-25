@@ -1,0 +1,182 @@
+import { readFileSync } from "node:fs";
+import { describe, expect, it } from "vitest";
+
+interface ThemeFile {
+	name: string;
+	appearance?: string;
+	vars: Record<string, string | number>;
+	colors: Record<string, string | number>;
+	export: Record<string, string | number>;
+}
+
+function loadWithoutPiLoader(name: string) {
+	const raw = readFileSync(`./themes/${name}.json`, "utf8");
+	const parsed = JSON.parse(raw) as ThemeFile;
+	const resolveVars = (value: string | number, seen = new Set<string>()): string | number => {
+		if (typeof value === "number" || value === "" || value.startsWith("#")) return value;
+		if (seen.has(value)) throw new Error(`cyclic var reference: ${value}`);
+		seen.add(value);
+		const next = parsed.vars[value];
+		if (next === undefined) throw new Error(`unresolved var: ${value}`);
+		return resolveVars(next, seen);
+	};
+	const color = (token: string) => resolveVars(parsed.colors[token] ?? `<missing ${token}>`);
+	return { raw, parsed, color, resolveVars };
+}
+
+const { raw, parsed, color } = loadWithoutPiLoader("bluclawd");
+
+describe("bluclawd theme", () => {
+	it("declares the name pi resolves it by", () => {
+		expect(parsed.name).toBe("bluclawd");
+	});
+
+	it("uses bluclawd's dark values for the shared semantic colours", () => {
+		expect(color("text")).toBe("#ffffff");
+		expect(color("muted")).toBe("#999999");
+		expect(color("dim")).toBe("#505050");
+		expect(color("border")).toBe("#888888");
+		expect(color("success")).toBe("#4eba65");
+		expect(color("error")).toBe("#ff6b80");
+		expect(color("warning")).toBe("#ffc107");
+		expect(color("bashMode")).toBe("#fd5db1");
+		expect(color("mdCode")).toBe("#b1b9f9");
+	});
+
+	it("keeps the bluclawd mascot cyan as the accent", () => {
+		expect(color("accent")).toBe("#00c0e8");
+	});
+
+	it("colours diff text with CC's word-level diff colours", () => {
+		expect(color("toolDiffAdded")).toBe("#38a660");
+		expect(color("toolDiffRemoved")).toBe("#b3596b");
+	});
+
+	it("ramps thinking levels over CC's rainbow, ending on its ultra purple", () => {
+		expect(color("thinkingOff")).toBe("#505050");
+		expect(color("thinkingMinimal")).toBe("#82aadc");
+		expect(color("thinkingLow")).toBe("#91c882");
+		expect(color("thinkingMedium")).toBe("#fac35f");
+		expect(color("thinkingHigh")).toBe("#f58b57");
+		expect(color("thinkingXhigh")).toBe("#eb5f57");
+		expect(color("thinkingMax")).toBe("#af87ff");
+	});
+
+	it("draws syntax highlighting from CC's own subagent palette", () => {
+		expect(color("syntaxKeyword")).toBe("#827dbd");
+		expect(color("syntaxFunction")).toBe("#6a9bcc");
+		expect(color("syntaxType")).toBe("#ca8a04");
+		expect(color("syntaxOperator")).toBe("#0891b2");
+		expect(color("syntaxNumber")).toBe("#d77757");
+		expect(color("syntaxString")).toBe("#4eba65");
+	});
+
+	it("uses CC's backgrounds", () => {
+		expect(color("selectedBg")).toBe("#264f78");
+		expect(color("userMessageBg")).toBe("#373737");
+		expect(color("customMessageBg")).toBe("#374146");
+	});
+
+	it("has no Catppuccin values left anywhere in the file", () => {
+		for (const leftover of ["cba6f7", "a6e3a1", "fab387", "89b4fa", "cdd6f4", "1e1e2e", "11111b", "f5c2e7"]) {
+			expect(raw).not.toContain(leftover);
+		}
+	});
+});
+
+describe("bluclawd theme variants", () => {
+	const variants = [
+		"bluclawd-light",
+		"bluclawd-dark-daltonized",
+		"bluclawd-light-daltonized",
+		"bluclawd-dark-ansi",
+		"bluclawd-light-ansi",
+	];
+	const tokens = Object.keys(parsed.colors).sort();
+	const exportKeys = Object.keys(parsed.export).sort();
+
+	it.each(variants)("%s defines every token the dark theme defines, all resolvable", (name) => {
+		const variant = loadWithoutPiLoader(name);
+		expect(variant.parsed.name).toBe(name);
+		expect(Object.keys(variant.parsed.colors).sort()).toEqual(tokens);
+		expect(Object.keys(variant.parsed.export).sort()).toEqual(exportKeys);
+		for (const token of tokens) expect(() => variant.color(token)).not.toThrow();
+		for (const key of exportKeys) expect(() => variant.resolveVars(variant.parsed.export[key])).not.toThrow();
+	});
+
+	it.each(["bluclawd", ...variants])("%s draws tool calls on the terminal's background, not a panel", (name) => {
+		const { color } = loadWithoutPiLoader(name);
+		for (const token of ["toolPendingBg", "toolSuccessBg", "toolErrorBg"]) expect(color(token), token).toBe("");
+	});
+
+	it("declares each theme's appearance, so the Auto pair resolves", () => {
+		expect(parsed.appearance).toBe("dark");
+		expect(loadWithoutPiLoader("bluclawd-light").parsed.appearance).toBe("light");
+		expect(loadWithoutPiLoader("bluclawd-dark-daltonized").parsed.appearance).toBe("dark");
+		expect(loadWithoutPiLoader("bluclawd-light-daltonized").parsed.appearance).toBe("light");
+		expect(loadWithoutPiLoader("bluclawd-dark-ansi").parsed.appearance).toBe("dark");
+		expect(loadWithoutPiLoader("bluclawd-light-ansi").parsed.appearance).toBe("light");
+	});
+
+	it.each([
+		["bluclawd", "#b1b9f9", 12, "#ffffff"],
+		["bluclawd-light", "#5769f7", 4, "#000000"],
+		["bluclawd-dark-daltonized", "#99ccff", 12, "#ffffff"],
+		["bluclawd-light-daltonized", "#3366ff", 4, "#000000"],
+		["bluclawd-dark-ansi", 12, 12, 15],
+		["bluclawd-light-ansi", 4, 4, 0],
+	])("%s draws markdown as bluclawd's renderer does", (name, permission, link, text) => {
+		const { color } = loadWithoutPiLoader(name);
+		expect(color("mdCode")).toBe(permission);
+		expect(color("mdCodeBlock")).toBe(permission);
+		expect(color("mdLink")).toBe(link);
+		expect(color("mdHeading")).toBe(text);
+		for (const token of ["mdQuote", "mdListBullet", "mdHr"]) expect(color(token), token).toBe(text);
+	});
+
+	it("light mode uses CC's light values", () => {
+		const { color } = loadWithoutPiLoader("bluclawd-light");
+		expect(color("text")).toBe("#000000");
+		expect(color("muted")).toBe("#666666");
+		expect(color("success")).toBe("#2c7a39");
+		expect(color("error")).toBe("#ab2b3f");
+		expect(color("mdCode")).toBe("#5769f7");
+		expect(color("userMessageBg")).toBe("#f0f0f0");
+		expect(color("toolDiffAdded")).toBe("#2f9d44");
+		expect(color("thinkingMax")).toBe("#8700ff");
+	});
+
+	it("colorblind-friendly modes trade green for blue", () => {
+		const dark = loadWithoutPiLoader("bluclawd-dark-daltonized").color;
+		expect(dark("success")).toBe("#3399ff");
+		expect(dark("error")).toBe("#ff6666");
+		expect(dark("toolDiffAdded")).toBe("#0077b3");
+		const light = loadWithoutPiLoader("bluclawd-light-daltonized").color;
+		expect(light("success")).toBe("#006699");
+		expect(light("error")).toBe("#cc0000");
+		expect(light("toolDiffAdded")).toBe("#3366cc");
+	});
+
+	it("ANSI modes use only the terminal's 16 palette colours or its default", () => {
+		for (const name of ["bluclawd-dark-ansi", "bluclawd-light-ansi"]) {
+			const variant = loadWithoutPiLoader(name);
+			for (const token of tokens) {
+				const value = variant.color(token);
+				if (value === "") continue;
+				expect(typeof value, `${name} ${token}`).toBe("number");
+				expect(value as number).toBeLessThan(16);
+			}
+		}
+		expect(loadWithoutPiLoader("bluclawd-dark-ansi").color("text")).toBe(15);
+		expect(loadWithoutPiLoader("bluclawd-dark-ansi").color("success")).toBe(10);
+		expect(loadWithoutPiLoader("bluclawd-light-ansi").color("text")).toBe(0);
+		expect(loadWithoutPiLoader("bluclawd-light-ansi").color("success")).toBe(2);
+	});
+
+	it.each(variants)("%s has no Catppuccin values", (name) => {
+		const { raw } = loadWithoutPiLoader(name);
+		for (const leftover of ["cba6f7", "a6e3a1", "fab387", "89b4fa", "cdd6f4", "1e1e2e", "11111b", "f5c2e7"]) {
+			expect(raw).not.toContain(leftover);
+		}
+	});
+});

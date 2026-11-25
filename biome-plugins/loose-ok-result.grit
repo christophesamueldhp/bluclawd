@@ -1,0 +1,7 @@
+TsPropertySignatureTypeMember() as $member where {
+	$member <: r"(?:readonly\s+)?ok\s*:\s*boolean\b.*",
+	register_diagnostic(
+		span=$member,
+		message="Type an ok-result as a union on ok, { ok: true; <value> } | { ok: false; error }, so callers narrow on ok instead of re-checking the value (#86)."
+	)
+}

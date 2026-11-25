@@ -1,0 +1,865 @@
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { contentText, fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai";
+import {
+	createAgentSession,
+	DefaultResourceLoader,
+	type ExtensionFactory,
+	getAgentDir,
+	ModelRuntime,
+	SessionManager,
+	SettingsManager,
+} from "@earendil-works/pi-coding-agent";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { OrchestratorClient } from "../daemon/orchestrator-client.ts";
+import { PANE_ENV, Tmux } from "../daemon/tmux.ts";
+import { type BackgroundExec, backgroundBashJobs } from "../ext/background-bash/background-bash.ts";
+import { detachableExec, runningForegroundShells } from "../ext/background-bash/foreground-shells.ts";
+import { projectTrust, TRUST_CHANGED } from "../ext/permissions/index.ts";
+import remoteFactory, { USAGE } from "../ext/remote/index.ts";
+import {
+	applyPaneMessage,
+	BUSY_NOTICE,
+	buildReport,
+	paneTasks,
+	submitCommand,
+	watchTasks,
+} from "../ext/remote/report.ts";
+import { waitFor } from "./helpers/wait-for.ts";
+
+const model = (provider: string, id: string, name?: string, reasoning = false) => ({ provider, id, name, reasoning });
+const ask = () => "ask" as const;
+
+const usage = (input: number, output: number, cacheRead: number, cacheWrite: number, total: number) => ({
+	input,
+	output,
+	cacheRead,
+	cacheWrite,
+	cost: { total },
+});
+
+function fakes(
+	options: {
+		current?: ReturnType<typeof model>;
+		available?: ReturnType<typeof model>[];
+		idle?: boolean;
+		commands?: string[];
+		cwd?: string;
+	} = {},
+) {
+	const available = options.available ?? [];
+	const ctx = {
+		model: options.current,
+		modelRegistry: {
+			getAvailable: () => available,
+			find: (provider: string, id: string) => available.find((m) => m.provider === provider && m.id === id),
+		},
+		getContextUsage: () => ({ tokens: 12_000, contextWindow: 200_000, percent: 6 }),
+		sessionManager: {
+			getSessionId: () => "report-session",
+			getSessionFile: (): string | undefined => "/s/report.jsonl",
+			getEntries: () => [
+				{ type: "message", message: { role: "user", content: "hi" } },
+				{ type: "message", message: { role: "assistant", usage: usage(100, 20, 1000, 200, 0.5) } },
+				{ type: "model_change" },
+				{ type: "message", message: { role: "assistant", usage: usage(50, 5, 0, 0, 0.25) } },
+				{ type: "usage", usage: usage(10, 2, 0, 0, 0.125) },
+				{ type: "message", message: { role: "toolResult", usage: usage(5, 1, 0, 0, 0.0625) } },
+				{ type: "message", message: { role: "toolResult" } },
+				{ type: "compaction", usage: usage(3, 1, 0, 30, 0.03125) },
+				{ type: "compaction" },
+				{ type: "branch_summary", usage: usage(2, 1, 0, 0, 0.015625) },
+			],
+		},
+		isIdle: () => options.idle ?? true,
+		hasPendingMessages: () => false,
+		compact: vi.fn(),
+		cwd: options.cwd ?? "/proj",
+		isProjectTrusted: () => true,
+		ui: {
+			setStatus: vi.fn(),
+			notify: vi.fn(),
+			theme: { fg: (_color: string, text: string) => text, getColorMode: () => "256" },
+			setWidget: (_key: string, factory?: (tui: unknown) => unknown) =>
+				factory?.({ hasOverlay: () => false, getFocusedComponent: () => ({ getText: () => "" }) }),
+		},
+	};
+	const pi = {
+		getThinkingLevel: vi.fn(() => "high"),
+		setThinkingLevel: vi.fn(),
+		events: { emit: vi.fn() },
+		setModel: vi.fn(async () => true),
+		sendUserMessage: vi.fn(),
+		getCommands: () => (options.commands ?? ["remote-control"]).map((name) => ({ name, source: "extension" })),
+	};
+	return { ctx, pi };
+}
+
+describe("buildReport", () => {
+	it("reports the model, the models to pick from, thinking, context and session usage", () => {
+		const opus = model("anthropic", "claude-opus", "Opus", true);
+		const { ctx, pi } = fakes({
+			current: opus,
+			available: [
+				model("openai", "gpt-5", "GPT-5"),
+				model("anthropic", "claude-sonnet", "Sonnet"),
+				opus,
+				model("anthropic", "claude-sonnet", "Sonnet"),
+			],
+		});
+		const { commands, ...report } = buildReport(ctx as never, pi as never, ask);
+		expect(commands?.length).toBeGreaterThan(0);
+		expect(report).toEqual({
+			model: { provider: "anthropic", id: "claude-opus", name: "Opus" },
+			models: [
+				{ provider: "anthropic", id: "claude-opus", name: "Opus" },
+				{ provider: "anthropic", id: "claude-sonnet", name: "Sonnet" },
+				{ provider: "openai", id: "gpt-5", name: "GPT-5" },
+			],
+			thinkingLevel: "high",
+			thinkingLevels: ["off", "minimal", "low", "medium", "high"],
+			context: { tokens: 12_000, contextWindow: 200_000, percent: 6 },
+			usage: { input: 170, output: 30, cacheRead: 1000, cacheWrite: 230, cost: 0.984375 },
+			trust: "ask",
+			tasks: [],
+		});
+	});
+
+	it("offers only the scoped models when pi has a scope (enabledModels, --models), as its /model does", () => {
+		const opus = model("anthropic", "claude-opus", "Opus", true);
+		const sonnet = model("anthropic", "claude-sonnet", "Sonnet");
+		const gpt = model("openai", "gpt-5", "GPT-5");
+		const { ctx, pi } = fakes({ current: opus, available: [opus, sonnet, gpt] });
+		const scopedCtx = { ...ctx, scopedModels: [{ model: gpt }, { model: sonnet, thinkingLevel: "low" }] };
+		expect(buildReport(scopedCtx as never, pi as never, ask).models).toEqual([
+			{ provider: "anthropic", id: "claude-opus", name: "Opus" },
+			{ provider: "anthropic", id: "claude-sonnet", name: "Sonnet" },
+			{ provider: "openai", id: "gpt-5", name: "GPT-5" },
+		]);
+		const unscoped = { ...ctx, scopedModels: [] };
+		expect(buildReport(unscoped as never, pi as never, ask).models).toHaveLength(3);
+		const narrow = { ...ctx, current: undefined, model: sonnet, scopedModels: [{ model: sonnet }] };
+		expect(buildReport(narrow as never, pi as never, ask).models).toEqual([
+			{ provider: "anthropic", id: "claude-sonnet", name: "Sonnet" },
+		]);
+	});
+
+	it("lists the current model even when it is not available, and no thinking for a model without it", () => {
+		const { ctx, pi } = fakes({ current: model("local", "llama") });
+		const report = buildReport(ctx as never, pi as never, ask);
+		expect(report.models).toEqual([{ provider: "local", id: "llama" }]);
+		expect(report.thinkingLevel).toBeUndefined();
+		expect(report.thinkingLevels).toBeUndefined();
+	});
+
+	it("offers the thinking levels pi offers for the model: xhigh and max only where it maps them", () => {
+		const gpt = { ...model("openai", "gpt-5", "GPT-5", true), thinkingLevelMap: { minimal: null, xhigh: "xhigh" } };
+		const { ctx, pi } = fakes({ current: gpt });
+		expect(buildReport(ctx as never, pi as never, ask).thinkingLevels).toEqual([
+			"off",
+			"low",
+			"medium",
+			"high",
+			"xhigh",
+		]);
+	});
+
+	it("lists only the slash commands a phone may run: pi's compact, new and reload, then templates and skills", () => {
+		const { ctx, pi } = fakes();
+		const commands = [
+			{ name: "remote-control", source: "extension", description: "Control your sessions from your phone" },
+			{ name: "agent-view", source: "extension" },
+			{ name: "tasks", source: "extension", description: "View and manage everything running in the background" },
+			{ name: "review", source: "prompt", description: `  ${"Review the diff. ".repeat(20)}` },
+			{ name: "skill:pdf", source: "skill", description: "" },
+		];
+		const report = buildReport(ctx as never, { ...pi, getCommands: () => commands } as never, ask);
+		const names = report.commands!.map((c) => c.name);
+		expect(names).toEqual(["new", "compact", "reload", "review", "skill:pdf"]);
+		expect(report.commands!.slice(-2)).toEqual([
+			{ name: "review", description: `${"Review the diff. ".repeat(20).trim().slice(0, 99)}…`, source: "prompt" },
+			{ name: "skill:pdf", source: "skill" },
+		]);
+		expect(report.commands!.find((c) => c.name === "compact")).toEqual({
+			name: "compact",
+			description: "Manually compact the session context",
+			source: "builtin",
+		});
+	});
+
+	it("has no model before one is selected", () => {
+		const { ctx, pi } = fakes();
+		const report = buildReport(ctx as never, pi as never, ask);
+		expect(report.model).toBeUndefined();
+		expect(report.models).toEqual([]);
+	});
+});
+
+describe("applyPaneMessage", () => {
+	it("switches to a model the registry knows, and ignores one it does not", () => {
+		const sonnet = model("anthropic", "claude-sonnet", "Sonnet");
+		const { ctx, pi } = fakes({ available: [sonnet] });
+		applyPaneMessage({ type: "set_model", provider: "anthropic", id: "claude-sonnet" }, ctx as never, pi as never);
+		expect(pi.setModel).toHaveBeenCalledWith(sonnet);
+		applyPaneMessage({ type: "set_model", provider: "anthropic", id: "nope" }, ctx as never, pi as never);
+		expect(pi.setModel).toHaveBeenCalledTimes(1);
+	});
+
+	it("ignores messages it does not handle", () => {
+		const { ctx, pi } = fakes();
+		applyPaneMessage({ type: "rename", name: "x" }, ctx as never, pi as never);
+		expect(pi.setModel).not.toHaveBeenCalled();
+	});
+});
+
+function tempHome(): { settings: () => string; dir: () => string } {
+	let home = "";
+	beforeEach(() => {
+		home = mkdtempSync(join(tmpdir(), "bluclawd-remote-home-"));
+		for (const key of Object.keys(process.env)) if (key.endsWith("_CODING_AGENT_DIR")) vi.stubEnv(key, undefined);
+		vi.stubEnv("HOME", home);
+		expect(getAgentDir().startsWith(home)).toBe(true);
+		mkdirSync(getAgentDir(), { recursive: true });
+	});
+	afterEach(() => rmSync(home, { recursive: true, force: true }));
+	return { settings: () => join(getAgentDir(), "settings.json"), dir: () => home };
+}
+
+describe("thinking level and trust mode from the phone", () => {
+	const home = tempHome();
+	const opus = model("anthropic", "claude-opus", "Opus", true);
+
+	it("sets a thinking level pi offers for the model, which pi reports", () => {
+		const { ctx, pi } = fakes({ current: opus });
+		const reportAgain = vi.fn();
+		applyPaneMessage({ type: "set_thinking", level: "low" }, ctx as never, pi as never, reportAgain);
+		expect(pi.setThinkingLevel).toHaveBeenCalledWith("low");
+		expect(reportAgain).not.toHaveBeenCalled();
+	});
+
+	it("reports again, changing nothing, for a level the model lacks, its level already, or a model without thinking", () => {
+		for (const [current, level] of [
+			[opus, "xhigh"],
+			[opus, "high"],
+			[opus, "turbo"],
+			[model("local", "llama"), "low"],
+		] as const) {
+			const { ctx, pi } = fakes({ current });
+			const reportAgain = vi.fn();
+			applyPaneMessage({ type: "set_thinking", level }, ctx as never, pi as never, reportAgain);
+			expect(pi.setThinkingLevel).not.toHaveBeenCalled();
+			expect(reportAgain).toHaveBeenCalledTimes(1);
+		}
+	});
+
+	it("sets the trust mode as Alt+M does: saved to global settings, the badge redrawn, and announced", async () => {
+		writeFileSync(home.settings(), JSON.stringify({ defaultProjectTrust: "always" }));
+		const { ctx, pi } = fakes({ cwd: home.dir() });
+		applyPaneMessage({ type: "set_trust", trust: "never" }, ctx as never, pi as never);
+		await waitFor(() => expect(pi.events.emit).toHaveBeenCalledWith(TRUST_CHANGED, "never"));
+		expect(JSON.parse(readFileSync(home.settings(), "utf8")).defaultProjectTrust).toBe("never");
+		expect(ctx.ui.setStatus).toHaveBeenCalledWith("1-mode", "✕ never (alt+m to cycle)");
+		expect(projectTrust(ctx as never)).toBe("never");
+	});
+
+	it("ignores a trust mode Alt+M does not cycle through", () => {
+		writeFileSync(home.settings(), JSON.stringify({ defaultProjectTrust: "ask" }));
+		const { ctx, pi } = fakes({ cwd: home.dir() });
+		applyPaneMessage({ type: "set_trust", trust: "sometimes" as never }, ctx as never, pi as never);
+		expect(pi.events.emit).not.toHaveBeenCalled();
+		expect(JSON.parse(readFileSync(home.settings(), "utf8")).defaultProjectTrust).toBe("ask");
+	});
+
+	it("reports the trust mode in pi's settings", () => {
+		writeFileSync(home.settings(), JSON.stringify({ defaultProjectTrust: "never" }));
+		const { ctx, pi } = fakes({ cwd: home.dir() });
+		expect(buildReport(ctx as never, pi as never).trust).toBe("never");
+	});
+
+	it("reports the trust mode at session start, and the mode set after it from then on", async () => {
+		const sent = vi.spyOn(OrchestratorClient.prototype, "remoteReport").mockResolvedValue();
+		const handlers = new Map<string, (event: unknown, ctx?: unknown) => void>();
+		const on = (name: string, handler: (event: unknown, ctx?: unknown) => void) => handlers.set(name, handler);
+		process.env[PANE_ENV] = "pi-report";
+		try {
+			remoteFactory({ ...fakes().pi, on, events: { on }, registerCommand: () => {} } as never);
+		} finally {
+			delete process.env[PANE_ENV];
+		}
+		writeFileSync(home.settings(), JSON.stringify({ defaultProjectTrust: "always" }));
+		const { ctx } = fakes({ cwd: home.dir() });
+		handlers.get("session_start")?.({ type: "session_start", reason: "startup" }, { ...ctx, mode: "tui" });
+		handlers.get("bluclawd:remote-watched")?.(true);
+		writeFileSync(home.settings(), JSON.stringify({ defaultProjectTrust: "never" }));
+		handlers.get(TRUST_CHANGED)?.("never");
+		await waitFor(() => expect(sent).toHaveBeenCalledTimes(3));
+		expect(sent.mock.calls.map(([, report]) => report.trust)).toEqual(["always", "always", "never"]);
+		sent.mockRestore();
+	});
+});
+
+describe("slash commands from the phone", () => {
+	const setup = (options: { idle?: boolean; draft?: string; overlay?: boolean; focused?: unknown } = {}) => {
+		const editor = { text: options.draft ?? "" };
+		const ctx = {
+			isIdle: () => options.idle ?? true,
+			ui: {
+				getEditorText: () => editor.text,
+				setEditorText: vi.fn((text: string) => {
+					editor.text = text;
+				}),
+			},
+		};
+		const tui = {
+			hasOverlay: () => options.overlay ?? false,
+			getFocusedComponent: () => ("focused" in options ? options.focused : { getText: () => editor.text }),
+		};
+		return { ctx, tui, editor, enter: vi.fn() };
+	};
+
+	it("puts the command in the empty prompt and presses Enter there, as typed on the Mac", () => {
+		const { ctx, tui, editor, enter } = setup();
+		expect(submitCommand("/compact keep the API notes", ctx as never, tui as never, enter)).toBeUndefined();
+		expect(editor.text).toBe("/compact keep the API notes");
+		expect(enter).toHaveBeenCalledTimes(1);
+	});
+
+	it("refuses, saying why, while a turn runs, a dialog has the keyboard, or the prompt holds a draft", () => {
+		const cases: Array<[Parameters<typeof setup>[0], string]> = [
+			[{ idle: false }, "busy"],
+			[{ overlay: true }, "dialog"],
+			[{ focused: { handleInput: () => {} } }, "dialog"],
+			[{ draft: "half a thought" }, "draft"],
+		];
+		for (const [options, reason] of cases) {
+			const { ctx, tui, editor, enter } = setup(options);
+			const before = editor.text;
+			expect(submitCommand("/model", ctx as never, tui as never, enter)).toBe(reason);
+			expect(enter).not.toHaveBeenCalled();
+			expect(editor.text).toBe(before);
+		}
+		const { ctx, enter } = setup();
+		expect(submitCommand("/model", ctx as never, undefined, enter)).toBe("dialog");
+	});
+
+	it("takes the command back out of the prompt when Enter cannot be pressed", () => {
+		const { ctx, tui, editor } = setup();
+		const enter = vi.fn(() => {
+			throw new Error("tmux: no server running");
+		});
+		expect(submitCommand("/new", ctx as never, tui as never, enter)).toBe("unreachable");
+		expect(editor.text).toBe("");
+	});
+});
+
+describe("background tasks for the phone", () => {
+	const forever: BackgroundExec = (_c, _w, { signal }) =>
+		new Promise((_r, reject) => signal?.addEventListener("abort", () => reject(new Error("aborted"))));
+	let owner = 0;
+	const session = () => `phone-tasks-${++owner}`;
+	afterEach(() => {
+		for (const job of backgroundBashJobs.list()) backgroundBashJobs.kill(job.id);
+	});
+
+	it("lists the session's running tasks as /tasks does, bounded, with where a shell writes its output", async () => {
+		const me = session();
+		backgroundBashJobs.start({ command: "npm run dev", cwd: "/", owner: me, exec: forever });
+		backgroundBashJobs.start({ command: `echo ${"x".repeat(300)}`, cwd: "/", owner: me, exec: forever });
+		backgroundBashJobs.start({ command: "true", cwd: "/", owner: me, exec: async () => ({ exitCode: 0 }) });
+		backgroundBashJobs.start({ command: "someone else's", cwd: "/", owner: session(), exec: forever });
+		await new Promise((r) => setTimeout(r, 0));
+		const tasks = paneTasks(me);
+		expect(tasks.map((t) => [t.kind, t.label.slice(0, 11)])).toEqual([
+			["shell", "echo xxxxxx"],
+			["shell", "npm run dev"],
+		]);
+		expect(tasks[0]!.label).toHaveLength(200);
+		const job = backgroundBashJobs.get(tasks[1]!.id)!;
+		expect(tasks[1]).toEqual({
+			id: job.id,
+			kind: "shell",
+			label: "npm run dev",
+			startedAt: job.startedAt,
+			...(job.outputFile ? { outputFile: job.outputFile } : {}),
+		});
+	});
+
+	it("stops one as the user, whether a turn runs or not, and reports again for one that is gone", async () => {
+		const me = session();
+		const id = backgroundBashJobs.start({ command: "npm run dev", cwd: "/", owner: me, exec: forever }).id;
+		const { ctx, pi } = fakes({ idle: false });
+		const busy = { ...ctx, sessionManager: { ...ctx.sessionManager, getSessionId: () => me } };
+		const reportAgain = vi.fn();
+		applyPaneMessage({ type: "stop_task", id }, busy as never, pi as never, reportAgain);
+		await new Promise((r) => setTimeout(r, 0));
+		expect(backgroundBashJobs.get(id)).toMatchObject({ killed: true, stoppedByUser: true });
+		expect(reportAgain).not.toHaveBeenCalled();
+		applyPaneMessage({ type: "stop_task", id: "b-gone" }, busy as never, pi as never, reportAgain);
+		expect(reportAgain).toHaveBeenCalledTimes(1);
+	});
+
+	it("looks again once tasks start or end, and once the model's bash has run 2s in the foreground", async () => {
+		vi.useFakeTimers();
+		try {
+			const check = vi.fn();
+			const stop = watchTasks(check);
+			const job = backgroundBashJobs.start({ command: "npm run dev", cwd: "/", exec: forever });
+			backgroundBashJobs.start({ command: "tail -f log", cwd: "/", exec: forever });
+			await vi.advanceTimersByTimeAsync(300);
+			expect(check).toHaveBeenCalledTimes(1);
+			backgroundBashJobs.kill(job.id);
+			await vi.advanceTimersByTimeAsync(300);
+			expect(check).toHaveBeenCalledTimes(2);
+			const run = detachableExec(forever)("sleep 60", "/", { onData: () => {} });
+			await vi.advanceTimersByTimeAsync(300);
+			expect(check).toHaveBeenCalledTimes(3);
+			await vi.advanceTimersByTimeAsync(2000);
+			expect(check).toHaveBeenCalledTimes(4);
+			stop();
+			for (const shell of runningForegroundShells()) shell.stop();
+			await run.catch(() => {});
+			backgroundBashJobs.start({ command: "after", cwd: "/", exec: forever });
+			await vi.advanceTimersByTimeAsync(3000);
+			expect(check).toHaveBeenCalledTimes(4);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+});
+
+describe("/remote-control", () => {
+	tempHome();
+
+	function register() {
+		let handler: ((args: string, ctx: unknown) => Promise<void>) | undefined;
+		const pi = {
+			on: () => {},
+			events: { on: () => {} },
+			registerCommand: (_name: string, command: { handler: typeof handler }) => {
+				handler = command.handler;
+			},
+		};
+		remoteFactory(pi as never);
+		if (!handler) throw new Error("not registered");
+		return handler;
+	}
+
+	it("shows the same usage for an unknown or malformed subcommand, and for the phone's own typed by hand", async () => {
+		const handler = register();
+		const navigateTree = vi.fn();
+		const fork = vi.fn();
+		for (const args of ["nope", "tree", "fork a b", "clone x", "clone", "tree aaaa0001", "fork aaaa0001"]) {
+			const notify = vi.fn();
+			await handler(args, { ui: { notify, getEditorText: () => "" }, navigateTree, fork });
+			expect(notify.mock.calls).toEqual([[USAGE, "warning"]]);
+		}
+		expect(navigateTree).not.toHaveBeenCalled();
+		expect(fork).not.toHaveBeenCalled();
+	});
+
+	it("reports when the daemon asks for it, as a restarted one does, and changes only while a phone watches", async () => {
+		const sent = vi.spyOn(OrchestratorClient.prototype, "remoteReport").mockResolvedValue();
+		const handlers = new Map<string, (event: unknown, ctx?: unknown) => void>();
+		const pi = {
+			on: (name: string, handler: (event: unknown, ctx: unknown) => void) => handlers.set(name, handler),
+			events: { on: (name: string, handler: (data: unknown) => void) => handlers.set(name, handler) },
+			registerCommand: () => {},
+			getThinkingLevel: () => "off",
+			getCommands: () => [],
+		};
+		process.env[PANE_ENV] = "pi-report";
+		try {
+			remoteFactory(pi as never);
+		} finally {
+			delete process.env[PANE_ENV];
+		}
+		const { ctx } = fakes({ current: model("openai", "gpt-5") });
+		handlers.get("session_start")?.({}, { ...ctx, mode: "tui" });
+		handlers.get("bluclawd:remote-want-report")?.(true);
+		await waitFor(() => expect(sent).toHaveBeenCalledTimes(2));
+		expect(sent.mock.calls.map(([pane]) => pane)).toEqual(["pi-report", "pi-report"]);
+		handlers.get("turn_end")?.({}, { ...ctx, mode: "tui" });
+		handlers.get(TRUST_CHANGED)?.("never");
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		expect(sent).toHaveBeenCalledTimes(2);
+		handlers.get("bluclawd:remote-watched")?.(true);
+		await waitFor(() => expect(sent).toHaveBeenCalledTimes(3));
+		handlers.get(TRUST_CHANGED)?.("never");
+		await waitFor(() => expect(sent).toHaveBeenCalledTimes(4));
+		handlers.get("turn_end")?.({}, { ...ctx, mode: "tui" });
+		await waitFor(() => expect(sent).toHaveBeenCalledTimes(5));
+		sent.mockRestore();
+	});
+
+	it("lets go at session end: no report from the bus, and no live snapshot left to send", async () => {
+		const reported = vi.spyOn(OrchestratorClient.prototype, "remoteReport").mockResolvedValue();
+		const live = vi.spyOn(OrchestratorClient.prototype, "remoteLive").mockResolvedValue();
+		const handlers = new Map<string, (event: unknown, ctx?: unknown) => void>();
+		const pi = {
+			on: (name: string, handler: (event: unknown, ctx: unknown) => void) => handlers.set(name, handler),
+			events: { on: (name: string, handler: (data: unknown) => void) => handlers.set(name, handler) },
+			registerCommand: () => {},
+			getThinkingLevel: () => "off",
+			getCommands: () => [],
+		};
+		process.env[PANE_ENV] = "pi-report";
+		try {
+			remoteFactory(pi as never);
+		} finally {
+			delete process.env[PANE_ENV];
+		}
+		const { ctx } = fakes({ current: model("openai", "gpt-5") });
+		handlers.get("session_start")?.({}, { ...ctx, mode: "tui" });
+		handlers.get("bluclawd:remote-watched")?.(true);
+		const said = (text: string) => ({ message: { role: "assistant", content: [{ type: "text", text }] } });
+		handlers.get("message_update")?.(said("a"));
+		handlers.get("message_update")?.(said("ab"));
+		handlers.get("session_shutdown")?.({}, ctx);
+		await new Promise((resolve) => setTimeout(resolve, 400));
+		expect(live.mock.calls.map(([, snapshot]) => snapshot === null)).toEqual([false, true]);
+		const reports = reported.mock.calls.length;
+		handlers.get("bluclawd:remote-want-report")?.(true);
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		expect(reported.mock.calls.length).toBe(reports);
+		reported.mockRestore();
+		live.mockRestore();
+	});
+
+	it("types the phone's slash command into its own pane's prompt and presses Enter in that tmux session", async () => {
+		const sent = vi.spyOn(OrchestratorClient.prototype, "remoteReport").mockResolvedValue();
+		const pressed = vi.spyOn(Tmux.prototype, "sendKeys").mockImplementation(() => {});
+		const handlers = new Map<string, (event: unknown, ctx?: unknown) => void>();
+		const { ctx: base, pi: fake } = fakes({ current: model("openai", "gpt-5") });
+		let prompt = "";
+		const ctx = {
+			...base,
+			mode: "tui",
+			ui: {
+				...base.ui,
+				getEditorText: () => prompt,
+				setEditorText: (text: string) => {
+					prompt = text;
+				},
+			},
+		};
+		const pi = {
+			...fake,
+			on: (name: string, handler: (event: unknown, ctx: unknown) => void) => handlers.set(name, handler),
+			events: { on: (name: string, handler: (data: unknown) => void) => handlers.set(name, handler) },
+			registerCommand: () => {},
+		};
+		process.env[PANE_ENV] = "pi-cmd";
+		try {
+			remoteFactory(pi as never);
+		} finally {
+			delete process.env[PANE_ENV];
+		}
+		handlers.get("session_start")?.({}, ctx);
+		await waitFor(() => expect(sent).toHaveBeenCalledTimes(1));
+		handlers.get("bluclawd:pane-message")?.({ type: "command", text: "/compact" });
+		expect(prompt).toBe("/compact");
+		expect(pressed.mock.calls).toEqual([["pi-cmd", ["Enter"]]]);
+		prompt = "";
+		ctx.isIdle = () => false;
+		handlers.get("bluclawd:pane-message")?.({ type: "command", text: "/compact" });
+		await waitFor(() => expect(sent).toHaveBeenCalledTimes(2));
+		expect(sent.mock.calls[1]![1]).toMatchObject({ notice: { text: BUSY_NOTICE } });
+		expect(pressed).toHaveBeenCalledTimes(1);
+		expect(pi.sendUserMessage).not.toHaveBeenCalled();
+		pressed.mockRestore();
+		sent.mockRestore();
+	});
+
+	async function phonePane(options: { parentSession?: string } = {}) {
+		const sent = vi.spyOn(OrchestratorClient.prototype, "remoteReport").mockResolvedValue();
+		const pressed = vi.spyOn(Tmux.prototype, "sendKeys").mockImplementation(() => {});
+		const handlers = new Map<string, ((event: unknown, ctx?: unknown) => unknown)[]>();
+		const subscribe = (name: string, handler: (event: unknown, ctx?: unknown) => unknown) =>
+			handlers.set(name, [...(handlers.get(name) ?? []), handler]);
+		const emit = (name: string, event: unknown, ctx?: unknown) => {
+			const results = (handlers.get(name) ?? []).map((handler) => handler(event, ctx));
+			return results.some((result) => result instanceof Promise) ? Promise.all(results) : undefined;
+		};
+		const { ctx: base, pi: fake } = fakes({ current: model("openai", "gpt-5") });
+		const state = { idle: true, editor: "", pending: false };
+		const ctx = {
+			...base,
+			mode: "tui",
+			isIdle: () => state.idle,
+			hasPendingMessages: () => state.pending,
+			sessionManager: {
+				...base.sessionManager,
+				getSessionFile: () => "/s/a.jsonl",
+				getHeader: () => ({ type: "session", id: "a", timestamp: "", cwd: "/", ...options }),
+			},
+			ui: {
+				...base.ui,
+				getEditorText: () => state.editor,
+				setEditorText: (text: string) => {
+					state.editor = text;
+				},
+			},
+		};
+		const pi = {
+			...fake,
+			on: subscribe,
+			events: { on: subscribe },
+			registerCommand: () => {},
+		};
+		process.env[PANE_ENV] = "pi-phone";
+		try {
+			remoteFactory(pi as never);
+		} finally {
+			delete process.env[PANE_ENV];
+		}
+		emit("session_start", {}, ctx);
+		await waitFor(() => expect(sent).toHaveBeenCalledTimes(1));
+		const outcomes = () => (sent.mock.lastCall?.[1] as { outcomes?: unknown }).outcomes;
+		const message = (data: unknown) => emit("bluclawd:pane-message", data);
+		const on = (name: string, event: unknown = {}) => emit(name, event, ctx);
+		const restore = () => {
+			sent.mockRestore();
+			pressed.mockRestore();
+		};
+		return { pi, ctx, state, sent, pressed, outcomes, message, on, restore };
+	}
+
+	it("hands a phone's prompt to pi with a delivery mode, so pi queues it if a turn started meanwhile", async () => {
+		const pane = await phonePane();
+		expect(pane.outcomes()).toEqual([]);
+		pane.message({ type: "prompt", text: "hi", id: "p-1", sessionFile: "/s/a.jsonl" });
+		expect(pane.pi.sendUserMessage).toHaveBeenCalledWith("hi", { deliverAs: "followUp" });
+		// pi tells its input handlers a delivery mode only while it streams. Idle, pi took it.
+		pane.on("input", { type: "input", text: "hi", source: "extension" });
+		await waitFor(() => expect(pane.outcomes()).toEqual([{ id: "p-1", outcome: "taken" }]));
+		pane.restore();
+	});
+
+	it("reports a phone's prompt with an image taken from pi's input event", async () => {
+		const pane = await phonePane();
+		const image = { type: "image", mimeType: "image/png", data: "iVBORw0KGgo=" };
+		const content = [{ type: "text", text: "hi\n\n[Image #1]" }, image];
+		pane.message({
+			type: "prompt",
+			text: "hi",
+			id: "p-1",
+			images: [{ mimeType: "image/png", data: "iVBORw0KGgo=" }],
+		});
+		expect(pane.pi.sendUserMessage).toHaveBeenLastCalledWith(content, { deliverAs: "followUp" });
+		pane.on("input", { type: "input", text: "hi\n\n[Image #1]", source: "extension" });
+		await waitFor(() => expect(pane.outcomes()).toEqual([{ id: "p-1", outcome: "taken" }]));
+		pane.restore();
+	});
+
+	it("refuses a phone's prompt or command sent to another session than the pane's, its fork's parent too", async () => {
+		const pane = await phonePane({ parentSession: "/s/parent.jsonl" });
+		pane.message({ type: "prompt", text: "hi", id: "p-1", sessionFile: "/s/other.jsonl" });
+		pane.message({ type: "command", text: "/model", id: "c-1", sessionFile: "/s/other.jsonl" });
+		pane.message({ type: "prompt", text: "to the parent", id: "p-2", sessionFile: "/s/parent.jsonl" });
+		await waitFor(() =>
+			expect(pane.outcomes()).toEqual([
+				{ id: "p-1", outcome: "refused", reason: "session_changed" },
+				{ id: "c-1", outcome: "refused", reason: "session_changed" },
+				{ id: "p-2", outcome: "refused", reason: "session_changed" },
+			]),
+		);
+		expect(pane.pi.sendUserMessage).not.toHaveBeenCalled();
+		pane.message({ type: "prompt", text: "to this one", id: "p-3", sessionFile: "/s/a.jsonl" });
+		expect(pane.pi.sendUserMessage).toHaveBeenCalledTimes(1);
+		pane.restore();
+	});
+
+	it("reports a phone's command taken once Enter is pressed for it, or refused with why, and no notice", async () => {
+		const pane = await phonePane();
+		pane.message({ type: "command", text: "/compact", id: "c-1", sessionFile: "/s/a.jsonl" });
+		await waitFor(() => expect(pane.outcomes()).toEqual([{ id: "c-1", outcome: "taken" }]));
+		expect(pane.pressed).toHaveBeenCalledTimes(1);
+		pane.state.editor = "";
+		pane.state.idle = false;
+		pane.message({ type: "command", text: "/compact", id: "c-2" });
+		pane.state.idle = true;
+		pane.state.editor = "half a thought";
+		pane.message({ type: "command", text: "/compact", id: "c-3" });
+		await waitFor(() =>
+			expect(pane.outcomes()).toEqual([
+				{ id: "c-1", outcome: "taken" },
+				{ id: "c-2", outcome: "refused", reason: "busy" },
+				{ id: "c-3", outcome: "refused", reason: "draft" },
+			]),
+		);
+		expect(pane.sent.mock.calls.some(([, report]) => "notice" in report)).toBe(false);
+		expect(pane.pressed).toHaveBeenCalledTimes(1);
+		pane.restore();
+	});
+});
+
+describe("a phone prompt in a real pi session", () => {
+	const home = tempHome();
+
+	async function realPane(others: ExtensionFactory[]) {
+		const sent = vi.spyOn(OrchestratorClient.prototype, "remoteReport").mockResolvedValue();
+		const cwd = home.dir();
+		const modelRuntime = await ModelRuntime.create({
+			authPath: join(cwd, "auth.json"),
+			modelsPath: join(cwd, "models.json"),
+			modelsStorePath: join(cwd, "models-store.json"),
+			allowModelNetwork: false,
+			refreshOnCreate: true,
+		});
+		const faux = fauxProvider({ provider: "faux-remote", models: [{ id: "faux-model", reasoning: false }] });
+		modelRuntime.registerNativeProvider(faux.provider);
+		await modelRuntime.refresh({ allowNetwork: false });
+		const settingsManager = SettingsManager.inMemory({ compaction: { enabled: false }, retry: { enabled: false } });
+		vi.stubEnv(PANE_ENV, "pi-real");
+		const resourceLoader = new DefaultResourceLoader({
+			cwd,
+			agentDir: cwd,
+			settingsManager,
+			extensionFactories: [remoteFactory, ...others],
+			noExtensions: true,
+			noSkills: true,
+			noPromptTemplates: true,
+			noThemes: true,
+			noContextFiles: true,
+			disabledBuiltinExtensions: ["mcp", "codemode", "tool_search"],
+		});
+		await resourceLoader.reload();
+		const { session } = await createAgentSession({
+			cwd,
+			agentDir: cwd,
+			modelRuntime,
+			model: faux.getModel("faux-model"),
+			noTools: "builtin",
+			resourceLoader,
+			sessionManager: SessionManager.inMemory(cwd),
+			settingsManager,
+		});
+		await session.bindExtensions({ mode: "tui" });
+		const outcomesOf = (id: string) =>
+			sent.mock.calls.flatMap(([, report]) =>
+				(report.outcomes ?? []).filter((o) => o.id === id).map((o) => o.outcome),
+			);
+		const restore = () => {
+			session.dispose();
+			sent.mockRestore();
+		};
+		return { session, faux, outcomesOf, restore };
+	}
+
+	it("reports taken, never dequeued, a phone prompt pi runs as a turn of its own once input handlers outlast the run", async () => {
+		let release = () => {};
+		const held = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		let bus: { emit: (name: string, data: unknown) => void } | undefined;
+		const slow: ExtensionFactory = (pi) => {
+			bus = pi.events;
+			pi.on("input", async (event) => {
+				if (event.text === "late") await held;
+			});
+			pi.on("agent_settled", () => {
+				setTimeout(release, 100);
+			});
+		};
+		const pane = await realPane([slow]);
+		try {
+			pane.faux.setResponses([
+				() => {
+					bus?.emit("bluclawd:pane-message", { type: "prompt", id: "p-1", text: "late" });
+					return fauxAssistantMessage("First.");
+				},
+				fauxAssistantMessage("Late."),
+			]);
+			await pane.session.prompt("First.", { expandPromptTemplates: false });
+			await waitFor(() => expect(pane.outcomesOf("p-1").at(-1)).toBe("taken"));
+			await waitFor(() => expect(pane.session.isIdle).toBe(true));
+			expect(pane.outcomesOf("p-1")).not.toContain("lost");
+			const users = pane.session.messages.filter((m) => m.role === "user");
+			expect(users.map((m) => contentText(m.content as never))).toEqual(["First.", "late"]);
+		} finally {
+			pane.restore();
+		}
+	});
+
+	it("reports taken, never dequeued, a phone prompt whose input handlers outlast the run while a Mac follow-up is queued", async () => {
+		let release = () => {};
+		const held = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		let bus: { emit: (name: string, data: unknown) => void } | undefined;
+		const slow: ExtensionFactory = (pi) => {
+			bus = pi.events;
+			pi.on("input", async (event) => {
+				if (event.text === "late") await held;
+			});
+			pi.on("agent_settled", () => {
+				setTimeout(release, 100);
+			});
+		};
+		const pane = await realPane([slow]);
+		try {
+			pane.faux.setResponses([
+				async () => {
+					await pane.session.followUp("mac");
+					bus?.emit("bluclawd:pane-message", { type: "prompt", id: "p-1", text: "late" });
+					bus?.emit("bluclawd:remote-watched", false);
+					return fauxAssistantMessage("First.");
+				},
+				fauxAssistantMessage("Mac."),
+				fauxAssistantMessage("Late."),
+			]);
+			await pane.session.prompt("First.", { expandPromptTemplates: false });
+			await waitFor(() => expect(pane.outcomesOf("p-1").at(-1)).toBe("taken"));
+			await waitFor(() => expect(pane.session.isIdle).toBe(true));
+			expect(pane.outcomesOf("p-1")).not.toContain("lost");
+			const users = pane.session.messages.filter((m) => m.role === "user");
+			expect(users.map((m) => contentText(m.content as never))).toEqual(["First.", "mac", "late"]);
+		} finally {
+			pane.restore();
+		}
+	});
+
+	it("reports dequeued a phone prompt pi queued, then emptied its queue of mid-run, as Esc does", async () => {
+		let bus: { emit: (name: string, data: unknown) => void } | undefined;
+		const pane = await realPane([
+			(pi) => {
+				bus = pi.events;
+			},
+		]);
+		try {
+			pane.faux.setResponses([
+				async () => {
+					bus?.emit("bluclawd:pane-message", { type: "prompt", id: "p-1", text: "later" });
+					await waitFor(() => expect(pane.session.getFollowUpMessages()).toEqual(["later"]));
+					bus?.emit("bluclawd:remote-watched", false);
+					pane.session.clearQueue();
+					return fauxAssistantMessage("First.");
+				},
+			]);
+			await pane.session.prompt("First.", { expandPromptTemplates: false });
+			await waitFor(() => expect(pane.outcomesOf("p-1").at(-1)).toBe("lost"));
+			expect(pane.outcomesOf("p-1")).not.toContain("taken");
+		} finally {
+			pane.restore();
+		}
+	});
+});
+
+it("reports a discovered skill's selection identity, scope, instruction path and package provenance", () => {
+	const { ctx, pi } = fakes();
+	const sourceInfo = {
+		path: "/fixture/package/review/SKILL.md",
+		scope: "project",
+		origin: "package",
+		source: "npm:fixture-skills",
+	};
+	const command = { name: "skill:review", source: "skill", description: "Review", sourceInfo };
+	const report = buildReport(ctx as never, { ...pi, getCommands: () => [command] } as never, ask);
+	expect(report.commands?.find((c) => c.name === "skill:review")).toEqual({
+		name: "skill:review",
+		source: "skill",
+		description: "Review",
+		skill: { ...sourceInfo, id: expect.stringMatching(/^[a-f0-9]{64}$/) },
+	});
+});

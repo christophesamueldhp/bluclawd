@@ -1,0 +1,774 @@
+import {
+	type ExtensionAPI,
+	getAgentDir,
+	type InlineExtension,
+	SettingsManager,
+	type ToolLoadout,
+	type ToolLoadoutChanges,
+} from "@earendil-works/pi-coding-agent";
+import { isKeyRelease, matchesKey, type TUI } from "@earendil-works/pi-tui";
+import { Type } from "typebox";
+import type { SessionMessage } from "../../daemon/ipc/protocol.ts";
+import { OrchestratorClient } from "../../daemon/orchestrator-client.ts";
+import { runParent, Tmux } from "../../daemon/tmux.ts";
+import { notifyAgentTasksChanged, publishAgentTasks } from "../_shared/agent-tasks.ts";
+import { commandBlock } from "../_shared/command-block.ts";
+import { focusedComponent, isPromptEditor } from "../_shared/focus.ts";
+import { sharedRef } from "../_shared/global-state.ts";
+import { pistatuslineDrawsFooter } from "../_shared/pistatusline.ts";
+import { runsInPanes } from "../_shared/settings.ts";
+import { STATUS_KEYS } from "../_shared/status-keys.ts";
+import { publishSubagentPanel } from "../_shared/subagent-panel.ts";
+import { timed } from "../_shared/timing.ts";
+import { createRunAdmission, orchestratorTools } from "./admission.ts";
+import { runTaskBatch } from "./batches.ts";
+import { type ChainDeps, resumeChains, runChain } from "./chains.ts";
+import { collaborateAsParent } from "./collaboration.ts";
+import {
+	type AgentDefinitionCatalog,
+	discoverAgentDefinitions,
+	formatAgentRoutingDescriptions,
+} from "./definitions.ts";
+import type { RunEntry } from "./directory.ts";
+import { createGenerations, type ParentNotice } from "./generations.ts";
+import { registerIntegration } from "./integration.ts";
+import { SUBAGENT_TOOL_PARAMETERS, subagentInvocation } from "./invocation.ts";
+import {
+	PARENT_MESSAGE_ADDRESS,
+	parentMessage,
+	RunReports,
+	SUBAGENT_MESSAGE_CUSTOM_TYPE,
+	SUBAGENT_MESSAGE_PARAMETERS,
+	SUBAGENT_MESSAGE_TOOL,
+	SubagentMessageBus,
+} from "./messages.ts";
+import { describeSubagentModels } from "./models.ts";
+import { createRunOpening } from "./opening.ts";
+import { createPanel, formatRunElapsed, SUBAGENT_PANEL_WIDGET } from "./panel.ts";
+import { createParentScope, type ParentInboxItem } from "./parent-scope.ts";
+import { daemonRunSlots } from "./rpc-runs.ts";
+import { createRunIntervention, RUN_CONVERSATION_ENTRY } from "./run-intervention.ts";
+import { messageAsRun } from "./run-messages.ts";
+import { bestEffort, formatRunLabel, isLegacyRun } from "./runs.ts";
+import { CallsUnderWay, settleRun } from "./settling.ts";
+import { stopTarget } from "./stopping.ts";
+import { appendSubagentMessageRecord } from "./storage.ts";
+import { takeOverRuns } from "./takeover.ts";
+import { createAgentTaskSource } from "./task-source.ts";
+import { actAsRun } from "./tmux-runs.ts";
+import { createParentScopeViews, runStatus } from "./views.ts";
+import { registerWorkspaceCleanup } from "./workspace-cleanup.ts";
+
+export const SUBAGENT_NOTIFICATION_CUSTOM_TYPE = "subagent-notification";
+const SUBAGENT_REMINDER_CUSTOM_TYPE = "subagent-reminder";
+const BACKGROUND_BATCH_WINDOW_MS = 40;
+const relaysGiven = sharedRef("subagentRelaysGiven", new Set<string>()).get();
+
+export const ENDED_SHOWN_MS = 30_000;
+const MAX_STATUS_RUNS = 30;
+const timedTmux = (): Tmux => new Tmux(undefined, undefined, { timeoutMs: 2000 });
+const SUBAGENT_DESCRIPTION_LEAD = "Delegate a task to a child agent";
+const RPC_DELEGATION = [
+	`${SUBAGENT_DESCRIPTION_LEAD}: a pi of its own with a fresh context window and only the tools its role is granted. Children cannot delegate further.`,
+	"",
+	"Do small work yourself: a lookup, a one-file edit, or anything quicker to do than to describe. Delegate only when it helps:",
+	"- Independent pieces that can run side by side: give them together as `tasks` in one call, which returns one combined report once all have finished; its manifest lists every member's status meanwhile.",
+	"- Dependent steps, such as an edit, then an independent review, then a repair: give them as `chain` in one call, which runs them one after another in one worktree.",
+	"- A specialized investigation or review whose intermediate output does not belong in your context.",
+	"No sequence of roles is required and there is no quota: use as many runs as the work needs. Runs past the active limit wait in a queue; that limit is not a target, so there is no need to fill every slot. Review is for large or risky changes, not a default step.",
+	"",
+	"A run that only reads shares your checkout and needs no worktree. A run that edits works in a worktree of its own, made from your checkout as it was at the call: nothing reaches your checkout until you call `subagent_integrate` on it, or on a completed chain, with a `check` command that validates the combined result. Runs that only read may run side by side; runs that edit run one at a time unless their files are disjoint.",
+	"",
+	"Keep each task, and any inline role, short and self-contained: the goal, the files or area, and what to report. A brief states the objective, the output format, the boundaries and what done is. Do not paste the conversation or large file contents; name paths instead.",
+];
+
+export interface SubagentExtensionOptions {
+	agentDir?: string;
+	batchWindowMs?: number;
+	now?: () => number;
+}
+
+function buildBaseSubagentDescription(catalog?: AgentDefinitionCatalog, oneShot = false): string {
+	const rolesSection = catalog
+		? formatAgentRoutingDescriptions(catalog)
+		: "- `general-purpose`: Implementation work.\n- `explorer`: Codebase exploration.\n- `reviewer`: Code review.";
+	return [
+		...RPC_DELEGATION,
+		"",
+		...(process.platform === "darwin" || process.platform === "linux"
+			? []
+			: [
+					`Runs get no shell on ${process.platform}: general-purpose edits files without running commands, and a role naming bash is refused.`,
+					"",
+				]),
+		...(oneShot
+			? ["Background runs are unavailable in this one-shot mode: omit `background`.", ""]
+			: [
+					"Run in the foreground (the default) when your next step needs the result. Set `background: true` only when you have independent work to do meanwhile.",
+					"",
+				]),
+		"Available subagent roles, as found from your directory (a run given a `cwd` of its own finds roles from there):",
+		rolesSection,
+	].join("\n");
+}
+
+export function createSubagentsExtension(options: SubagentExtensionOptions = {}): (pi: ExtensionAPI) => void {
+	return function subagentsFactory(pi: ExtensionAPI): void {
+		const resolveAgentDir = () => options.agentDir ?? getAgentDir();
+		const pane = Tmux.currentPane();
+		const launchedBy = runParent();
+		if (launchedBy) {
+			const parent = () => runParent() ?? launchedBy;
+			const run = actAsRun(pi, parent, pane);
+			if (pane) messageAsRun(pi, parent, pane, run.closed);
+		}
+		const reports = new RunReports();
+		const calls = new CallsUnderWay();
+		const handOff = new AbortController();
+		pi.events.on("bluclawd:daemon-reconnected", () => {
+			const scope = parentScope.current();
+			if (scope) pullReports(scope);
+		});
+		pi.events.on("bluclawd:session-message", (data) => {
+			const message = data as SessionMessage;
+			if (message.kind === "report" || message.kind === "activity") reports.receive(message);
+			else if (message.kind === "message" || message.kind === "typed") fromRun(message);
+		});
+
+		let activeTurnIndex = 0;
+		let catalog: AgentDefinitionCatalog | undefined;
+		let unpublish: (() => void) | undefined;
+		const now = options.now ?? Date.now;
+		let panelTui: Pick<TUI, "requestRender" | "hasOverlay" | "terminal"> | undefined;
+		let panel: ReturnType<typeof createPanel> | undefined;
+		let panelInStatus = false;
+		let publishedStatus: string | undefined;
+		let offPanelKeys: (() => void) | undefined;
+		let latestLoadout: ToolLoadout | undefined;
+
+		const messageBus = new SubagentMessageBus(
+			(record, senderScope) =>
+				appendSubagentMessageRecord(resolveAgentDir(), senderScope.parentSessionId, { ...record, at: Date.now() }),
+			{ find: (scope, to) => directory.find(scope, to), reachable: (scope) => directory.reachable(scope) },
+		);
+		const runsChanged = () => {
+			panel?.sync();
+			refreshFooterStatus();
+			panelTui?.requestRender();
+			notifyAgentTasksChanged();
+		};
+		const parentScope = createParentScope<ParentNotice>({
+			bus: messageBus,
+			cancelRuns: (where, reason) => scheduler.cancelRuns(where, reason),
+			send: (items) => sendToParent(items),
+			onChange: runsChanged,
+			batchWindowMs: options.batchWindowMs ?? BACKGROUND_BATCH_WINDOW_MS,
+		});
+
+		const fromRun = (message: Extract<SessionMessage, { kind: "message" | "typed" }>) => {
+			const scope = parentScope.current();
+			const run = scope && directory.list(scope).find(({ record }) => record.pane === message.from)?.record;
+			if (!scope || !run) return;
+			if (message.kind === "message") {
+				void messageBus.send({ address: run.runId, scope }, PARENT_MESSAGE_ADDRESS, message.text);
+				return;
+			}
+			pi.sendMessage(
+				{
+					customType: SUBAGENT_MESSAGE_CUSTOM_TYPE,
+					content: [
+						{
+							type: "text",
+							text: `The user typed to run ${formatRunLabel(run)} in its own session: ${message.text}`,
+						},
+					],
+					display: true,
+					details: message,
+				},
+				{ deliverAs: "steer", triggerTurn: false },
+			);
+		};
+
+		const endedWithinShownWindow = (record: { endedAt?: number }) => now() - (record.endedAt ?? 0) < ENDED_SHOWN_MS;
+		const leftAtOnce = ({ status, stopSource }: { status: string; stopSource?: string }) =>
+			status === "closed" || (status === "cancelled" && (stopSource === "user" || stopSource === "model"));
+		const endedLately = () =>
+			views.done().filter(({ record }) => !leftAtOnce(record) && endedWithinShownWindow(record));
+
+		const refreshFooterStatus = () => {
+			bestEffort(() => {
+				const ctx = parentScope.context();
+				if (!ctx?.hasUI) return;
+				const publish = (text: string | undefined) => {
+					if (text === publishedStatus) return;
+					publishedStatus = text;
+					ctx.ui.setStatus(STATUS_KEYS.subagents, text);
+				};
+				const lines = panelInStatus && panel && panelTui ? panel.lines(panelTui.terminal.columns) : [];
+				if (lines.length > 0) return publish(`${lines.join("\n")}\n`);
+				const { running: runningCount, closing: closingCount } = views.footer();
+				if (runningCount + closingCount === 0) {
+					publish(undefined);
+				} else {
+					const parts: string[] = [];
+					if (runningCount > 0) parts.push(`${runningCount} subagent${runningCount === 1 ? "" : "s"}`);
+					if (closingCount > 0) parts.push(`${closingCount} closing`);
+					publish(ctx.ui.theme.fg("dim", parts.join(" · ")));
+				}
+			});
+		};
+
+		const sendToParent = (sent: readonly ParentInboxItem<ParentNotice>[]) => {
+			const message = parentMessage(sent, (id) => relaysGiven.has(id) || parentScope.holds(id));
+			if (!message) return;
+			const { text, reports, details, messages } = message;
+			bestEffort(() => {
+				pi.sendMessage(
+					{
+						customType: reports ? SUBAGENT_NOTIFICATION_CUSTOM_TYPE : SUBAGENT_MESSAGE_CUSTOM_TYPE,
+						content: [{ type: "text", text }],
+						display: true,
+						details,
+					},
+					{
+						deliverAs: "steer",
+						triggerTurn: true,
+					},
+				);
+				for (const { id } of messages) if (id) relaysGiven.add(id);
+			});
+		};
+
+		const runPane = (): string | undefined => {
+			const ctx = parentScope.context();
+			if (!pane || !ctx) return undefined;
+			const settings = SettingsManager.create(ctx.cwd, resolveAgentDir(), {
+				projectTrusted: ctx.isProjectTrusted(),
+			});
+			return runsInPanes(settings) ? pane : undefined;
+		};
+		const slots = daemonRunSlots();
+		const { scheduler, directory, messageFromParent, resumeFromParent, pullReports, retellReport } =
+			createGenerations({
+				agentDir: resolveAgentDir,
+				bus: messageBus,
+				scope: parentScope,
+				pi,
+				onChange: runsChanged,
+				reports,
+				tmux: timedTmux,
+				send: (to, message) => new OrchestratorClient().send(to, message),
+				handOff: handOff.signal,
+				slots,
+			});
+
+		const admission = createRunAdmission({
+			scheduler,
+			directory,
+			agentDir: resolveAgentDir,
+			parentThinkingLevel: () => pi.getThinkingLevel(),
+			scope: parentScope,
+			pane: () => pane,
+			runPane,
+			tools: () => (latestLoadout ? orchestratorTools(latestLoadout) : []),
+			registeredTools: () => latestLoadout?.registered.map((tool) => tool.name) ?? [],
+			ensureQueue: () => slots.ensure(),
+		});
+
+		const chainDeps: ChainDeps = {
+			admission,
+			nameHolder: (name) => {
+				const scope = parentScope.current();
+				return scope ? directory.nameHolder(scope, name)?.record : undefined;
+			},
+			agentDir: resolveAgentDir,
+			reports,
+			getRun: (runId) => scheduler.getRun(runId),
+			whenFinal: (runId) => scheduler.whenFinal(runId),
+			handOff: handOff.signal,
+			cancel: (runId, reason) => scheduler.cancelRun(runId, "caller", reason),
+			scope: parentScope,
+			context: () => parentScope.context(),
+			calls,
+			notify: (first, notice) => parentScope.notify(first, notice),
+		};
+
+		const noteToOrchestrator = (text: string) =>
+			pi.sendMessage(
+				{ customType: SUBAGENT_MESSAGE_CUSTOM_TYPE, content: [{ type: "text", text }], display: true },
+				{ deliverAs: "steer", triggerTurn: false },
+			);
+		const intervention = createRunIntervention({
+			scheduler,
+			admission,
+			agentDir: resolveAgentDir,
+			note: noteToOrchestrator,
+		});
+		pi.registerEntryRenderer<{ lines: string[] }>(RUN_CONVERSATION_ENTRY, (entry) =>
+			commandBlock(entry.data?.lines ?? []),
+		);
+
+		const views = createParentScopeViews({
+			scheduler,
+			directory,
+			agentDir: resolveAgentDir,
+			scope: () => parentScope.current(),
+			idle: () => {
+				try {
+					return parentScope.context()?.isIdle() ?? false;
+				} catch {
+					return false;
+				}
+			},
+			onChange: runsChanged,
+		});
+
+		const taskSource = createAgentTaskSource({
+			views,
+			directory,
+			scheduler,
+			agentDir: resolveAgentDir,
+		});
+
+		const openRun = createRunOpening({
+			scope: parentScope,
+			scheduler,
+			admission,
+			slots,
+			intervention,
+			appendEntry: (customType, data) => pi.appendEntry(customType, data),
+			tmux: timedTmux,
+			agentDir: resolveAgentDir,
+			pane: () => pane,
+			runPane,
+		});
+
+		pi.on("session_start", async (event, ctx) => {
+			parentScope.enter(ctx, `Session replaced (${event.reason})`);
+			activeTurnIndex = 0;
+
+			const agentDir = resolveAgentDir();
+			const projectTrusted = ctx.isProjectTrusted();
+			catalog = discoverAgentDefinitions({
+				cwd: ctx.cwd,
+				agentDir,
+				projectTrusted,
+			});
+
+			for (const diag of catalog.diagnostics) {
+				if (ctx.hasUI) {
+					ctx.ui.notify(`subagents: ${diag}`, "warning");
+				}
+			}
+
+			const allTools = pi.getAllTools?.() ?? [];
+			const subagentTools = allTools.filter((t) => t.name === "subagent");
+			const hasConflict =
+				subagentTools.length > 1 ||
+				subagentTools.some((t) => !t.description?.startsWith(SUBAGENT_DESCRIPTION_LEAD));
+			if (hasConflict) {
+				ctx.ui.notify(
+					"Conflicting third-party `subagent` tool registration detected; bluclawd's subagent tool must be unique.",
+					"warning",
+				);
+			}
+
+			takeOverRuns(
+				{
+					agentDir: resolveAgentDir,
+					pane,
+					scope: parentScope,
+					admission,
+					scheduler,
+					tmux: timedTmux,
+					pullReports,
+					resumeChains: (sessionId) => resumeChains(chainDeps, sessionId),
+					retellReport,
+				},
+				ctx,
+			);
+
+			unpublish?.();
+			const unpublishPanel = publishSubagentPanel(
+				() => panel !== undefined && (views.open().length > 0 || endedLately().length > 0),
+			);
+			const unpublishTasks = publishAgentTasks({
+				...taskSource,
+				open: (id, owner) => openRun(id, owner),
+			});
+			unpublish = () => {
+				unpublishTasks();
+				unpublishPanel();
+			};
+			// pi clears the statuses for a new session.
+			publishedStatus = undefined;
+			panelInStatus = ctx.mode === "tui" && pistatuslineDrawsFooter(pi, agentDir);
+			refreshFooterStatus();
+			if (ctx.mode === "tui") {
+				ctx.ui.setWidget(
+					SUBAGENT_PANEL_WIDGET,
+					(tui, theme) => {
+						panelTui = tui;
+						const shown = createPanel({
+							tui,
+							theme,
+							runs: () => views.open(),
+							ended: endedLately,
+							closedLately: () =>
+								views.done().some(({ record }) => leftAtOnce(record) && endedWithinShownWindow(record)),
+							waitingFor: views.waitingFor,
+							now,
+							belowPrompt: !panelInStatus,
+							changed: () => {
+								refreshFooterStatus();
+								tui.requestRender();
+							},
+							actions: {
+								close: ({ record }) =>
+									taskSource.closeOwned(record.runId, { owner: record.parentSessionId, source: "user" }),
+								open: ({ record }) => void openRun(record.runId),
+								dismiss: ({ record }) => views.dismiss(record.runId, record.parentSessionId),
+							},
+						});
+						panel = shown;
+						let endedShown = false;
+						const ticker = setInterval(() => {
+							const ended = views.done().some(({ record }) => endedWithinShownWindow(record));
+							if (ended !== endedShown) {
+								endedShown = ended;
+								return runsChanged();
+							}
+							shown.sync();
+							refreshFooterStatus();
+							if (views.open().length > 0 || ended) tui.requestRender();
+						}, 1000);
+						ticker.unref?.();
+						return Object.assign(shown, {
+							dispose: () => {
+								clearInterval(ticker);
+								if (panel === shown) panel = undefined;
+							},
+						});
+					},
+					{ placement: "belowEditor" },
+				);
+				offPanelKeys?.();
+				offPanelKeys = ctx.ui.onTerminalInput((data) => {
+					if (isKeyRelease(data) || !matchesKey(data, "down") || ctx.ui.getEditorText() !== "") return undefined;
+					if (!isPromptEditor(focusedComponent(panelTui))) return undefined;
+					if (panelTui?.hasOverlay()) return undefined;
+					return panel?.focus() ? { consume: true } : undefined;
+				});
+			}
+		});
+
+		pi.on("turn_start", async () => {
+			activeTurnIndex++;
+		});
+
+		pi.on("agent_start", () => refreshFooterStatus());
+		pi.on("agent_settled", () => refreshFooterStatus());
+
+		pi.on("context", async (event) => {
+			const runs = views.awaited();
+			if (runs.length === 0) return undefined;
+			const at = now();
+			const lines = runs.map(
+				({ record: run }) =>
+					`- ${run.name ?? run.runId}: ${run.deliveryMode}, ${formatRunElapsed(run, at)} elapsed`,
+			);
+			const text = [
+				"Subagents still active; their reports arrive on their own, so do not redo their work or poll for them:",
+				...lines,
+			].join("\n");
+			return {
+				messages: [
+					...event.messages,
+					{
+						role: "custom",
+						customType: SUBAGENT_REMINDER_CUSTOM_TYPE,
+						content: [{ type: "text", text }],
+						display: false,
+						timestamp: at,
+					},
+				],
+			};
+		});
+
+		pi.on("session_before_switch", async () => {
+			parentScope.invalidate("Parent session switching");
+			return undefined;
+		});
+
+		pi.on("session_before_fork", async () => {
+			parentScope.invalidate("Parent session forking");
+			return undefined;
+		});
+
+		pi.on("session_tree", async (_event, ctx) => {
+			parentScope.navigate(ctx);
+		});
+
+		pi.on("session_shutdown", async (event) => {
+			if (event.reason === "reload") {
+				parentScope.release();
+				handOff.abort();
+			} else {
+				calls.stopAll();
+				parentScope.shutdown();
+				await scheduler.waitForSettled();
+			}
+			unpublish?.();
+			unpublish = undefined;
+			offPanelKeys?.();
+			offPanelKeys = undefined;
+			bestEffort(() => parentScope.context()?.ui.setWidget(SUBAGENT_PANEL_WIDGET, undefined));
+			panelTui = undefined;
+			parentScope.detach();
+		});
+
+		const registerOrchestratorTool: typeof pi.registerTool = (tool) => {
+			if (!launchedBy) pi.registerTool(tool);
+		};
+		registerOrchestratorTool({
+			name: SUBAGENT_MESSAGE_TOOL,
+			label: "Message agent",
+			exposure: "model-only",
+			annotations: {
+				readOnlyHint: true,
+				destructiveHint: false,
+				idempotentHint: false,
+				openWorldHint: false,
+			},
+			description:
+				"Send a message to a working subagent by name or run ID (sub_…): it gets it at its next safe point, as information for its work. A message continues no finished subagent: subagent_resume does. The receipt says accepted, unavailable, or invalidated, never handled.",
+			parameters: SUBAGENT_MESSAGE_PARAMETERS,
+			execute: async (_toolCallId, params) => {
+				const scope = parentScope.current();
+				if (!scope) {
+					return {
+						content: [{ type: "text", text: "Subagent runtime is not initialized for this session." }],
+						details: undefined,
+						isError: true,
+					};
+				}
+				return messageFromParent(scope, params.to.trim(), params.content);
+			},
+		});
+
+		if (!launchedBy) collaborateAsParent(pi, { agentDir: resolveAgentDir });
+		if (!launchedBy) {
+			registerWorkspaceCleanup(pi, { agentDir: resolveAgentDir, scope: () => parentScope.current(), directory });
+			registerIntegration(pi, {
+				agentDir: resolveAgentDir,
+				scope: () => parentScope.current(),
+				onBranch: (entryId) => parentScope.onBranch(entryId),
+				directory,
+				whenFinal: (runId) => scheduler.whenFinal(runId),
+			});
+		}
+
+		registerOrchestratorTool({
+			name: "subagent_resume",
+			label: "Resume subagent",
+			exposure: "model-only",
+			annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
+			description:
+				"Resume a finished subagent by name or run ID with your next instruction: it continues in the background in its own saved session, with its earlier context, the role and permissions it was launched with (never more than you have now) and its own workspace. It keeps its model and thinking level unless you set them. Its report is delivered when it finishes. A message does not resume a finished subagent; for fresh context, launch a new one.",
+			parameters: Type.Object(
+				{
+					agent: Type.String({ description: "The finished subagent's name or run ID (sub_…)." }),
+					task: Type.String({ description: "Its next instruction, self-contained." }),
+					model: Type.Optional(
+						Type.String({ description: '"provider/model" from subagent_models, or "inherit" for yours.' }),
+					),
+					thinkingLevel: Type.Optional(Type.String({ description: 'A thinking level, or "inherit" for yours.' })),
+				},
+				{ additionalProperties: false },
+			),
+			execute: async (_toolCallId, params, _signal, _onUpdate, toolCtx) => {
+				const ctx = toolCtx ?? parentScope.context();
+				const scope = parentScope.current();
+				if (!scope || !ctx) {
+					return {
+						content: [{ type: "text", text: "Subagent runtime is not initialized for this session." }],
+						details: undefined,
+						isError: true,
+					};
+				}
+				const { model, thinkingLevel } = params;
+				return resumeFromParent(scope, params.agent.trim(), params.task, { model, thinkingLevel }, admission, ctx);
+			},
+		});
+
+		const describeProgress = ({ record: run }: RunEntry, now: number) =>
+			[
+				`${run.name ?? run.runId} (${run.agentName}, ${run.runId}): ${runStatus(run)}${isLegacyRun(run) ? ", in tmux, from before runs ran on pi's RPC: stop it once its work is done" : ""}`,
+				`  task: ${run.taskSummary}`,
+				`  elapsed: ${formatRunElapsed(run, now)}`,
+			].join("\n");
+		registerOrchestratorTool({
+			name: "subagent_status",
+			label: "Subagent status",
+			exposure: "model-only",
+			annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+			description:
+				"Show your open subagents: status (queued, running or stopping), task and elapsed time. Use it to judge whether a child is stuck; stop it with subagent_stop.",
+			parameters: Type.Object(
+				{ agent: Type.Optional(Type.String({ description: "A subagent name or run ID; omit for all." })) },
+				{ additionalProperties: false },
+			),
+			execute: async (_toolCallId, params) => {
+				const now = Date.now();
+				const target = params.agent?.trim();
+				const runs = target ? [views.findOpen(target)].filter((run) => run !== undefined) : views.open();
+				const listed = runs.slice(0, MAX_STATUS_RUNS);
+				const unlisted = runs.length - listed.length;
+				const text =
+					runs.length > 0
+						? [
+								...listed.map((run) => describeProgress(run, now)),
+								...(unlisted ? [`[${unlisted} more not listed here: name one to see it.]`] : []),
+							].join("\n\n")
+						: target
+							? `No running subagent "${target}".`
+							: "No subagents are running.";
+				return {
+					content: [{ type: "text", text }],
+					details: undefined,
+					isError: target !== undefined && runs.length === 0,
+				};
+			},
+		});
+
+		registerOrchestratorTool({
+			name: "subagent_stop",
+			label: "Stop subagent",
+			exposure: "model-only",
+			annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
+			description:
+				'Stop a subagent by name or run ID, every member of a batch or chain by its ID (batch_… or chain_…), or every one with "all": its work is cancelled, queued or under way, and the call returns once none of its processes runs. Its session, Reports and files are kept; only subagent_resume continues it.',
+			parameters: Type.Object(
+				{ agent: Type.String({ description: 'A subagent name or run ID, a batch or chain ID, or "all".' }) },
+				{ additionalProperties: false },
+			),
+			execute: async (_toolCallId, params, signal) =>
+				stopTarget({ scheduler, runs: views, calls }, params.agent.trim(), signal),
+		});
+
+		registerOrchestratorTool({
+			name: "subagent_models",
+			label: "Subagent models",
+			exposure: "model-only",
+			annotations: {
+				readOnlyHint: true,
+				destructiveHint: false,
+				idempotentHint: true,
+				openWorldHint: false,
+			},
+			description:
+				"List models a subagent can run with: provider/model identity, auth status, supported thinking levels, and execution support. Pass the result's provider/id as the subagent `model`.",
+			parameters: Type.Object({
+				provider: Type.Optional(Type.String({ description: "Only list models from this provider." })),
+			}),
+			execute: async (_toolCallId, params, _signal, _onUpdate, toolCtx) => {
+				const ctx = toolCtx ?? parentScope.context();
+				if (!ctx) {
+					return {
+						content: [{ type: "text", text: "Subagent runtime is not initialized for this session." }],
+						details: undefined,
+						isError: true,
+					};
+				}
+				const models = describeSubagentModels(ctx.modelRegistry, params.provider);
+				return { content: [{ type: "text", text: JSON.stringify({ models }) }], details: undefined };
+			},
+		});
+
+		registerOrchestratorTool({
+			name: "subagent",
+			label: "Subagent",
+			exposure: "model-only",
+			annotations: {
+				readOnlyHint: false,
+				destructiveHint: true,
+				idempotentHint: false,
+				openWorldHint: false,
+			},
+			description: buildBaseSubagentDescription(),
+			prepareLoadout: (loadout: ToolLoadout): ToolLoadoutChanges | undefined => {
+				latestLoadout = loadout;
+				if (!catalog) return undefined;
+				if (!loadout.declared.some((t) => t.name === "subagent")) return undefined;
+				const mode = parentScope.context()?.mode;
+				return {
+					descriptions: {
+						subagent: buildBaseSubagentDescription(catalog, mode === "print" || mode === "json"),
+					},
+				};
+			},
+			parameters: SUBAGENT_TOOL_PARAMETERS,
+			execute: async (toolCallId, params, signal, _onUpdate, toolCtx) => {
+				const ctx = toolCtx ?? parentScope.context();
+				if (!ctx) {
+					return {
+						content: [{ type: "text", text: "Subagent runtime is not initialized for this session." }],
+						details: undefined,
+						isError: true,
+					};
+				}
+				const invocation = subagentInvocation(params);
+				if (!invocation.ok) {
+					return { content: [{ type: "text", text: invocation.error }], details: undefined, isError: true };
+				}
+				const parentTurnId = `turn_${activeTurnIndex}`;
+				if ("chain" in invocation) {
+					return runChain(chainDeps, invocation.chain, { toolCallId, parentTurnId, signal }, ctx);
+				}
+				if ("tasks" in invocation) {
+					const scope = parentScope.current();
+					return runTaskBatch(
+						{
+							admission,
+							nameHolder: (name) => (scope ? directory.nameHolder(scope, name)?.record : undefined),
+							cancel: (runId) => scheduler.cancelRun(runId, "caller", "Its batch could not be admitted whole"),
+							agentDir: resolveAgentDir,
+							reports,
+							getRun: (runId) => scheduler.getRun(runId),
+							notify: (member, notice) => parentScope.notify(member, notice),
+							calls,
+						},
+						invocation.tasks,
+						{ toolCallId, parentTurnId, signal },
+						ctx,
+					);
+				}
+				const admitRes = await admission.launch({ toolCallId, parentTurnId, params: invocation.run, signal }, ctx);
+				if (!admitRes.ok) {
+					return {
+						content: [{ type: "text", text: admitRes.error }],
+						details: undefined,
+						isError: true,
+					};
+				}
+
+				return settleRun(
+					{
+						agentDir: resolveAgentDir,
+						reports,
+						whenFinal: (runId) => scheduler.whenFinal(runId),
+						getRun: (runId) => scheduler.getRun(runId),
+					},
+					admitRes.handle,
+					{ background: params.background === true, signal },
+				);
+			},
+		});
+	};
+}
+
+const subagentsExtension: InlineExtension = {
+	name: "subagents",
+	factory: createSubagentsExtension(),
+};
+export default timed("subagents", subagentsExtension.factory);

@@ -1,0 +1,683 @@
+import { existsSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { createServer } from "node:net";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { handleIpcRequest, listSummaries } from "../daemon/handler.ts";
+import type { InstanceSummary, ServerRequest } from "../daemon/ipc/protocol.ts";
+import { RemoteControl } from "../daemon/remote/control.ts";
+import { RemoteStore } from "../daemon/remote/pairing.ts";
+import type { PushResult, WebPushSubscription } from "../daemon/remote/webpush.ts";
+import type { ServerSupervisor } from "../daemon/supervisor.ts";
+import { Tmux } from "../daemon/tmux.ts";
+import { testRegistry } from "./helpers/registry.ts";
+import { validP256dh } from "./support/push.ts";
+
+describe("remote control switch", () => {
+	let dir: string;
+	let control: RemoteControl;
+	let supervisor: ServerSupervisor;
+	let remote: RemoteControl | undefined;
+	const handle = <R extends ServerRequest>(request: R) => handleIpcRequest(supervisor, request, { remote });
+	const make = () =>
+		new RemoteControl({
+			store: new RemoteStore(join(dir, "remote.json")),
+			delivery: supervisor.delivery,
+			listInstances: () => [],
+			send: async () => true,
+			deleteInstance: () => false,
+			renameInstance: () => false,
+			setPinned: () => false,
+			claimStart: () => ({ ok: false, refused: "running" }),
+			paneStarting: () => {},
+			startFailed: () => {},
+			webDir: dir,
+		});
+
+	beforeEach(() => {
+		dir = mkdtempSync(join(tmpdir(), "bluclawd-remote-control-"));
+		vi.stubEnv("PI_SERVER_DIR", dir);
+		supervisor = testRegistry(dir);
+		control = make();
+	});
+	afterEach(async () => {
+		vi.useRealTimers();
+		await control.stop();
+		remote = undefined;
+		rmSync(dir, { recursive: true, force: true });
+	});
+
+	it("turns on with a pairing code and listens; off stops listening", async () => {
+		const on = await control.handle({ type: "remote", action: "on", port: 0 });
+		expect(on).toMatchObject({ type: "remote_result", ok: true, enabled: true, listening: true });
+		if (on.type !== "remote_result") throw new Error(on.error);
+		expect(on.code).toMatch(/^\d{6}$/);
+		expect(on.secret).toMatch(/^[\w-]{22}$/);
+		expect((await fetch(`http://127.0.0.1:${on.port}/api/sessions`)).status).toBe(401);
+		expect(await control.handle({ type: "remote", action: "off" })).toMatchObject({
+			enabled: false,
+			listening: false,
+		});
+		await expect(fetch(`http://127.0.0.1:${on.port}/api/sessions`)).rejects.toThrow();
+	});
+
+	it("comes back on from remote.json, as after a daemon restart", async () => {
+		await control.handle({ type: "remote", action: "on", port: 0 });
+		await control.stop();
+		control = make();
+		await control.apply();
+		expect(await control.handle({ type: "remote", action: "status" })).toMatchObject({
+			enabled: true,
+			listening: true,
+		});
+	});
+
+	it("reports a port in use instead of throwing", async () => {
+		const blocker = createServer();
+		await new Promise<void>((resolve) => blocker.listen(0, "127.0.0.1", () => resolve()));
+		const { port } = blocker.address() as { port: number };
+		try {
+			const on = await control.handle({ type: "remote", action: "on", port });
+			expect(on).toMatchObject({ enabled: true, listening: false });
+			expect((on as { listenError?: string }).listenError).toContain("EADDRINUSE");
+		} finally {
+			await new Promise((r) => blocker.close(() => r(undefined)));
+		}
+	});
+
+	it("starts one server when switched on twice at once", async () => {
+		const [a, b] = await Promise.all([
+			control.handle({ type: "remote", action: "on", port: 0 }),
+			control.handle({ type: "remote", action: "on", port: 0 }),
+		]);
+		if (a.type !== "remote_result" || b.type !== "remote_result") throw new Error("not a result");
+		await control.handle({ type: "remote", action: "off" });
+		await expect(fetch(`http://127.0.0.1:${a.port}/api/sessions`)).rejects.toThrow();
+		await expect(fetch(`http://127.0.0.1:${b.port}/api/sessions`)).rejects.toThrow();
+	});
+
+	it("refuses a pairing code while off, and an unknown device", async () => {
+		expect(await control.handle({ type: "remote", action: "pair" })).toMatchObject({ type: "error", ok: false });
+		expect(await control.handle({ type: "remote", action: "revoke", deviceId: "nope" })).toMatchObject({
+			type: "error",
+			ok: false,
+		});
+	});
+
+	it("keeps one launch command in remote.json: a heartbeat's only while none usable is there, /remote-control's always", async () => {
+		remote = control;
+		const file = join(dir, "remote.json");
+		const [a, b, c] = ["a.js", "b.js", "c.js"].map((name) => {
+			writeFileSync(join(dir, name), "");
+			return [process.execPath, join(dir, name)];
+		});
+		const beat = (command: string[]) =>
+			handle({
+				type: "register",
+				instance: { id: "pane-1", cwd: "/p", leafId: "e2", launch: { command } },
+			});
+		await beat(a);
+		expect(control.launch()).toEqual({ command: a });
+		expect(listSummaries(supervisor).find((i) => i.id === "pane-1")).toMatchObject({ external: true, leafId: "e2" });
+		expect(existsSync(file)).toBe(false);
+		await control.handle({ type: "remote", action: "on", port: 0 });
+		expect(control.store.load().launch).toEqual({ command: a });
+		const written = statSync(file).ino;
+		await beat(b);
+		await beat(a);
+		await beat(b);
+		expect(statSync(file).ino).toBe(written);
+		expect(control.launch()).toEqual({ command: a });
+		rmSync(join(dir, "a.js"));
+		expect(control.launch()).toEqual({ command: b });
+		await beat(b);
+		expect(control.store.load().launch).toEqual({ command: b });
+		await control.handle({ type: "remote", action: "status", launch: { command: c } });
+		expect(control.store.load().launch).toEqual({ command: c });
+		expect(control.launch()).toEqual({ command: c });
+		await control.stop();
+		control = make();
+		remote = control;
+		await control.apply();
+		expect(control.launch()).toEqual({ command: c });
+		const rewritten = statSync(file).ino;
+		await beat(b);
+		expect(statSync(file).ino).toBe(rewritten);
+		await control.handle({ type: "remote", action: "off" });
+		const off = statSync(file).ino;
+		rmSync(join(dir, "c.js"));
+		await beat(b);
+		expect(control.launch()).toEqual({ command: b });
+		expect(statSync(file).ino).toBe(off);
+		await handle({ type: "unregister", instanceId: "pane-1" });
+	});
+
+	it("learns the launch command from /remote-control too, as a fresh pi has no heartbeat yet", async () => {
+		writeFileSync(join(dir, "pi.js"), "");
+		const command = [process.execPath, join(dir, "pi.js")];
+		await control.handle({ type: "remote", action: "status", launch: { command } });
+		await control.handle({ type: "remote", action: "on", port: 0 });
+		expect(control.store.load().launch).toEqual({ command });
+		await control.handle({ type: "remote", action: "status", launch: { command: [] } });
+		expect(control.launch()).toEqual({ command });
+	});
+
+	describe("panes the phone starts", () => {
+		const START_TIMEOUT_MS = 90_000;
+		let instances: InstanceSummary[];
+		let deleted: string[];
+		let deleteInstance: (id: string) => boolean;
+		let tmuxCalls: string[][];
+		let clients: string;
+		let base: string;
+		let token: string;
+
+		beforeEach(async () => {
+			instances = [{ id: "stored", status: "stopped", cwd: dir, sessionFile: join(dir, "s.jsonl") }];
+			deleted = [];
+			deleteInstance = (id) => {
+				deleted.push(id);
+				return true;
+			};
+			tmuxCalls = [];
+			clients = "/dev/ttys001\n";
+			control = new RemoteControl({
+				store: new RemoteStore(join(dir, "remote.json")),
+				delivery: supervisor.delivery,
+				listInstances: () => instances,
+				send: async () => true,
+				renameInstance: () => false,
+				setPinned: () => false,
+				claimStart: () => ({ ok: false, refused: "running" }),
+				paneStarting: () => {},
+				startFailed: () => {},
+				deleteInstance: (id) => deleteInstance(id),
+				tmux: new Tmux(dir, (args) => {
+					tmuxCalls.push(args);
+					return args[0] === "list-clients" ? clients : "";
+				}),
+				webDir: dir,
+			});
+			remote = control;
+			writeFileSync(join(dir, "pi.js"), "");
+			control.noteLaunch({ command: [process.execPath, join(dir, "pi.js")] });
+			const on = await control.handle({ type: "remote", action: "on", port: 0 });
+			if (on.type !== "remote_result" || !on.code) throw new Error("not listening");
+			base = `http://127.0.0.1:${on.port}`;
+			const paired = await fetch(`${base}/api/pair`, {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ code: on.code, deviceName: "iPhone" }),
+			});
+			token = ((await paired.json()) as { token: string }).token;
+			vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+		});
+
+		const post = async (path: string, body: object) => {
+			const res = await fetch(`${base}${path}`, {
+				method: "POST",
+				headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+				body: JSON.stringify(body),
+			});
+			return { status: res.status, body: (await res.json()) as { pane?: string; error?: string } };
+		};
+		const register = (id: string) =>
+			handle({
+				type: "register",
+				instance: { id, cwd: dir, sessionFile: join(dir, "s.jsonl") },
+			});
+		const killed = () => tmuxCalls.filter((args) => args[0] === "kill-session").map((args) => args[2]);
+
+		it("ends a pane it started that never registered", async () => {
+			const task = await post("/api/sessions", { cwd: dir, task: "go" });
+			vi.advanceTimersByTime(START_TIMEOUT_MS - 1);
+			expect(killed()).toEqual([]);
+			vi.advanceTimersByTime(1);
+			expect(killed()).toEqual([`=${task.body.pane}`]);
+			expect(deleted).toEqual([]);
+		});
+
+		it("takes no new session while no terminal on the Mac shows pi", async () => {
+			clients = "";
+			expect(await post("/api/sessions", { cwd: dir, task: "go" })).toEqual({
+				status: 409,
+				body: { error: "pi_not_open" },
+			});
+			expect(tmuxCalls.filter((args) => args[0] === "new-session")).toEqual([]);
+		});
+
+		it("leaves a pane it started alone once it registered", async () => {
+			const task = await post("/api/sessions", { cwd: dir, task: "go" });
+			await register(task.body.pane!);
+			vi.advanceTimersByTime(START_TIMEOUT_MS);
+			expect(killed()).toEqual([]);
+			expect(deleted).toEqual([]);
+			await handle({ type: "unregister", instanceId: task.body.pane! });
+		});
+	});
+
+	it("asks a heartbeat for a report while it has none for the pane, as after a daemon restart", async () => {
+		const beat = () => handle({ type: "register", instance: { id: "pane-1", cwd: "/p" } });
+		expect(await beat()).not.toHaveProperty("wantReport");
+		remote = control;
+		expect(await beat()).toMatchObject({ type: "register_result", wantReport: true });
+		await handle({ type: "remote_report", instanceId: "pane-1", report: { models: [] } });
+		expect(await beat()).not.toHaveProperty("wantReport");
+		await handle({ type: "unregister", instanceId: "pane-1" });
+		expect(await beat()).toMatchObject({ wantReport: true });
+		await handle({ type: "unregister", instanceId: "pane-1" });
+	});
+
+	it("tells a heartbeat when a phone watches its session, and streams what the pane sends", async () => {
+		remote = control;
+		const on = await control.handle({ type: "remote", action: "on", port: 0 });
+		if (on.type !== "remote_result" || !on.code) throw new Error("not listening");
+		const base = `http://127.0.0.1:${on.port}`;
+		const beat = () => handle({ type: "register", instance: { id: "pane-1", cwd: "/p" } });
+		expect(await beat()).not.toHaveProperty("watched");
+		const paired = await fetch(`${base}/api/pair`, {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ code: on.code, deviceName: "iPhone" }),
+		});
+		const { token } = (await paired.json()) as { token: string };
+		const controller = new AbortController();
+		const res = await fetch(`${base}/api/events?token=${token}&session=pane-1`, { signal: controller.signal });
+		const reader = res.body!.getReader();
+		let received = "";
+		const until = async (needle: string) => {
+			while (!received.includes(needle)) received += new TextDecoder().decode((await reader.read()).value);
+		};
+		await until(": connected");
+		expect(await beat()).toMatchObject({ type: "register_result", watched: true });
+		const live = { text: "Working on it", tools: [] };
+		expect(await handle({ type: "remote_live", instanceId: "pane-1", live })).toMatchObject({
+			type: "ack",
+			ok: true,
+		});
+		await until(JSON.stringify({ sessionId: "pane-1", live }));
+		await handle({ type: "remote_live", instanceId: "pane-1", live: null, entryId: "e7" });
+		await until(JSON.stringify({ sessionId: "pane-1", live: null, entryId: "e7" }));
+		await handle({ type: "remote_live", instanceId: "pane-1", live });
+		await handle({ type: "unregister", instanceId: "pane-1" });
+		await until(JSON.stringify({ sessionId: "pane-1", live: null }));
+		controller.abort();
+	});
+
+	it("keeps each pane's latest report for the phone, and signals each one to the phones that have it open", async () => {
+		const instances: InstanceSummary[] = [
+			{ id: "pane-1", status: "online", cwd: "/p", external: true, activity: "idle" },
+		];
+		control = new RemoteControl({
+			store: new RemoteStore(join(dir, "remote.json")),
+			delivery: supervisor.delivery,
+			listInstances: () => instances,
+			send: async () => true,
+			deleteInstance: () => false,
+			renameInstance: () => false,
+			setPinned: () => false,
+			claimStart: () => ({ ok: false, refused: "running" }),
+			paneStarting: () => {},
+			startFailed: () => {},
+			webDir: dir,
+		});
+		remote = control;
+		const report = {
+			models: [{ provider: "openai", id: "gpt-5" }],
+			usage: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0, cost: 0 },
+		};
+		expect(await handle({ type: "remote_report", instanceId: "pane-1", report })).toMatchObject({
+			type: "ack",
+			ok: true,
+		});
+		const on = await control.handle({ type: "remote", action: "on", port: 0 });
+		if (on.type !== "remote_result" || !on.code) throw new Error("not listening");
+		const base = `http://127.0.0.1:${on.port}`;
+		const paired = await fetch(`${base}/api/pair`, {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ code: on.code, deviceName: "iPhone" }),
+		});
+		const { token } = (await paired.json()) as { token: string };
+		const status = () =>
+			fetch(`${base}/api/sessions/pane-1/status`, { headers: { authorization: `Bearer ${token}` } });
+		expect(await (await status()).json()).toEqual({ report });
+
+		const controller = new AbortController();
+		const res = await fetch(`${base}/api/events?token=${token}&session=pane-1`, { signal: controller.signal });
+		const reader = res.body!.getReader();
+		let received = "";
+		const until = async (needle: string) => {
+			while (!received.includes(needle)) received += new TextDecoder().decode((await reader.read()).value);
+		};
+		await until(": connected");
+		const next = { ...report, thinkingLevel: "high" };
+		await handle({ type: "remote_report", instanceId: "pane-1", report: next });
+		await until("event: status");
+		expect(await (await status()).json()).toEqual({ report: next });
+		const signals = received.split("event: status").length;
+		await handle({ type: "remote_report", instanceId: "pane-1", report: next });
+		while (received.split("event: status").length === signals) {
+			received += new TextDecoder().decode((await reader.read()).value);
+		}
+		await handle({ type: "unregister", instanceId: "pane-1" });
+		expect((await status()).status).toBe(404);
+		controller.abort();
+	});
+
+	it("keeps a resumed pane's report under its session's row id, which the phone asks by", async () => {
+		control = new RemoteControl({
+			store: new RemoteStore(join(dir, "remote.json")),
+			delivery: supervisor.delivery,
+			listInstances: () => listSummaries(supervisor),
+			send: async () => true,
+			deleteInstance: () => false,
+			renameInstance: () => false,
+			setPinned: () => false,
+			claimStart: () => ({ ok: false, refused: "running" }),
+			paneStarting: () => {},
+			startFailed: () => {},
+			webDir: dir,
+		});
+		remote = control;
+		const sessionFile = join(dir, "s.jsonl");
+		writeFileSync(sessionFile, "");
+		const register = (id: string) => handle({ type: "register", instance: { id, cwd: "/p", sessionFile } });
+		await register("pi-a");
+		await handle({ type: "unregister", instanceId: "pi-a", reason: "quit" });
+
+		expect(await register("pi-b")).toMatchObject({ wantReport: true });
+		await handle({ type: "remote_report", instanceId: "pi-b", report: { models: [] } });
+		expect(control.hasReport("pi-a")).toBe(true);
+		expect(await register("pi-b")).not.toHaveProperty("wantReport");
+	});
+
+	it("drops the report of a pane that went away without unregistering, but not the sender's own", async () => {
+		const pane = (id: string): InstanceSummary => ({
+			id,
+			status: "online",
+			cwd: "/p",
+			external: true,
+			activity: "idle",
+		});
+		let instances: InstanceSummary[] = [pane("pane-1"), pane("pane-2")];
+		control = new RemoteControl({
+			store: new RemoteStore(join(dir, "remote.json")),
+			delivery: supervisor.delivery,
+			listInstances: () => instances,
+			send: async () => true,
+			deleteInstance: () => false,
+			renameInstance: () => false,
+			setPinned: () => false,
+			claimStart: () => ({ ok: false, refused: "running" }),
+			paneStarting: () => {},
+			startFailed: () => {},
+			webDir: dir,
+		});
+		const report = { models: [] };
+		control.report("pane-1", report);
+		control.report("pane-2", report);
+		instances = [pane("pane-1")];
+		control.report("pane-1", report);
+		control.report("pane-3", report);
+		instances = [pane("pane-1"), pane("pane-2"), pane("pane-3")];
+		const on = await control.handle({ type: "remote", action: "on", port: 0 });
+		if (on.type !== "remote_result" || !on.code) throw new Error("not listening");
+		const base = `http://127.0.0.1:${on.port}`;
+		const paired = await fetch(`${base}/api/pair`, {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ code: on.code, deviceName: "iPhone" }),
+		});
+		const { token } = (await paired.json()) as { token: string };
+		const status = (id: string) =>
+			fetch(`${base}/api/sessions/${id}/status`, { headers: { authorization: `Bearer ${token}` } });
+		expect((await status("pane-1")).status).toBe(200);
+		expect((await status("pane-2")).status).toBe(404);
+		expect((await status("pane-3")).status).toBe(200);
+	});
+
+	it("gives the phone the status line the daemon was started with", async () => {
+		const git = { branch: "main", added: 1, removed: 2 };
+		control = new RemoteControl({
+			store: new RemoteStore(join(dir, "remote.json")),
+			delivery: supervisor.delivery,
+			listInstances: () => [{ id: "pane-1", status: "online", cwd: "/p", external: true, activity: "idle" }],
+			send: async () => true,
+			deleteInstance: () => false,
+			renameInstance: () => false,
+			setPinned: () => false,
+			claimStart: () => ({ ok: false, refused: "running" }),
+			paneStarting: () => {},
+			startFailed: () => {},
+			statusLine: async (cwd) => (cwd === "/p" ? { git } : {}),
+			webDir: dir,
+		});
+		control.report("pane-1", { models: [] });
+		const on = await control.handle({ type: "remote", action: "on", port: 0 });
+		if (on.type !== "remote_result" || !on.code) throw new Error("not listening");
+		const base = `http://127.0.0.1:${on.port}`;
+		const paired = await fetch(`${base}/api/pair`, {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ code: on.code, deviceName: "iPhone" }),
+		});
+		const { token } = (await paired.json()) as { token: string };
+		const res = await fetch(`${base}/api/sessions/pane-1/status`, { headers: { authorization: `Bearer ${token}` } });
+		expect(await res.json()).toEqual({ report: { models: [], git } });
+	});
+
+	describe("push notifications", () => {
+		const subscription = (endpoint: string): WebPushSubscription => ({
+			endpoint,
+			keys: {
+				p256dh: validP256dh(),
+				auth: "AAAAAAAAAAAAAAAAAAAAAA",
+			},
+		});
+		let instances: InstanceSummary[];
+		let pushes: Array<{ endpoint: string; payload: unknown }>;
+		let results: Record<string, PushResult>;
+		let duringPush: (() => void) | undefined;
+		const pane = (activity: "working" | "idle"): InstanceSummary => ({
+			id: "pane-1",
+			status: "online",
+			cwd: "/p",
+			external: true,
+			label: "fix the build",
+			activity,
+			turns: 1,
+			detail: activity === "idle" ? "All green" : "",
+		});
+		const pairDevice = (store: RemoteStore) => {
+			const { code } = store.createCode();
+			const claimed = store.claim(code, "iPhone");
+			if (!("deviceId" in claimed)) throw new Error(claimed.error);
+			return claimed.deviceId;
+		};
+
+		beforeEach(() => {
+			vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+			instances = [pane("working")];
+			pushes = [];
+			results = {};
+			duringPush = undefined;
+			control = new RemoteControl({
+				store: new RemoteStore(join(dir, "remote.json")),
+				delivery: supervisor.delivery,
+				listInstances: () => instances,
+				send: async () => true,
+				deleteInstance: () => false,
+				renameInstance: () => false,
+				setPinned: () => false,
+				claimStart: () => ({ ok: false, refused: "running" }),
+				paneStarting: () => {},
+				startFailed: () => {},
+				webDir: dir,
+				sendPush: async (push, payload) => {
+					pushes.push({ endpoint: push.endpoint, payload: JSON.parse(payload) });
+					duringPush?.();
+					return results[push.endpoint] ?? "ok";
+				},
+			});
+		});
+
+		it("pushes to every subscribed device when a session stops working, and drops a gone subscription", async () => {
+			const phone = pairDevice(control.store);
+			const pad = pairDevice(control.store);
+			pairDevice(control.store);
+			control.store.setPush(phone, subscription("https://web.push.apple.com/phone"));
+			control.store.setPush(pad, subscription("https://web.push.apple.com/pad"));
+			results["https://web.push.apple.com/pad"] = "gone";
+			await control.handle({ type: "remote", action: "on", port: 0 });
+			await vi.advanceTimersByTimeAsync(2000);
+			expect(pushes).toEqual([]);
+			instances = [pane("idle")];
+			await vi.advanceTimersByTimeAsync(1000);
+			const payload = { title: "fix the build", body: "Done — All green", sessionId: "pane-1" };
+			expect(pushes).toEqual([
+				{ endpoint: "https://web.push.apple.com/phone", payload },
+				{ endpoint: "https://web.push.apple.com/pad", payload },
+			]);
+			await vi.advanceTimersByTimeAsync(3000);
+			expect(pushes).toHaveLength(2);
+			expect(control.store.load().devices.map((d) => d.push?.endpoint)).toEqual([
+				"https://web.push.apple.com/phone",
+				undefined,
+				undefined,
+			]);
+		});
+
+		it("looks at no session, and reads remote.json no more, while no device is subscribed", async () => {
+			pairDevice(control.store);
+			const listed = vi.fn(() => instances);
+			control = new RemoteControl({
+				store: new RemoteStore(join(dir, "remote.json")),
+				delivery: supervisor.delivery,
+				listInstances: listed,
+				send: async () => true,
+				deleteInstance: () => false,
+				renameInstance: () => false,
+				setPinned: () => false,
+				claimStart: () => ({ ok: false, refused: "running" }),
+				paneStarting: () => {},
+				startFailed: () => {},
+				webDir: dir,
+				sendPush: async () => "ok",
+			});
+			await control.handle({ type: "remote", action: "on", port: 0 });
+			const read = vi.spyOn(JSON, "parse");
+			await vi.advanceTimersByTimeAsync(5000);
+			expect(listed).not.toHaveBeenCalled();
+			expect(read).not.toHaveBeenCalled();
+			read.mockRestore();
+		});
+
+		it("pushes nothing to a device that has the session open, which shows it already", async () => {
+			const { code } = control.store.createCode();
+			const claimed = control.store.claim(code, "iPhone");
+			if (!("token" in claimed)) throw new Error(claimed.error);
+			const pad = pairDevice(control.store);
+			control.store.setPush(claimed.deviceId, subscription("https://web.push.apple.com/phone"));
+			control.store.setPush(pad, subscription("https://web.push.apple.com/pad"));
+			const on = await control.handle({ type: "remote", action: "on", port: 0 });
+			if (on.type !== "remote_result") throw new Error(on.error);
+			const controller = new AbortController();
+			const res = await fetch(`http://127.0.0.1:${on.port}/api/events?token=${claimed.token}&session=pane-1`, {
+				signal: controller.signal,
+			});
+			await res.body!.getReader().read();
+			await vi.advanceTimersByTimeAsync(1000);
+			instances = [pane("idle")];
+			await vi.advanceTimersByTimeAsync(1000);
+			expect(pushes.map((p) => p.endpoint)).toEqual(["https://web.push.apple.com/pad"]);
+			controller.abort();
+		});
+
+		it("pushes nothing to a device with the app open on any screen, and again once it closed its stream", async () => {
+			const { code } = control.store.createCode();
+			const claimed = control.store.claim(code, "iPhone");
+			if (!("token" in claimed)) throw new Error(claimed.error);
+			const pad = pairDevice(control.store);
+			control.store.setPush(claimed.deviceId, subscription("https://web.push.apple.com/phone"));
+			control.store.setPush(pad, subscription("https://web.push.apple.com/pad"));
+			const on = await control.handle({ type: "remote", action: "on", port: 0 });
+			if (on.type !== "remote_result") throw new Error(on.error);
+			const controller = new AbortController();
+			const res = await fetch(`http://127.0.0.1:${on.port}/api/events?token=${claimed.token}`, {
+				signal: controller.signal,
+			});
+			await res.body!.getReader().read();
+			await vi.advanceTimersByTimeAsync(1000);
+			instances = [pane("idle")];
+			await vi.advanceTimersByTimeAsync(1000);
+			expect(pushes.map((p) => p.endpoint)).toEqual(["https://web.push.apple.com/pad"]);
+			controller.abort();
+			for (let i = 0; i < 50; i++) {
+				instances = [pane("working")];
+				await vi.advanceTimersByTimeAsync(1000);
+				instances = [pane("idle")];
+				await vi.advanceTimersByTimeAsync(1000);
+				if (pushes.some((p) => p.endpoint === "https://web.push.apple.com/phone")) break;
+			}
+			expect(pushes.map((p) => p.endpoint)).toContain("https://web.push.apple.com/phone");
+		});
+
+		it("keeps the subscription a device made after the one the push service said is gone", async () => {
+			const phone = pairDevice(control.store);
+			control.store.setPush(phone, subscription("https://web.push.apple.com/old"));
+			results["https://web.push.apple.com/old"] = "gone";
+			duringPush = () => control.store.setPush(phone, subscription("https://web.push.apple.com/new"));
+			await control.handle({ type: "remote", action: "on", port: 0 });
+			await vi.advanceTimersByTimeAsync(1000);
+			instances = [pane("idle")];
+			await vi.advanceTimersByTimeAsync(1000);
+			expect(pushes.map((p) => p.endpoint)).toEqual(["https://web.push.apple.com/old"]);
+			expect(control.store.load().devices[0].push?.endpoint).toBe("https://web.push.apple.com/new");
+		});
+
+		it("does not send late what changed while no device was subscribed, nor while off", async () => {
+			const phone = pairDevice(control.store);
+			control.store.setPush(phone, subscription("https://web.push.apple.com/phone"));
+			await control.handle({ type: "remote", action: "on", port: 0 });
+			await vi.advanceTimersByTimeAsync(1000);
+			control.store.setPush(phone, undefined);
+			await vi.advanceTimersByTimeAsync(1000);
+			instances = [pane("idle")];
+			await vi.advanceTimersByTimeAsync(1000);
+			control.store.setPush(phone, subscription("https://web.push.apple.com/phone"));
+			await vi.advanceTimersByTimeAsync(2000);
+			expect(pushes).toEqual([]);
+			instances = [pane("working")];
+			await vi.advanceTimersByTimeAsync(1000);
+			await control.handle({ type: "remote", action: "off" });
+			instances = [pane("idle")];
+			await vi.advanceTimersByTimeAsync(3000);
+			expect(pushes).toEqual([]);
+			expect(vi.getTimerCount()).toBe(0);
+		});
+	});
+
+	it("acknowledges a pane's live reply and report when remote control is unavailable", async () => {
+		expect(
+			await handle({
+				type: "remote_live",
+				instanceId: "pane-1",
+				live: { text: "", tools: [] },
+			}),
+		).toMatchObject({ type: "ack", ok: true });
+		expect(await handle({ type: "remote_report", instanceId: "pane-1", report: { models: [] } })).toMatchObject({
+			type: "ack",
+			ok: true,
+		});
+	});
+
+	it("is reached through the daemon's IPC handler", async () => {
+		expect(await handle({ type: "remote", action: "status" })).toMatchObject({ type: "error" });
+		remote = control;
+		expect(await handle({ type: "remote", action: "status" })).toMatchObject({
+			type: "remote_result",
+			enabled: false,
+		});
+	});
+});

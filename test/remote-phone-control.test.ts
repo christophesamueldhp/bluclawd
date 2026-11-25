@@ -1,0 +1,546 @@
+import { describe, expect, it } from "vitest";
+import type { InstanceSummary, PaneReport } from "../daemon/ipc/protocol.ts";
+import {
+	decide,
+	type PhoneAction,
+	type PhoneOutcome,
+	type PhoneSession,
+	phoneSession,
+	type Transcript,
+} from "../daemon/remote/phone-control.ts";
+
+const opus = { provider: "anthropic", id: "claude-opus", name: "Opus" };
+const gpt = { provider: "openai", id: "gpt-5", name: "GPT-5" };
+const png = { mimeType: "image/png" as const, data: "iVBORw0KGgoBAQEB" };
+
+const pane = (id: string, extra: Partial<InstanceSummary> = {}): InstanceSummary => ({
+	id,
+	status: "online",
+	cwd: "/p",
+	external: true,
+	activity: "idle",
+	sessionFile: `/s/${id}.jsonl`,
+	pane: `pi-${id}`,
+	leafId: "cccccccc",
+	...extra,
+});
+
+const full: PaneReport = {
+	model: opus,
+	models: [opus, gpt],
+	thinkingLevels: ["off", "low", "medium", "high"],
+	trust: "always",
+	commands: [
+		{ name: "compact", source: "builtin" },
+		{ name: "skill:pdf", source: "skill" },
+		{ name: "settings", source: "builtin" },
+		{ name: "tasks", source: "extension" },
+	],
+	tasks: [
+		{ id: "b1", kind: "shell", label: "npm run dev", startedAt: 1, outputFile: "/tmp/b1.output" },
+		{ id: "f2", kind: "shell", label: "sleep 60", startedAt: 2, foreground: true },
+	],
+};
+
+const instances: InstanceSummary[] = [
+	pane("running"),
+	{ id: "stopped", status: "stopped", cwd: "/p", sessionFile: "/s/stopped.jsonl" },
+	pane("old"),
+	pane("bare"),
+	pane("busy", { activity: "working" }),
+	pane("drafting", { draft: true }),
+];
+const reports = new Map<string, PaneReport>([
+	["running", full],
+	["old", { model: opus, models: [opus, gpt] }],
+	["busy", full],
+	["drafting", full],
+]);
+const deps = { listInstances: () => instances, report: (id: string) => reports.get(id), terminalOpen: () => true };
+
+function session(id: string): PhoneSession {
+	const found = phoneSession(deps, id);
+	if (!found) throw new Error(`no session ${id}`);
+	return found;
+}
+
+const message = (m: Extract<PhoneOutcome, { message: unknown }>["message"]): PhoneOutcome => ({ message: m });
+const error = (code: Extract<PhoneOutcome, { error: unknown }>["error"]): PhoneOutcome => ({ error: code });
+const operation = (o: Extract<PhoneOutcome, { operation: unknown }>["operation"]): PhoneOutcome => ({ operation: o });
+
+type Row = [
+	label: string,
+	action: PhoneAction,
+	running: PhoneOutcome,
+	stopped: PhoneOutcome,
+	old: PhoneOutcome,
+	bare: PhoneOutcome,
+];
+
+const notRunning = error("session_not_running");
+const tooOld = error("pane_too_old");
+
+const rows: Row[] = [
+	["a prompt", { type: "prompt", text: "next" }, ...four(message({ type: "prompt", text: "next" }), notRunning)],
+	[
+		"a prompt with the phone's id, which its outcome comes back by",
+		{ type: "prompt", text: "next", id: "p-1" },
+		...(["running", "stopped", "old", "bare"].map((id) =>
+			id === "stopped"
+				? notRunning
+				: message({ type: "prompt", text: "next", id: "p-1", sessionFile: `/s/${id}.jsonl` }),
+		) as [PhoneOutcome, PhoneOutcome, PhoneOutcome, PhoneOutcome]),
+	],
+	[
+		"a prompt with images",
+		{ type: "prompt", text: "look", images: [png] },
+		...four(message({ type: "prompt", text: "look", images: [png] }), notRunning),
+	],
+	[
+		"a listed command",
+		{ type: "prompt", text: "/compact keep the notes" },
+		message({ type: "command", text: "/compact keep the notes" }),
+		error("command_refused"),
+		error("command_refused"),
+		error("command_refused"),
+	],
+	[
+		"a literal skill reference",
+		{ type: "prompt", text: "  /skill:pdf report.pdf" },
+		...four(message({ type: "prompt", text: "  /skill:pdf report.pdf" }), notRunning),
+	],
+	...["/settings", "/tasks", "/remote-control pair", "/agent-view", "/tree", "/fork", "/model"].map(
+		(text): Row => [`the Mac-only ${text}`, { type: "prompt", text }, ...all(error("command_refused"))],
+	),
+	[
+		"a slash line with images",
+		{ type: "prompt", text: "/describe", images: [png] },
+		...four(message({ type: "prompt", text: "/describe", images: [png] }), notRunning),
+	],
+	[
+		"text that starts with a path",
+		{ type: "prompt", text: "/Users/me/notes.md says hi" },
+		...four(message({ type: "prompt", text: "/Users/me/notes.md says hi" }), notRunning),
+	],
+	[
+		"a `!` line",
+		{ type: "prompt", text: "!ls -la" },
+		...four(message({ type: "command", text: "!ls -la" }), notRunning),
+	],
+	["a lone `!`", { type: "prompt", text: "!" }, ...four(message({ type: "prompt", text: "!" }), notRunning)],
+	["an abort", { type: "abort" }, ...four(message({ type: "abort" }), notRunning)],
+	[
+		"an offered model",
+		{ type: "model", provider: "openai", id: "gpt-5" },
+		message({ type: "set_model", provider: "openai", id: "gpt-5" }),
+		notRunning,
+		message({ type: "set_model", provider: "openai", id: "gpt-5" }),
+		tooOld,
+	],
+	[
+		"a model not offered",
+		{ type: "model", provider: "openai", id: "gpt-4" },
+		error("invalid_model"),
+		notRunning,
+		error("invalid_model"),
+		tooOld,
+	],
+	...[{}, { provider: "openai" }, { provider: "", id: "gpt-5" }, { provider: 1, id: "gpt-5" }].map(
+		(body): Row => [
+			`a malformed model ${JSON.stringify(body)}`,
+			{ type: "model", provider: undefined, id: undefined, ...body },
+			error("invalid_model"),
+			error("invalid_model"),
+			error("invalid_model"),
+			tooOld,
+		],
+	),
+	[
+		"an offered thinking level",
+		{ type: "thinking", level: "low" },
+		message({ type: "set_thinking", level: "low" }),
+		notRunning,
+		error("invalid_thinking"),
+		tooOld,
+	],
+	...[undefined, 3, "xhigh", ""].map(
+		(level): Row => [
+			`the thinking level ${JSON.stringify(level)}`,
+			{ type: "thinking", level },
+			error("invalid_thinking"),
+			notRunning,
+			error("invalid_thinking"),
+			tooOld,
+		],
+	),
+	[
+		"a trust mode",
+		{ type: "trust", trust: "ask" },
+		message({ type: "set_trust", trust: "ask" }),
+		notRunning,
+		tooOld,
+		tooOld,
+	],
+	...[undefined, "sometimes", ["ask"], "ASK"].map(
+		(trust): Row => [
+			`the trust mode ${JSON.stringify(trust)}`,
+			{ type: "trust", trust },
+			error("invalid_trust"),
+			notRunning,
+			error("invalid_trust"),
+			tooOld,
+		],
+	),
+	[
+		"a rename",
+		{ type: "rename", name: "  fix the build  " },
+		message({ type: "rename", name: "fix the build" }),
+		operation({ type: "rename", name: "fix the build" }),
+		message({ type: "rename", name: "fix the build" }),
+		message({ type: "rename", name: "fix the build" }),
+	],
+	[
+		"a 100-character name",
+		{ type: "rename", name: "x".repeat(100) },
+		message({ type: "rename", name: "x".repeat(100) }),
+		operation({ type: "rename", name: "x".repeat(100) }),
+		message({ type: "rename", name: "x".repeat(100) }),
+		message({ type: "rename", name: "x".repeat(100) }),
+	],
+	...[undefined, 7, "   ", "x".repeat(101), "a\nb", `${String.fromCharCode(27)}[31mred`].map(
+		(name): Row => [`the name ${JSON.stringify(name)}`, { type: "rename", name }, ...all(error("invalid_name"))],
+	),
+	["a pin", { type: "pin", pinned: true }, ...all(operation({ type: "pin", pinned: true }))],
+	["an unpin", { type: "pin", pinned: false }, ...all(operation({ type: "pin", pinned: false }))],
+	...[undefined, "true", 1].map(
+		(pinned): Row => [`the pin ${JSON.stringify(pinned)}`, { type: "pin", pinned }, ...all(error("invalid_pinned"))],
+	),
+	[
+		"a delete",
+		{ type: "delete" },
+		error("session_running"),
+		operation({ type: "delete" }),
+		error("session_running"),
+		error("session_running"),
+	],
+	[
+		"stopping a reported task",
+		{ type: "stop_task", taskId: "f2" },
+		message({ type: "stop_task", id: "f2" }),
+		error("unknown_task"),
+		error("unknown_task"),
+		error("unknown_task"),
+	],
+	["stopping an unknown task", { type: "stop_task", taskId: "b9" }, ...all(error("unknown_task"))],
+	[
+		"a task's output",
+		{ type: "task_output", taskId: "b1" },
+		{ read: { type: "task_output", file: "/tmp/b1.output" } },
+		error("unknown_task"),
+		error("unknown_task"),
+		error("unknown_task"),
+	],
+	[
+		"the output of a task that writes none",
+		{ type: "task_output", taskId: "f2" },
+		error("no_output"),
+		error("unknown_task"),
+		error("unknown_task"),
+		error("unknown_task"),
+	],
+	["an unknown task's output", { type: "task_output", taskId: "b9" }, ...all(error("unknown_task"))],
+	[
+		"a transcript image",
+		{ type: "image", entryId: "aaaaaaaa", index: 1 },
+		...each((transcript) => ({ read: { type: "image", transcript, entryId: "aaaaaaaa", index: 1 } })),
+	],
+	[
+		"a tool result's whole output",
+		{ type: "message_output", entryId: "aaaaaaaa" },
+		...each((transcript) => ({ read: { type: "message_output", transcript, entryId: "aaaaaaaa" } })),
+	],
+	[
+		"the status",
+		{ type: "status" },
+		{
+			status: {
+				model: opus,
+				models: [opus, gpt],
+				thinkingLevels: ["off", "low", "medium", "high"],
+				trust: "always",
+				tasks: [
+					{ id: "b1", kind: "shell", label: "npm run dev", startedAt: 1, output: true },
+					{ id: "f2", kind: "shell", label: "sleep 60", startedAt: 2, foreground: true },
+				],
+			},
+		},
+		error("no_status"),
+		{ status: { model: opus, models: [opus, gpt] } },
+		error("no_status"),
+	],
+	[
+		"the commands",
+		{ type: "commands" },
+		{ commands: full.commands ?? [] },
+		error("no_status"),
+		{ commands: [] },
+		error("no_status"),
+	],
+];
+
+function four(running: PhoneOutcome, stopped: PhoneOutcome): [PhoneOutcome, PhoneOutcome, PhoneOutcome, PhoneOutcome] {
+	return [running, stopped, running, running];
+}
+function all(outcome: PhoneOutcome): [PhoneOutcome, PhoneOutcome, PhoneOutcome, PhoneOutcome] {
+	return [outcome, outcome, outcome, outcome];
+}
+function each(
+	read: (transcript: Transcript) => PhoneOutcome,
+): [PhoneOutcome, PhoneOutcome, PhoneOutcome, PhoneOutcome] {
+	const at = (id: string, leafId?: string): Transcript => ({ sessionFile: `/s/${id}.jsonl`, leafId });
+	return [
+		read(at("running", "cccccccc")),
+		read(at("stopped")),
+		read(at("old", "cccccccc")),
+		read(at("bare", "cccccccc")),
+	];
+}
+
+describe("phone control", () => {
+	describe.each([
+		["a running pane", "running", 2],
+		["a stored row", "stopped", 3],
+		["a pane too old to report the newer fields", "old", 4],
+		["a pane that sent no report", "bare", 5],
+	] as const)("for %s", (_, id, column) => {
+		it.each(rows.map((row) => [row[0], row[1], row[column]] as const))("%s", (_label, action, expected) => {
+			expect(decide(session(id), action)).toEqual(expected);
+		});
+	});
+
+	describe("by the listed row's verdict on whether a Chat may act on it", () => {
+		const rowsByState: InstanceSummary[] = [
+			pane("live"),
+			pane("silent", { silent: true }),
+			{ id: "stored", status: "stopped", cwd: "/p", sessionFile: "/s/stored.jsonl" },
+			{ id: "starting", status: "starting", cwd: "/p", sessionFile: "/s/starting.jsonl" },
+		];
+		const at = (id: string) => {
+			const found = phoneSession(
+				{ listInstances: () => rowsByState, report: () => full, terminalOpen: () => true },
+				id,
+			);
+			if (!found) throw new Error(`no session ${id}`);
+			return found;
+		};
+
+		it.each([
+			["live", { act: true }],
+			["silent", { act: false, reason: "silent" }],
+			["stored", { act: false, reason: "not_running" }],
+			["starting", { act: false, reason: "starting" }],
+		] as const)("a %s row's", (id, verdict) => {
+			expect(at(id).verdict).toEqual(verdict);
+		});
+
+		it.each<[string, PhoneAction, PhoneOutcome]>([
+			["a prompt", { type: "prompt", text: "next", id: "p-1" }, error("session_silent")],
+			["a listed command", { type: "prompt", text: "/compact" }, error("session_silent")],
+			["an abort", { type: "abort" }, error("session_silent")],
+			["an offered model", { type: "model", provider: "openai", id: "gpt-5" }, error("session_silent")],
+			["an offered thinking level", { type: "thinking", level: "low" }, error("session_silent")],
+			["a trust mode", { type: "trust", trust: "ask" }, error("session_silent")],
+			["a rename", { type: "rename", name: "later" }, error("session_silent")],
+			["stopping a reported task", { type: "stop_task", taskId: "f2" }, error("session_silent")],
+			["a pin", { type: "pin", pinned: true }, operation({ type: "pin", pinned: true })],
+			["a delete", { type: "delete" }, error("session_running")],
+			[
+				"a task's output",
+				{ type: "task_output", taskId: "b1" },
+				{ read: { type: "task_output", file: "/tmp/b1.output" } },
+			],
+		])("refuses a Silent pane's row anything for its pi up front: %s", (_, action, expected) => {
+			expect(decide(at("silent"), action)).toEqual(expected);
+		});
+
+		it("refuses a starting row's messages as not running, as before", () => {
+			expect(decide(at("starting"), { type: "prompt", text: "next" })).toEqual(notRunning);
+			expect(decide(at("starting"), { type: "abort" })).toEqual(notRunning);
+		});
+
+		it.each<[string, PhoneAction, PhoneOutcome]>([
+			["a rename", { type: "rename", name: "later" }, operation({ type: "rename", name: "later" })],
+			["stopping a task", { type: "stop_task", taskId: "f2" }, error("unknown_task")],
+			["a task's output", { type: "task_output", taskId: "b1" }, error("unknown_task")],
+			["its status", { type: "status" }, error("no_status")],
+			["its commands", { type: "commands" }, error("no_status")],
+		])("answers a starting row as a stored one, which has no pane: %s", (_, action, expected) => {
+			expect(decide(at("starting"), action)).toEqual(expected);
+			expect(decide(at("stored"), action)).toEqual(expected);
+		});
+
+		it("deletes a stored row, but not a starting one, whose pane would list it again", () => {
+			expect(decide(at("stored"), { type: "delete" })).toEqual(operation({ type: "delete" }));
+			expect(decide(at("starting"), { type: "delete" })).toEqual(notRunning);
+		});
+	});
+
+	describe("a command or `!` line, which goes only into an idle, empty prompt", () => {
+		it.each([
+			["/compact", "busy", error("session_busy")],
+			["!ls", "busy", error("session_busy")],
+			["/compact", "drafting", error("unsent_draft")],
+			["!ls", "drafting", error("unsent_draft")],
+			["compact it", "busy", message({ type: "prompt", text: "compact it" })],
+			["compact it", "drafting", message({ type: "prompt", text: "compact it" })],
+		] as const)("%s to the %s session", (text, id, expected) => {
+			expect(decide(session(id), { type: "prompt", text })).toEqual(expected);
+		});
+	});
+
+	describe("sent with an id, as the phone sends each", () => {
+		const reporting = (id: string) => ({ ...session(id), report: { ...full, outcomes: [] } });
+
+		it("goes with the id and the session file it was sent to, so its pane refuses it on another session", () => {
+			for (const text of ["hi", "/compact", "!ls"]) {
+				expect(decide(reporting("running"), { type: "prompt", text, id: "p-1" })).toEqual(
+					message({
+						type: text === "hi" ? "prompt" : "command",
+						text,
+						id: "p-1",
+						sessionFile: "/s/running.jsonl",
+					}),
+				);
+			}
+		});
+
+		it("is a command a pane that reports outcomes checks for a turn or a draft, with no heartbeat's lag", () => {
+			for (const id of ["busy", "drafting"]) {
+				expect(decide(reporting(id), { type: "prompt", text: "/compact", id: "c-1" })).toEqual(
+					message({ type: "command", text: "/compact", id: "c-1", sessionFile: `/s/${id}.jsonl` }),
+				);
+			}
+			expect(decide(session("busy"), { type: "prompt", text: "/compact", id: "c-1" })).toEqual(
+				error("session_busy"),
+			);
+		});
+	});
+
+	it("shows the prompt outcomes the daemon recorded, only for a pane that reports outcomes", () => {
+		const recorded = [{ id: "p-1", outcome: "taken" as const }];
+		const outcomes = (id: string) => (id === "running" ? recorded : []);
+		const reporting = { ...full, outcomes: [{ id: "p-other", outcome: "queued" as const }] };
+		const shown = (id: string, report: PaneReport) => {
+			const decided = decide(phoneSession({ ...deps, report: () => report, outcomes }, id)!, { type: "status" });
+			return "status" in decided ? decided.status.outcomes : decided;
+		};
+		expect(shown("running", reporting)).toEqual(recorded);
+		expect(shown("running", full)).toBeUndefined();
+		expect(shown("old", { ...full, outcomes: [] })).toEqual([]);
+	});
+
+	it("shows only the status fields it declares, never a new one a pane reports", () => {
+		const newer = { ...full, pistatusline: { worker: "/w.js", config: "/c.json" }, somethingNew: 1 } as PaneReport;
+		const status = decide({ ...session("running"), report: newer }, { type: "status" });
+		expect(status).toHaveProperty("status.model", opus);
+		expect(status).not.toHaveProperty("status.somethingNew");
+		expect(status).not.toHaveProperty("status.pistatusline");
+	});
+
+	it.each([
+		["model", { model: { ...opus, extra: 1 } }, opus],
+		["models", { models: [{ ...gpt, extra: 1 }] }, [gpt]],
+		[
+			"context",
+			{ context: { tokens: 1, contextWindow: 2, percent: null, extra: 1 } },
+			{ tokens: 1, contextWindow: 2, percent: null },
+		],
+		[
+			"usage",
+			{ usage: { input: 1, output: 2, cacheRead: 3, cacheWrite: 4, cost: 0.5, extra: 1 } },
+			{ input: 1, output: 2, cacheRead: 3, cacheWrite: 4, cost: 0.5 },
+		],
+		[
+			"subagentUsage",
+			{
+				subagentUsage: {
+					runCount: 1,
+					input: 1,
+					output: 2,
+					cacheRead: 3,
+					cacheWrite: 4,
+					cost: null,
+					extra: 1,
+				},
+			},
+			{ runCount: 1, input: 1, output: 2, cacheRead: 3, cacheWrite: 4, cost: null },
+		],
+		["notice", { notice: { text: "no model", at: 1, extra: 1 } }, { text: "no model", at: 1 }],
+		[
+			"tasks",
+			{ tasks: [{ id: "f2", kind: "shell", label: "sleep 60", startedAt: 2, extra: 1 }] },
+			[{ id: "f2", kind: "shell", label: "sleep 60", startedAt: 2 }],
+		],
+	])("shows only the fields it declares of the pane's %s", (field, fields, shown) => {
+		const report = { ...full, ...fields } as PaneReport;
+		expect(decide({ ...session("running"), report }, { type: "status" })).toHaveProperty(`status.${field}`, shown);
+	});
+
+	it("shows none of a stored row's last report", () => {
+		expect(decide({ ...session("stopped"), report: full }, { type: "status" })).toEqual(error("no_status"));
+	});
+
+	it("knows no session that is not listed", () => {
+		expect(phoneSession(deps, "nope")).toBeUndefined();
+	});
+});
+
+it("keeps explicit skill identities with their prompt and intended session while refusing undiscovered choices", () => {
+	const id = "a".repeat(64);
+	const target = {
+		...session("running"),
+		report: {
+			...full,
+			commands: [
+				{
+					name: "skill:pdf",
+					source: "skill" as const,
+					skill: { id, path: "/fixture/pdf/SKILL.md", scope: "project", origin: "local", source: "local" },
+				},
+			],
+		},
+	};
+	expect(decide(target, { type: "prompt", text: "Look\n/skill:pdf", skills: [id], id: "p-1" })).toEqual({
+		message: { type: "prompt", text: "Look\n/skill:pdf", skills: [id], id: "p-1", sessionFile: "/s/running.jsonl" },
+	});
+	expect(decide(target, { type: "prompt", text: "hello", skills: ["b".repeat(64)] })).toEqual({
+		error: "invalid_skills",
+	});
+	expect(decide(session("bare"), { type: "prompt", text: "hello", skills: [id] })).toEqual({
+		error: "invalid_skills",
+	});
+});
+
+it("preserves non-skill command decisions when a draft also contains selections", () => {
+	const id = "a".repeat(64);
+	const target = {
+		...session("running"),
+		report: {
+			...full,
+			commands: [
+				...(full.commands ?? []),
+				{
+					name: "skill:review",
+					source: "skill" as const,
+					skill: { id, path: "/fixture/SKILL.md", scope: "project", origin: "local", source: "local" },
+				},
+			],
+		},
+	};
+	expect(decide(target, { type: "prompt", text: "/compact notes /skill:review", skills: [id] })).toEqual({
+		message: { type: "command", text: "/compact notes /skill:review" },
+	});
+	expect(decide(target, { type: "prompt", text: "/tasks /skill:review", skills: [id] })).toEqual({
+		error: "command_refused",
+	});
+});

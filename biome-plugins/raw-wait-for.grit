@@ -1,0 +1,6 @@
+`vi.waitFor($args)` as $call where {
+	register_diagnostic(
+		span=$call,
+		message="Poll with waitFor from test/helpers/wait-for.ts: vi.waitFor's 1s default is sized for an idle machine (CODING_STANDARDS.md, Tests)."
+	)
+}

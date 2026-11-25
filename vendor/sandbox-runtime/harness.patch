@@ -1,0 +1,421 @@
+--- a/test/sandbox/tls-terminate-destroy-soon.test.ts
++++ b/test/sandbox/tls-terminate-destroy-soon.test.ts
+@@ -1,108 +1,67 @@
+-import { afterEach, describe, expect, test } from 'bun:test'
+-import { readFileSync } from 'node:fs'
+-import { createServer, type AddressInfo } from 'node:net'
++import { describe, expect, test } from 'bun:test'
+ import { join } from 'node:path'
+-import { connect, type TLSSocket } from 'node:tls'
+-import { createMitmCA } from '../../src/sandbox/mitm-ca.js'
+-import { mintLeafCert } from '../../src/sandbox/mitm-leaf.js'
+-import { serverTlsOn } from '../../src/sandbox/tls-terminate-proxy.js'
++import { servesEmittedConnections } from '../../src/sandbox/emitted-connection.js'
++import { whichSync } from '../../src/utils/which.js'
++import { spawnAsync } from '../helpers/spawn.js'
+ 
+-// More than the kernel takes for a client that is not reading.
+ const SIZE = 32 << 20
++const hostTls = servesEmittedConnections()
++const runner = hostTls ? process.execPath : whichSync('node')
++const expectedRuntime = hostTls && process.versions.bun ? 'bun' : 'node'
++const fixture = join(
++  import.meta.dir,
++  '../fixtures/tls-terminate/close-lifecycle.mjs',
++)
+ 
+-const FIXTURES = join(import.meta.dir, '..', 'fixtures', 'tls-terminate')
+-const LEAF = (): { cert: string; key: string } => {
+-  const leaf = mintLeafCert(
+-    createMitmCA({
+-      caCertPath: join(FIXTURES, 'ca.crt'),
+-      caKeyPath: join(FIXTURES, 'ca.key'),
+-    }),
+-    'localhost',
+-  )
+-  return { cert: leaf.certPem, key: leaf.keyPem }
++type Lifecycle = {
++  runtime: string
++  read: number
++  ended: boolean
++  handshake: boolean
++  actionPerformed: boolean
++  serverClosed: boolean
++  closedBeforePeerEnd: boolean
++  queuedBeforeAction: number
+ }
+ 
+-const cleanup: Array<() => void> = []
+-afterEach(() => {
+-  while (cleanup.length) cleanup.pop()!()
+-})
+-
+-/**
+- * What a TLS client reads, and whether it saw the end, from a server that
+- * writes SIZE bytes to its TLS socket, all at once, and hands it to `then`.
+- * The client reads nothing for a while, so `then` is done long before the
+- * bytes are taken, and then slowly.
+- */
+-async function lateClientOf(
+-  then: (tls: TLSSocket) => void,
+-): Promise<{ read: number; ended: boolean }> {
+-  // As an http server's sockets are, a CONNECT's among them.
+-  const server = createServer({ allowHalfOpen: true }, socket => {
+-    socket.on('error', () => {})
+-    const { tls } = serverTlsOn(socket, Buffer.alloc(0), LEAF(), () => {})
+-    tls.on('error', () => {})
+-    tls.once('secure', () => {
+-      const chunk = Buffer.alloc(64 << 10, 0x61)
+-      for (let sent = 0; sent < SIZE; sent += chunk.length) tls.write(chunk)
+-      then(tls)
+-    })
+-  })
+-  cleanup.push(() => server.close())
+-  await new Promise<void>(r => server.listen(0, '127.0.0.1', r))
+-  return new Promise(resolve => {
+-    const to = {
+-      port: (server.address() as AddressInfo).port,
+-      host: '127.0.0.1',
+-      allowHalfOpen: true,
+-      servername: 'localhost',
+-      ca: readFileSync(join(FIXTURES, 'ca.crt')),
+-    }
+-    const c = connect(to)
+-    let read = 0
+-    let ended = false
+-    c.pause()
+-    setTimeout(() => c.resume(), 300)
+-    c.on('data', d => {
+-      read += d.length
+-      c.pause()
+-      setTimeout(() => c.resume(), 5)
+-    })
+-    c.on('end', () => {
+-      ended = true
+-      c.end()
+-    })
+-    c.on('error', () => {})
+-    c.on('close', () => resolve({ read, ended }))
+-  })
++async function lifecycle(action: string): Promise<Lifecycle> {
++  if (!runner)
++    throw new Error('TLS lifecycle tests require an installed Node runtime')
++  const args =
++    expectedRuntime === 'bun'
++      ? ['--no-env-file', '--no-install', fixture, action]
++      : [fixture, action]
++  const result = await spawnAsync(runner, args, { timeout: 58000 })
++  expect(result.signal).toBeNull()
++  expect(result.stderr).toBe('')
++  expect(result.status).toBe(0)
++  const observed: Lifecycle = JSON.parse(result.stdout)
++  expect(observed.runtime).toBe(expectedRuntime)
++  expect(observed.handshake).toBe(true)
++  expect(observed.actionPerformed).toBe(true)
++  expect(observed.serverClosed).toBe(true)
++  return observed
+ }
+ 
+-describe('serverTlsOn', () => {
+-  // What a runtime's http server does, depending on the runtime, once it has
+-  // answered an HTTP/1.0 request.
+-  test.each([
+-    ['end(), then destroySoon()', (t: TLSSocket) => (t.end(), t.destroySoon())],
+-    ['destroySoon()', (t: TLSSocket) => t.destroySoon()],
+-  ])(
+-    '%s: the client gets every byte, then the end',
+-    async (_how, close) => {
+-      expect(await lateClientOf(close)).toEqual({ read: SIZE, ended: true })
++describe(`serverTlsOn (${expectedRuntime} subprocess${hostTls ? '' : '; host TLS unsupported'})`, () => {
++  test.each(['end-soon', 'soon'] as const)(
++    '%s: flushes every byte and EOF',
++    async action => {
++      const observed = await lifecycle(action)
++      expect(observed.read).toBe(SIZE)
++      expect(observed.ended).toBe(true)
+     },
+-    60_000,
++    60000,
+   )
+ 
+-  // As the back-stops do, a while after an end that a client does not answer.
+-  test.each([
+-    [
+-      'end(), and destroy() once it has finished',
+-      (t: TLSSocket) => t.end(() => setImmediate(() => t.destroy())),
+-    ],
+-    ['destroy()', (t: TLSSocket) => t.destroy()],
+-  ])(
+-    '%s: cut at once',
+-    async (_how, cut) => {
+-      // Long before the client reads its first byte.
+-      expect((await lateClientOf(cut)).read).toBeLessThan(SIZE)
+-    },
+-    60_000,
+-  )
++  test('destroy(): cuts while writes are still queued', async () => {
++    const observed = await lifecycle('cut')
++    expect(observed.queuedBeforeAction).toBeGreaterThan(0)
++    expect(observed.read).toBeLessThan(SIZE)
++  }, 60000)
++
++  test('destroy() after finish: closes without waiting for the peer FIN', async () => {
++    const observed = await lifecycle('after-finish')
++    expect(observed.closedBeforePeerEnd).toBe(true)
++  }, 60000)
+ })
+--- a/test/sandbox/update-config.test.ts
++++ b/test/sandbox/update-config.test.ts
+@@ -5,7 +5,13 @@
+   type SandboxAskCallback,
+   type SandboxRuntimeConfig,
+ } from '../../src/index.js'
+-import { connect, createServer, type AddressInfo, type Server } from 'net'
++import {
++  connect,
++  createServer,
++  type AddressInfo,
++  type Server,
++  type Socket,
++} from 'net'
+ import { randomBytes } from 'node:crypto'
+ import { getPlatform } from '../../src/utils/platform.js'
+ import {
+@@ -22,6 +28,7 @@
+   proxyPort: number,
+   targetHost: string,
+   withAuth = true,
++  targetPort = 443,
+ ): Promise<{ allowed: boolean; statusCode?: number; response?: string }> {
+   return new Promise(resolve => {
+     const token = withAuth ? SandboxManager.getProxyAuthToken() : undefined
+@@ -30,7 +37,7 @@
+       : ''
+     const socket = connect(proxyPort, '127.0.0.1', () => {
+       socket.write(
+-        `CONNECT ${targetHost}:443 HTTP/1.1\r\nHost: ${targetHost}:443\r\n${auth}\r\n`,
++        `CONNECT ${targetHost}:${targetPort} HTTP/1.1\r\nHost: ${targetHost}:${targetPort}\r\n${auth}\r\n`,
+       )
+     })
+ 
+@@ -400,25 +407,64 @@
+   })
+ 
+   it('strictAllowlist denies off-allowlist hosts without consulting the callback', async () => {
+-    let asked = false
+-    await SandboxManager.initialize(
+-      {
+-        network: {
+-          allowedDomains: ['example.com'],
+-          deniedDomains: [],
+-          strictAllowlist: true,
++    const sockets = new Set<Socket>()
++    let accepted!: () => void
++    const connected = new Promise<void>(resolve => {
++      accepted = resolve
++    })
++    const upstream = createServer(socket => {
++      sockets.add(socket)
++      socket.on('error', () => {})
++      socket.once('close', () => sockets.delete(socket))
++      accepted()
++    })
++    await new Promise<void>((resolve, reject) => {
++      upstream.once('error', reject)
++      upstream.listen(0, '127.0.0.1', resolve)
++    })
++    try {
++      const targetPort = (upstream.address() as AddressInfo).port
++      let asked = false
++      await SandboxManager.initialize(
++        {
++          network: {
++            allowedDomains: [`127.0.0.1:${targetPort}`],
++            deniedDomains: [],
++            strictAllowlist: true,
++          },
++          filesystem: { denyRead: [], allowWrite: [], denyWrite: [] },
+         },
+-        filesystem: { denyRead: [], allowWrite: [], denyWrite: [] },
+-      },
+-      async () => {
+-        asked = true
+-        return true
+-      },
+-    )
+-    const port = SandboxManager.getProxyPort()!
+-    expect((await proxyRequest(port, 'example.com')).allowed).toBe(true)
+-    expect((await proxyRequest(port, 'nope.net')).statusCode).toBe(403)
+-    expect(asked).toBe(false)
++        async () => {
++          asked = true
++          return true
++        },
++      )
++      const port = SandboxManager.getProxyPort()!
++      expect(
++        (await proxyRequest(port, '127.0.0.1', true, targetPort)).allowed,
++      ).toBe(true)
++      let timer: ReturnType<typeof setTimeout> | undefined
++      try {
++        await Promise.race([
++          connected,
++          new Promise<never>((_, reject) => {
++            timer = setTimeout(
++              () => reject(new Error('Allowed upstream was not reached')),
++              2000,
++            )
++          }),
++        ])
++      } finally {
++        if (timer) clearTimeout(timer)
++      }
++      expect((await proxyRequest(port, 'not-allowed.invalid')).statusCode).toBe(
++        403,
++      )
++      expect(asked).toBe(false)
++    } finally {
++      for (const socket of sockets) socket.destroy()
++      await new Promise<void>(resolve => upstream.close(() => resolve()))
++    }
+   })
+ })
+ 
+--- /dev/null
++++ b/test/fixtures/tls-terminate/close-lifecycle.mjs
+@@ -0,0 +1,135 @@
++import { createServer } from 'node:net'
++import { connect } from 'node:tls'
++import { readFileSync } from 'node:fs'
++import { fileURLToPath } from 'node:url'
++import { createMitmCA, disposeMitmCA } from '../../../dist/sandbox/mitm-ca.js'
++import { mintLeafCert } from '../../../dist/sandbox/mitm-leaf.js'
++import { serverTlsOn } from '../../../dist/sandbox/tls-terminate-proxy.js'
++
++const action = process.argv[2]
++if (!['end-soon', 'soon', 'after-finish', 'cut'].includes(action))
++  throw new Error('Invalid TLS lifecycle action')
++const SIZE = 32 << 20
++const caPath = fileURLToPath(new URL('./ca.crt', import.meta.url))
++const ca = createMitmCA({
++  caCertPath: caPath,
++  caKeyPath: fileURLToPath(new URL('./ca.key', import.meta.url)),
++})
++const leaf = mintLeafCert(ca, 'localhost')
++const owned = new Set()
++const timers = new Set()
++let handshake = false
++let actionPerformed = false
++let serverClosed = false
++let clientClosed = false
++let peerEnded = false
++let closedBeforePeerEnd = false
++let queuedBeforeAction = 0
++let read = 0
++let ended = false
++let client
++let succeed
++let fail
++const completion = new Promise((resolve, reject) => {
++  succeed = resolve
++  fail = reject
++})
++const complete = () => {
++  if (serverClosed && clientClosed) succeed()
++}
++const own = socket => {
++  owned.add(socket)
++  socket.once('close', () => owned.delete(socket))
++  return socket
++}
++const later = (fn, ms) => {
++  const timer = setTimeout(() => {
++    timers.delete(timer)
++    fn()
++  }, ms)
++  timers.add(timer)
++}
++const peerEnd = () => {
++  peerEnded = true
++  client.end()
++}
++const server = createServer({ allowHalfOpen: true }, socket => {
++  own(socket).on('error', () => {})
++  const { tls, outbound } = serverTlsOn(
++    socket,
++    Buffer.alloc(0),
++    { cert: leaf.certPem, key: leaf.keyPem },
++    () => {},
++  )
++  own(tls).on('error', () => {})
++  tls.once('close', () => {
++    serverClosed = true
++    closedBeforePeerEnd = !peerEnded
++    if (ended && !peerEnded) peerEnd()
++    complete()
++  })
++  tls.once('secure', () => {
++    handshake = true
++    const chunk = Buffer.alloc(64 << 10, 0x61)
++    for (let sent = 0; sent < SIZE; sent += chunk.length) tls.write(chunk)
++    queuedBeforeAction = Math.max(tls.writableLength, outbound.writableLength)
++    actionPerformed = true
++    if (action === 'end-soon') {
++      tls.end()
++      tls.destroySoon()
++    } else if (action === 'soon') tls.destroySoon()
++    else if (action === 'after-finish')
++      tls.end(() => setImmediate(() => tls.destroy()))
++    else tls.destroy()
++  })
++})
++let output
++try {
++  await new Promise((resolve, reject) => {
++    server.once('error', reject)
++    server.listen(0, '127.0.0.1', resolve)
++  })
++  client = own(
++    connect({
++      port: server.address().port,
++      host: '127.0.0.1',
++      allowHalfOpen: true,
++      servername: 'localhost',
++      ca: readFileSync(caPath),
++    }),
++  )
++  client.pause()
++  later(() => client.resume(), 300)
++  client.on('data', chunk => {
++    read += chunk.length
++    client.pause()
++    later(() => client.resume(), 5)
++  })
++  client.on('end', () => {
++    ended = true
++    if (action !== 'after-finish' || serverClosed) peerEnd()
++  })
++  client.on('error', () => {})
++  client.once('close', () => {
++    clientClosed = true
++    complete()
++  })
++  later(() => fail(new Error('TLS lifecycle did not settle')), 55000)
++  await completion
++  output = {
++    runtime: process.versions.bun ? 'bun' : 'node',
++    read,
++    ended,
++    handshake,
++    actionPerformed,
++    serverClosed,
++    closedBeforePeerEnd,
++    queuedBeforeAction,
++  }
++} finally {
++  for (const timer of timers) clearTimeout(timer)
++  for (const socket of owned) socket.destroy()
++  await new Promise(resolve => server.close(resolve))
++  await disposeMitmCA(ca)
++}
++console.log(JSON.stringify(output))

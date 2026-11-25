@@ -1,0 +1,291 @@
+import { readFileSync } from "node:fs";
+import { visibleWidth } from "@earendil-works/pi-tui";
+import photon from "@silvia-odwyer/photon-node";
+import { describe, expect, it } from "vitest";
+import {
+	BODY_COLOR,
+	cellValues,
+	EYE_COLOR,
+	frameCanvas,
+	type Glyphs,
+	glyphFor,
+	type MascotFrame,
+	mascotGlyphs,
+	mascotWidth,
+	type Pose,
+	poseGrid,
+	REST,
+	renderMascot,
+	SEQUENCES,
+	SOURCE,
+	withHold,
+} from "../ext/_shared/mascot.ts";
+
+const POSES: Pose[] = ["default", "look-left", "look-right", "arms-up"];
+const GLYPHS: Glyphs[] = ["octant", "halfblock"];
+const ALL_FRAMES: MascotFrame[] = [REST, ...Object.values(SEQUENCES).flat()];
+
+function hex(r: number, g: number, b: number): string {
+	return `#${[r, g, b].map((v) => v.toString(16).padStart(2, "0")).join("")}`;
+}
+
+function components(grid: readonly string[], value: string): string[] {
+	const seen = new Set<string>();
+	const sizes: string[] = [];
+	for (let y = 0; y < grid.length; y++) {
+		for (let x = 0; x < grid[y]!.length; x++) {
+			if (grid[y]![x] !== value || seen.has(`${x},${y}`)) continue;
+			const stack = [[x, y]];
+			let [minX, maxX, minY, maxY, count] = [x, x, y, y, 0];
+			while (stack.length > 0) {
+				const [cx, cy] = stack.pop()!;
+				if (grid[cy!]?.[cx!] !== value || seen.has(`${cx},${cy}`)) continue;
+				seen.add(`${cx},${cy}`);
+				count++;
+				[minX, maxX, minY, maxY] = [
+					Math.min(minX, cx!),
+					Math.max(maxX, cx!),
+					Math.min(minY, cy!),
+					Math.max(maxY, cy!),
+				];
+				stack.push([cx! + 1, cy!], [cx! - 1, cy!], [cx!, cy! + 1], [cx!, cy! - 1]);
+			}
+			const w = maxX - minX + 1;
+			const h = maxY - minY + 1;
+			expect(count).toBe(w * h);
+			sizes.push(`${w}×${h}`);
+		}
+	}
+	return sizes;
+}
+
+function shapes(canvas: string[][]): number {
+	const seen = new Set<string>();
+	let count = 0;
+	for (let y = 0; y < canvas.length; y++) {
+		for (let x = 0; x < canvas[y]!.length; x++) {
+			if (canvas[y]![x] === "." || seen.has(`${x},${y}`)) continue;
+			count++;
+			const stack = [[x, y]];
+			while (stack.length > 0) {
+				const [cx, cy] = stack.pop()!;
+				const pixel = canvas[cy!]?.[cx!];
+				if (pixel === undefined || pixel === "." || seen.has(`${cx},${cy}`)) continue;
+				seen.add(`${cx},${cy}`);
+				stack.push([cx! + 1, cy!], [cx! - 1, cy!], [cx!, cy! + 1], [cx!, cy! - 1]);
+			}
+		}
+	}
+	return count;
+}
+
+function legs(grid: readonly string[]): number[][] {
+	return grid.slice(-3).map((row) => (row.match(/#+/g) ?? []).map((run: string) => run.length));
+}
+
+function arms(grid: readonly string[]): number[] {
+	const last = grid[0]!.length - 1;
+	return [0, last].map((x) => grid.filter((row) => row[x] !== ".").length);
+}
+
+describe("mascot source", () => {
+	it("is the grid mascot.svg draws, pixel for pixel", async () => {
+		const svg = readFileSync(new URL("../ext/branding/mascot.svg", import.meta.url), "utf8");
+		const [mask, color] = [...svg.matchAll(/base64,([A-Za-z0-9+/=]+)/g)].map((m) => Buffer.from(m[1]!, "base64"));
+		const decode = (bytes: Buffer) => {
+			const image = photon.PhotonImage.new_from_byteslice(bytes);
+			try {
+				return { width: image.get_width(), pixels: image.get_raw_pixels() };
+			} finally {
+				image.free();
+			}
+		};
+		const maskImage = decode(mask!);
+		const colorImage = decode(color!);
+		const block = 100;
+		const grid: string[] = [];
+		const colors = new Set<string>();
+		for (let y = 0; y < 15; y++) {
+			let row = "";
+			for (let x = 0; x < 20; x++) {
+				const at = ((y * block + block / 2) * maskImage.width + x * block + block / 2) * 4;
+				if ((maskImage.pixels[at] ?? 0) < 128) {
+					row += ".";
+					continue;
+				}
+				const c = hex(colorImage.pixels[at]!, colorImage.pixels[at + 1]!, colorImage.pixels[at + 2]!);
+				colors.add(c);
+				row += c === EYE_COLOR ? "o" : c === BODY_COLOR ? "#" : "?";
+			}
+			grid.push(row);
+		}
+		expect(grid).toEqual(SOURCE);
+		expect([...colors].sort()).toEqual([EYE_COLOR, BODY_COLOR].sort());
+	});
+});
+
+describe("poses", () => {
+	it.each(POSES)("%s keeps every part at its source size, before and after widening", (pose) => {
+		const source = { eyes: components(SOURCE, "o"), legs: legs(SOURCE), arms: arms(SOURCE) };
+		expect(source).toEqual({
+			eyes: ["2×2", "2×2"],
+			legs: [
+				[2, 2, 2, 2],
+				[2, 2, 2, 2],
+				[2, 2, 2, 2],
+			],
+			arms: [3, 3],
+		});
+		const grid = poseGrid(pose);
+		const opaque = (g: readonly string[]) => g.join("").replace(/\./g, "").length;
+		expect(opaque(grid)).toBe(opaque(SOURCE));
+		for (const g of [
+			grid as readonly string[],
+			frameCanvas({ pose, crouchRows: 0 }, "octant").map((row) => row.join("").slice(0, 22)),
+		]) {
+			expect(components(g, "o")).toEqual(source.eyes);
+			expect(legs(g.slice(0, 15))).toEqual(source.legs);
+			expect(arms(g)).toEqual(source.arms);
+		}
+	});
+
+	it("moves only what the pose names", () => {
+		expect(poseGrid("default")).toEqual(SOURCE);
+		expect(poseGrid("look-left")[4]).toBe("..#oo######oo#####..");
+		expect(poseGrid("look-right")[4]).toBe("..#####oo######oo#..");
+		const up = poseGrid("arms-up");
+		expect(up.map((row) => row[0])).toEqual([..."...###........."]);
+		expect(up.slice(9)).toEqual(SOURCE.slice(9));
+		expect(poseGrid("wave").map((row) => row[19])).toEqual([..."..............."]);
+		expect(poseGrid("wave").map((row) => row[0])).toEqual(SOURCE.map((row) => row[0]));
+	});
+});
+
+describe("sequences", () => {
+	it("never splits the mascot: every frame of every sequence is one connected shape", () => {
+		for (const [name, frames] of Object.entries(SEQUENCES)) {
+			for (const [i, frame] of frames.entries()) {
+				if (frame.x === -9) continue;
+				expect(shapes(frameCanvas(frame, "octant")), `${name}[${i}]`).toBe(1);
+			}
+		}
+	});
+
+	it("wave moves parts without resizing them: every frame keeps all pixels and 2×2 eyes", () => {
+		const opaque = (frame: MascotFrame) =>
+			frameCanvas(frame, "octant")
+				.flat()
+				.filter((p) => p !== ".").length;
+		for (const frame of SEQUENCES.wave) {
+			expect(opaque(frame)).toBe(opaque(REST));
+			expect(
+				components(
+					frameCanvas(frame, "octant").map((row) => row.join("")),
+					"o",
+				),
+			).toEqual(["2×2", "2×2"]);
+		}
+		expect(SEQUENCES.wave.some((f) => f.look === "right")).toBe(true);
+		for (const frame of SEQUENCES.wave.filter((f) => f.arm)) {
+			const xs = frame.arm!.map(([x]) => x);
+			const ys = frame.arm!.map(([, y]) => y);
+			const w = Math.max(...xs) - Math.min(...xs) + 1;
+			const h = Math.max(...ys) - Math.min(...ys) + 1;
+			expect([`${w}×${h}`, new Set(frame.arm!.map(String)).size]).toEqual([w === 2 ? "2×3" : "3×2", 6]);
+		}
+		const reach = SEQUENCES.wave.flatMap((f) => (f.arm ?? []).map(([x]) => x));
+		expect([Math.min(...reach), Math.max(...reach)]).toEqual([18, 22]);
+	});
+
+	it("port bluclawd's frame counts and end at rest", () => {
+		expect(Object.fromEntries(Object.entries(SEQUENCES).map(([name, frames]) => [name, frames.length]))).toEqual({
+			jump: 12,
+			look: 11,
+			spin: 10,
+			skip: 14,
+			wave: 26,
+		});
+		for (const frames of Object.values(SEQUENCES)) {
+			const last = frames.at(-1)!;
+			expect([last.pose, last.crouchRows, last.x ?? 0]).toEqual(["default", 0, 0]);
+		}
+		expect(withHold(SEQUENCES.jump, 100)).toHaveLength(14);
+	});
+});
+
+describe("renderMascot", () => {
+	it.each(GLYPHS)("%s: every cell of every frame needs at most two colors", (glyphs) => {
+		for (const frame of ALL_FRAMES) {
+			for (const row of cellValues(frameCanvas(frame, glyphs), glyphs)) {
+				for (const values of row) expect(values.size).toBeLessThanOrEqual(2);
+			}
+		}
+	});
+
+	it("draws 11×4 octants or 22×8 half blocks", () => {
+		expect(mascotWidth("octant")).toBe(12);
+		expect(mascotWidth("halfblock")).toBe(24);
+		for (const glyphs of GLYPHS) {
+			for (const frame of ALL_FRAMES) {
+				const lines = renderMascot(frame, glyphs);
+				expect(lines).toHaveLength(glyphs === "octant" ? 4 : 8);
+				for (const line of lines) expect(visibleWidth(line)).toBe(mascotWidth(glyphs));
+			}
+		}
+	});
+
+	it.each(GLYPHS)("%s decodes back to the frame's pixels", (glyphs) => {
+		const [w, h] = glyphs === "octant" ? [2, 4] : [1, 2];
+		const inverse = new Map(Array.from({ length: 1 << (w * h) }, (_, mask) => [glyphFor(glyphs, mask), mask]));
+		const toPixel = (rgb: string | undefined) =>
+			rgb === undefined
+				? "."
+				: hex(...(rgb.split(";").map(Number) as [number, number, number])) === EYE_COLOR
+					? "o"
+					: "#";
+		for (const frame of ALL_FRAMES.filter((f) => !f.poof)) {
+			const decoded = Array.from({ length: 16 }, () => Array<string>(24).fill("."));
+			for (const [cy, line] of renderMascot(frame, glyphs).entries()) {
+				const cells = line.match(/\x1b\[38;2;([\d;]+?)m(?:\x1b\[48;2;([\d;]+)m|\x1b\[49m)(.)\x1b\[0m|(.)/gu)!;
+				for (const [cx, cell] of cells.entries()) {
+					const m = /\x1b\[38;2;(\d+;\d+;\d+)m(?:\x1b\[48;2;(\d+;\d+;\d+)m|\x1b\[49m)(.)\x1b\[0m/u.exec(cell);
+					const mask = m ? inverse.get(m[3]!)! : 0;
+					for (let bit = 0; bit < w * h; bit++) {
+						const on = (mask >> bit) & 1;
+						const pixel = on ? toPixel(m![1]) : toPixel(m?.[2]);
+						decoded[cy * h + Math.floor(bit / w)]![cx * w + (bit % w)] = pixel;
+					}
+				}
+			}
+			expect(decoded).toEqual(frameCanvas(frame, glyphs));
+		}
+	});
+
+	it("uses Unicode 16's octant code points", () => {
+		expect(glyphFor("octant", 0b100)).toBe("\u{1CD00}");
+		expect(glyphFor("octant", 0b111)).toBe("\u{1CD02}");
+		expect(glyphFor("octant", 0b11111110)).toBe("\u{1CDE5}");
+		expect(glyphFor("octant", 0b1111)).toBe("▀");
+		expect(new Set(Array.from({ length: 256 }, (_, mask) => glyphFor("octant", mask))).size).toBe(256);
+	});
+
+	it("crouches a row, feet out of the box, with dust at both edges", () => {
+		const [dot] = SEQUENCES.jump;
+		expect(dot?.poof).toBe("dot");
+		const lines = renderMascot(dot!, "octant", (t) => `<${t}>`);
+		expect(lines[0]!.trim()).toBe("");
+		expect(lines.at(-1)).toMatch(/^<·>.*<·> $/u);
+		expect(frameCanvas(dot!, "octant").flat().join("").replace(/\./g, "").length).toBeLessThan(
+			frameCanvas(REST, "octant").flat().join("").replace(/\./g, "").length,
+		);
+	});
+});
+
+describe("mascotGlyphs", () => {
+	it("falls back to half blocks only where octants are known to be missing", () => {
+		expect(mascotGlyphs({ TERM_PROGRAM: "ghostty" })).toBe("octant");
+		expect(mascotGlyphs({ TERM_PROGRAM: "tmux" })).toBe("octant");
+		expect(mascotGlyphs({ TERM_PROGRAM: "Apple_Terminal" })).toBe("halfblock");
+		expect(mascotGlyphs({ TERM: "linux" })).toBe("halfblock");
+	});
+});

@@ -1,0 +1,49 @@
+import { existsSync, readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { daemonBuildId } from "./paths.ts";
+
+export { getServerDir, getSocketPath } from "./paths.ts";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+
+interface PackageJson {
+	version?: string;
+}
+
+function getPackageJsonPath(): string {
+	let dir = __dirname;
+	while (dir !== dirname(dir)) {
+		const packageJsonPath = join(dir, "package.json");
+		if (existsSync(packageJsonPath)) {
+			return packageJsonPath;
+		}
+		dir = dirname(dir);
+	}
+	return join(__dirname, "package.json");
+}
+
+let pkg: PackageJson = {};
+try {
+	pkg = JSON.parse(readFileSync(getPackageJsonPath(), "utf-8")) as PackageJson;
+} catch (e: unknown) {
+	const err = e as NodeJS.ErrnoException;
+	if (err.code !== "ENOENT") throw e;
+}
+
+export const VERSION: string = pkg.version || "0.0.0";
+
+export const BUILD_ID: string = daemonBuildId(__dirname, process.env.PI_PACKAGE_ROOT);
+
+export function getInstancesPath(dir: string): string {
+	return join(dir, "instances.json");
+}
+
+export function getDeletedPath(dir: string): string {
+	return join(dir, "deleted.json");
+}
+
+export function getWakeupsPath(dir: string): string {
+	return join(dir, "wakeups.json");
+}
