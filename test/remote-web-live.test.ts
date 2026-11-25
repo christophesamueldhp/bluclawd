@@ -1,5 +1,92 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { api, getToken, setToken } from "#remote-web/api.js";
 import { giveUp, promptKey, refused, sentText, settle, shownText } from "#remote-web/live.js";
+
+describe("the phone's event stream", () => {
+	afterEach(() => {
+		vi.useRealTimers();
+		vi.unstubAllGlobals();
+	});
+
+	function pairedPhone() {
+		let token: string | null = null;
+		vi.stubGlobal("localStorage", {
+			getItem: () => token,
+			setItem: (_key: string, value: string) => {
+				token = value;
+			},
+			removeItem: () => {
+				token = null;
+			},
+		});
+		setToken("test-device");
+		vi.useFakeTimers();
+	}
+
+	function response(...chunks: Uint8Array[]) {
+		return new Response(
+			new ReadableStream({
+				start(controller) {
+					for (const chunk of chunks) controller.enqueue(chunk);
+					controller.close();
+				},
+			}),
+			{ headers: { "content-type": "text/event-stream" } },
+		);
+	}
+
+	it("reconnects with the last delivered event ID and keeps the device token in the header", async () => {
+		pairedPhone();
+		const first = Buffer.from("\nid: 7\r\nevent: live\r\ndata: Hi 👋\r\ndata: there\r\n\r\nid: 8\n");
+		const split = first.indexOf("👋") + 1;
+		const fetch = vi
+			.fn<typeof globalThis.fetch>()
+			.mockResolvedValueOnce(response(Buffer.from(": connected\r"), first.subarray(0, split), first.subarray(split)))
+			.mockResolvedValueOnce(response(Buffer.from("id: 8\nevent: live\ndata: again\n\n")));
+		vi.stubGlobal("fetch", fetch);
+		const source = api.events("pane/a", "stream b");
+		try {
+			const opened = vi.fn();
+			const live = vi.fn();
+			source.addEventListener("open", opened);
+			source.addEventListener("live", live);
+			await vi.advanceTimersByTimeAsync(0);
+			const [path, init] = fetch.mock.calls[0];
+			const url = new URL(String(path), "https://phone.test");
+			expect(url.pathname).toBe("/api/events");
+			expect(Object.fromEntries(url.searchParams)).toEqual({ session: "pane/a", stream: "stream b" });
+			expect(new Headers(init?.headers).get("authorization")).toBe("Bearer test-device");
+			expect(new Headers(init?.headers).has("last-event-id")).toBe(false);
+			expect(live).toHaveBeenNthCalledWith(1, expect.objectContaining({ data: "Hi 👋\nthere", lastEventId: "7" }));
+			await vi.advanceTimersByTimeAsync(3000);
+			expect(fetch.mock.calls[1][0]).toBe(path);
+			expect(new Headers(fetch.mock.calls[1][1]?.headers).get("last-event-id")).toBe("7");
+			expect(live).toHaveBeenNthCalledWith(2, expect.objectContaining({ data: "again", lastEventId: "8" }));
+			expect(opened).toHaveBeenCalledTimes(2);
+		} finally {
+			source.close();
+		}
+		await vi.advanceTimersByTimeAsync(3000);
+		expect(fetch).toHaveBeenCalledTimes(2);
+	});
+
+	it("ends the stream and clears the pairing token when the daemon returns 401", async () => {
+		pairedPhone();
+		const fetch = vi.fn<typeof globalThis.fetch>().mockResolvedValue(new Response(null, { status: 401 }));
+		vi.stubGlobal("fetch", fetch);
+		const source = api.events(undefined, "stream");
+		try {
+			const unauthorized = vi.fn();
+			source.addEventListener("unauthorized", unauthorized);
+			await vi.advanceTimersByTimeAsync(6000);
+			expect(unauthorized).toHaveBeenCalledOnce();
+			expect(getToken()).toBeNull();
+			expect(fetch).toHaveBeenCalledOnce();
+		} finally {
+			source.close();
+		}
+	});
+});
 
 const assistant = (id: string, text: string, thinking?: string) => ({
 	kind: "assistant",

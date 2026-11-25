@@ -53,7 +53,7 @@ import { composerAction, duration, SECOND_TAP_GUARD_MS, turnSince, turnTimes } f
 /** @typedef {import("./image.js").Attachment} Attachment */
 /** @typedef {import("./statusbar.js").Report} Report */
 
-const VERSION = "0.0.64";
+const VERSION = "0.0.65";
 const VIEW_MODE_KEY = "bluclawd-view-mode";
 const keptPending = pendingStore(() => localStorage);
 
@@ -185,7 +185,7 @@ const state = {
 /** @param {string} selector @returns {any} */
 const $ = (selector) => document.querySelector(selector);
 const app = $("#app");
-/** @type {EventSource | undefined} */
+/** @type {ReturnType<typeof api.events> | undefined} */
 let source;
 let streamId = "";
 /** @type {ReturnType<typeof setTimeout> | undefined} */
@@ -275,7 +275,7 @@ function iosTab() {
 /** @param {unknown} error @param {string} [prefix] */
 function handleError(error, prefix = "") {
 	if (error instanceof Unauthorized) {
-		source?.close();
+		closeStream();
 		render();
 		return;
 	}
@@ -558,10 +558,12 @@ function connect() {
 		clearTimeout(watchdog);
 		watchdog = setTimeout(() => {
 			setOnline(false);
-			connect();
+			current.reconnect();
+			alive();
 		}, WATCHDOG_MS);
 	};
-	current.onopen = () => {
+	alive();
+	current.addEventListener("open", () => {
 		clearTimeout(offlineTimer);
 		offlineTimer = undefined;
 		alive();
@@ -571,7 +573,7 @@ function connect() {
 		void loadSessions();
 		void loadMessages();
 		void loadStatus();
-	};
+	});
 	current.addEventListener("sessions", () => {
 		alive();
 		void loadSessions();
@@ -613,16 +615,10 @@ function connect() {
 		render();
 	});
 	current.addEventListener("ping", alive);
-	current.onerror = () => {
-		// The browser asks for it again on its own, unless it gave up.
+	current.addEventListener("error", () => {
 		offlineTimer ??= setTimeout(() => setOnline(false), OFFLINE_AFTER_MS);
-		// EventSource gives up on an HTTP error, such as a revoked token. Find out which, then retry.
-		if (current.readyState === EventSource.CLOSED && source === current) {
-			setTimeout(() => {
-				if (source === current) void loadSessions().then(connect);
-			}, 3000);
-		}
-	};
+	});
+	current.addEventListener("unauthorized", () => handleError(new Unauthorized("unauthorized")));
 }
 
 function pushSupported() {
@@ -2393,8 +2389,7 @@ async function disconnect() {
 		}
 	}
 	clearToken();
-	source?.close();
-	source = undefined;
+	closeStream();
 	state.phoneSheet = false;
 	render();
 }
