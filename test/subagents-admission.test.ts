@@ -612,7 +612,7 @@ describe("Run admission of a run's own directory, and of its Resume", () => {
 	it("refuses a cwd it cannot use, or that the orchestrator's Read rules deny, before storage", async () => {
 		const secret = makeTempDir("secret");
 		const { launch, storageDir, cwd } = await setup({
-			settings: { permissions: { deny: [`Read(${secret}/**)`] } },
+			settings: { permissions: { deny: [`Read(/${secret}/**)`] } },
 		});
 		writeFileSync(join(cwd, "file.txt"), "");
 		expect(errorOf(await launch({ agent: "explorer", cwd: "missing", task: "x" }))).toMatch(

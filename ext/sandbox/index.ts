@@ -1,13 +1,16 @@
 import { homedir, tmpdir } from "node:os";
-import type {
-	ExtensionAPI,
-	ExtensionContext,
-	InlineExtension,
-	SessionShutdownEvent,
-	SessionStartEvent,
-	ToolCallEventResult,
+import { join } from "node:path";
+import {
+	CONFIG_DIR_NAME,
+	type ExtensionAPI,
+	type ExtensionContext,
+	getAgentDir,
+	type InlineExtension,
+	type SessionShutdownEvent,
+	type SessionStartEvent,
+	type ToolCallEventResult,
 } from "@earendil-works/pi-coding-agent";
-import { denyRules } from "../_shared/settings.ts";
+import { denyRules, invalidDenyScopes } from "../_shared/settings.ts";
 import { readSettings, startupSettings } from "../_shared/startup-settings.ts";
 import { timed } from "../_shared/timing.ts";
 import {
@@ -68,10 +71,7 @@ export function networkAsker(context: () => ExtensionContext | undefined): { ask
 
 function notifyUnavailable(ctx: ExtensionContext, status: SandboxStatus): void {
 	if (status.kind !== "unavailable") return;
-	ctx.ui.notify(
-		`Sandbox is on but cannot run: ${status.reason}. The model's bash and monitor are refused.`,
-		"warning",
-	);
+	ctx.ui.notify(`Sandbox cannot run: ${status.reason}. The model's bash and monitor are refused.`, "warning");
 }
 
 function endsBackgroundShells(reason: SessionShutdownEvent["reason"]): boolean {
@@ -81,6 +81,7 @@ function endsBackgroundShells(reason: SessionShutdownEvent["reason"]): boolean {
 function factory(pi: ExtensionAPI): void {
 	resetBashWrapOnLoad();
 	let ctx: ExtensionContext | undefined;
+	let globalSettingsUnreadable = false;
 	const asker = networkAsker(() => ctx);
 
 	async function applySettings(startCtx: ExtensionContext, startEvent?: SessionStartEvent): Promise<void> {
@@ -88,31 +89,38 @@ function factory(pi: ExtensionAPI): void {
 		asker.forget();
 		try {
 			const { settings: sm, errors } = startEvent ? startupSettings(startEvent, startCtx) : readSettings(startCtx);
-			// pi reads an unparseable settings file as empty, which reads as the sandbox being off.
-			for (const { path, scope } of errors) {
-				if (scope === "global")
-					startCtx.ui.notify(`Sandbox is off: ${path ?? "global settings"} could not be read.`, "warning");
+			const globalError = errors.find(({ scope }) => scope === "global");
+			globalSettingsUnreadable = globalError !== undefined;
+			if (globalError) {
+				throw new Error(`${globalError.path ?? "global settings"} could not be read or parsed`);
 			}
 			const setting = globalSandboxSetting(sm);
 			if (setting.kind === "off") {
 				await stopSandbox();
 				return;
 			}
-			const status =
-				setting.kind === "invalid"
-					? markSandboxUnavailable(setting.reason)
-					: await startSandbox(
-							runtimeConfig(
-								setting.settings,
-								denyRules(sm),
-								startCtx.cwd,
-								homedir(),
-								tmpdir(),
-								ownAndDefaultServerDirs(),
-								agentDirs(),
-							),
-							asker.ask,
-						);
+			if (setting.kind === "invalid") throw new Error(setting.reason);
+			const projectError = errors.find(({ scope }) => scope === "project");
+			if (projectError) {
+				throw new Error(`${projectError.path ?? "project settings"} could not be read or parsed`);
+			}
+			const invalidDenyScope = invalidDenyScopes(sm)[0];
+			if (invalidDenyScope) {
+				const dir = invalidDenyScope === "global" ? getAgentDir() : join(startCtx.cwd, CONFIG_DIR_NAME);
+				throw new Error(`${join(dir, "settings.json")}: permissions.deny is not a list of rules`);
+			}
+			const status = await startSandbox(
+				runtimeConfig(
+					setting.settings,
+					denyRules(sm),
+					startCtx.cwd,
+					homedir(),
+					tmpdir(),
+					ownAndDefaultServerDirs(),
+					agentDirs(),
+				),
+				asker.ask,
+			);
 			notifyUnavailable(startCtx, status);
 			const problem = status.kind === "ready" ? await prepareReaper() : undefined;
 			if (problem)
@@ -174,8 +182,12 @@ function factory(pi: ExtensionAPI): void {
 	});
 
 	pi.on("tool_call", async (event): Promise<ToolCallEventResult | undefined> => {
-		if (sandboxStatus().kind === "off") return undefined;
-		if (event.toolName === "powershell") {
+		const status = sandboxStatus();
+		if (status.kind === "off") return undefined;
+		if (status.kind === "unavailable" && (event.toolName === "bash" || event.toolName === "monitor")) {
+			return { block: true, reason: `Sandbox cannot run: ${status.reason}.` };
+		}
+		if (event.toolName === "powershell" && !globalSettingsUnreadable) {
 			return { block: true, reason: "The sandbox is on and powershell does not run inside it; use bash." };
 		}
 		if (event.toolName === "bash" && !sandboxWraps()) {

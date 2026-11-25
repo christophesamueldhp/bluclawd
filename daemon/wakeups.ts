@@ -25,6 +25,22 @@ export interface WakeupEndRecord {
 
 type Entry = { type: string; customType?: string; data?: unknown };
 
+export function isWakeupId(id: unknown): id is string {
+	return typeof id === "string" && /^w[0-9a-z]{8}$/.test(id);
+}
+
+export function skippedWakeupLine(id: unknown): string {
+	return `Skipped a wake-up whose id bluclawd did not generate: ${JSON.stringify(id)?.slice(0, 80)}`;
+}
+
+export function genuineWakeups<T extends { id: unknown }>(records: readonly T[], log: (line: string) => void): T[] {
+	return records.filter((record) => {
+		if (isWakeupId(record?.id)) return true;
+		log(skippedWakeupLine(record?.id));
+		return false;
+	});
+}
+
 export function pendingWakeupsOnAnyBranch(entries: readonly Entry[]): WakeupRecord[] {
 	const ended = new Set<string>();
 	const scheduled: WakeupRecord[] = [];
@@ -58,7 +74,7 @@ const cancelMark = (dir: string, id: string) => join(dir, "wakeups-cancelled", i
 export function markCancelled(dir: string, ids: readonly string[]): void {
 	if (ids.length === 0) return;
 	mkdirSync(join(dir, "wakeups-cancelled"), { recursive: true });
-	for (const id of ids) writeFileSync(cancelMark(dir, id), "");
+	for (const id of ids) if (isWakeupId(id)) writeFileSync(cancelMark(dir, id), "");
 }
 
 function cancelledForGood(dir: string, ids: readonly string[]): boolean {
@@ -71,11 +87,11 @@ function cancelledForGood(dir: string, ids: readonly string[]): boolean {
 }
 
 export function cancelledByDelete(id: string, dir: string = getServerDir()): boolean {
-	return existsSync(cancelMark(dir, id));
+	return isWakeupId(id) && existsSync(cancelMark(dir, id));
 }
 
 export function forgetCancelled(id: string, dir: string = getServerDir()): void {
-	rmSync(cancelMark(dir, id), { force: true });
+	if (isWakeupId(id)) rmSync(cancelMark(dir, id), { force: true });
 }
 
 export interface ProcessId {
@@ -125,6 +141,7 @@ export interface WakeupKeeperDeps {
 	alive: (holder: ProcessId) => boolean;
 	pending: (sessionFile: string) => WakeupRecord[];
 	reopen: (held: HeldWakeups) => unknown;
+	log: (line: string) => void;
 }
 
 export class WakeupKeeper {
@@ -135,10 +152,16 @@ export class WakeupKeeper {
 
 	constructor(deps: WakeupKeeperDeps) {
 		this.deps = deps;
-		this.held = new Map(loadWakeups(deps.dir).map((held) => [held.sessionFile, held]));
+		this.held = new Map(
+			loadWakeups(deps.dir).flatMap((stored) => {
+				const held = { ...stored, wakeups: this.genuine(stored.wakeups) };
+				return held.wakeups.length > 0 ? [[held.sessionFile, held] as const] : [];
+			}),
+		);
 	}
 
-	hold(held: HeldWakeups): void {
+	hold(handed: HeldWakeups): void {
+		const held = { ...handed, wakeups: this.genuine(handed.wakeups) };
 		if (held.wakeups.length > 0) this.held.set(held.sessionFile, held);
 		else this.held.delete(held.sessionFile);
 		this.reopened.delete(held.sessionFile);
@@ -147,9 +170,7 @@ export class WakeupKeeper {
 	}
 
 	drop(sessionFile: string): void {
-		const ids = [...this.deps.pending(sessionFile), ...(this.held.get(sessionFile)?.wakeups ?? [])].map(
-			({ id }) => id,
-		);
+		const ids = [...this.pending(sessionFile), ...(this.held.get(sessionFile)?.wakeups ?? [])].map(({ id }) => id);
 		cancelledForGood(this.deps.dir, ids);
 		this.reopened.delete(sessionFile);
 		if (this.held.delete(sessionFile)) this.saveOrRetryOnNextChange();
@@ -172,9 +193,9 @@ export class WakeupKeeper {
 				changed = true;
 				continue;
 			}
-			const pending = this.deps
-				.pending(held.sessionFile)
-				.filter((wakeup) => !cancelledByDelete(wakeup.id, this.deps.dir));
+			const pending = this.pending(held.sessionFile).filter(
+				(wakeup) => !cancelledByDelete(wakeup.id, this.deps.dir),
+			);
 			changed = true;
 			if (pending.length === 0) {
 				this.held.delete(held.sessionFile);
@@ -200,6 +221,14 @@ export class WakeupKeeper {
 		if (!Number.isFinite(next)) return;
 		this.timer = setTimeout(() => this.check(), next > now ? Math.min(next - now, RECHECK_MS) : RECHECK_MS);
 		this.timer.unref();
+	}
+
+	private genuine(wakeups: readonly WakeupRecord[]): WakeupRecord[] {
+		return genuineWakeups(wakeups, this.deps.log);
+	}
+
+	private pending(sessionFile: string): WakeupRecord[] {
+		return this.genuine(this.deps.pending(sessionFile));
 	}
 
 	private tryReopen(held: HeldWakeups): void {

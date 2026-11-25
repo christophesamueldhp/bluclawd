@@ -13,6 +13,7 @@ import { STATUS_KEYS } from "../_shared/status-keys.ts";
 import { timed } from "../_shared/timing.ts";
 import { type ProjectTrust, trustBadge } from "../_shared/trust-badge.ts";
 import { evaluateToolCallDeny, filterDeniedGrepToolResult } from "./policy.ts";
+import { legacyAbsoluteDenyRule } from "./rules.ts";
 
 export const TRUST_CYCLE: readonly ProjectTrust[] = ["always", "ask", "never"];
 export const TRUST_CHANGED = "bluclawd:trust-changed";
@@ -55,6 +56,15 @@ function factory(pi: ExtensionAPI): void {
 
 	function loadDeny(ctx: ExtensionContext, { settings: sm, errors }: StartupSettings): void {
 		deny = forkSettings.denyRules(sm);
+		for (const rule of deny) {
+			const absolute = legacyAbsoluteDenyRule(rule);
+			if (absolute !== undefined) {
+				ctx.ui.notify(
+					`Deny rule ${rule} is now relative to the working directory. Use ${absolute} for the absolute path.`,
+					"warning",
+				);
+			}
+		}
 		for (const scope of forkSettings.invalidDenyScopes(sm)) {
 			ctx.ui.notify(`${scope} permissions.deny is not a list of rules: none of it is in effect`, "warning");
 		}

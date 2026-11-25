@@ -152,6 +152,9 @@ only and drop a trailing `/**`. A read glob whose first component is a wildcard,
 `/**/*.pem`, is skipped and hides nothing. bluclawd makes `denyRead`, `allowWrite` and
 `denyWrite` absolute, which avoids that for them.
 
+A leading `/` in `allowWrite`, `denyRead`, or `denyWrite` names an absolute path.
+File deny rules in `permissions.deny` follow the [permissions syntax](../README.md#permissions).
+
 Always protected from writes, even inside the project: shell rc files (`.bashrc`, `.zshrc`,
 `.profile`, …), `.gitconfig`, `.gitmodules`, `.ripgreprc`, `.mcp.json`, `.git/hooks`,
 `.git/config`, `.vscode`, `.idea`, `.claude/commands`, `.claude/agents`.

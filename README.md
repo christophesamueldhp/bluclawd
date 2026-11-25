@@ -128,8 +128,10 @@ see connection status and active-account names; press **Tab** to move between se
 provider, then **Add account…** to sign in with OAuth or an API key.
 Give each account a name such as Personal or Work. A successful sign-in activates that account,
 and the previous login stays saved. **Save current login…** names the login already
-stored by Pi without signing in again; if already saved, this renames the active account rather
-than duplicating its OAuth grant. Select a saved account to switch; `✓` marks the active one.
+stored by Pi. A matching login updates the active account with the name you enter.
+When the current login changes and `/accounts` cannot tell whether it belongs to the active account,
+it offers to save the login under a new name before saving or switching. Cancel keeps both logins.
+Select a saved account to switch. `✓` marks the active account.
 **`/accounts provider-id`** opens that provider directly, for example `/accounts openai-codex`.
 Removing an inactive saved account requires confirmation; the active account cannot be removed.
 
@@ -176,8 +178,8 @@ owner-only file permissions, alongside Pi's active credentials in `auth.json`. B
 `PI_CODING_AGENT_DIR`. These are local plaintext credential files, not an encrypted keychain;
 do not share them or commit them. Entered keys and authorization codes are masked and are not
 sent into the conversation. OAuth sign-in shows the provider's URL or device code; open it in
-the browser account you want to add. Token refresh remains Pi's responsibility; switching away
-saves the latest refreshed credential for reuse.
+the browser account you want to add. Pi refreshes tokens. Switching away saves the latest
+refreshed credential when `/accounts` can match it to the active account.
 
 ## What it adds
 
@@ -649,6 +651,11 @@ file. Deny rules
 match text, not behavior. A command that builds the path or name at run time
 (`$(printf rm)`, a variable set earlier, a glob like `~/.ss*`) is not caught.
 
+The permissions matcher and the sandbox resolve file deny rules the same way.
+`Read(/drafts/**)` covers the working directory's `drafts` folder. At startup,
+bluclawd warns when a single-slash rule used to name an existing absolute path
+and shows the `//` spelling that keeps it absolute.
+
 The footer shows pi's own `defaultProjectTrust` (`⏵⏵ always`, `⏸ ask` or
 `✕ never`), and Alt+M cycles it, saving to global settings. It decides whether a
 project's `.pi` settings and extensions load when no `/trust` decision was saved;
@@ -714,8 +721,11 @@ It is read when a session starts, so `/reload` after editing:
 - When the sandbox cannot run, or its `sandbox` setting is malformed, the model's `bash` and
   `monitor` are refused and pi says why. There is no unsandboxed fallback. `bash` is also
   refused when bluclawd's background-bash extension is disabled, since pi's own `bash` does
-  not run inside the sandbox. pi's `powershell` tool is blocked while it is on. Settings pi
-  cannot parse at all turn the sandbox off, with a warning.
+  not run inside the sandbox. pi's `powershell` tool is blocked while it is on.
+- If pi cannot read or parse global settings, bluclawd refuses `bash` and `monitor` and names
+  the file. With the sandbox on, unreadable or unparseable settings in a trusted project or a
+  malformed `permissions.deny` in either scope also stop both tools. With the sandbox off, a
+  malformed deny list only warns. Fix the file and run `/reload` to restore the tools.
 - Outside the sandbox: commands you type with `!`, pi's own tools (`read`, `grep`, `edit`,
   …, which the deny rules govern), MCP servers and other extensions; `monitor`'s `ws` source
   (an in-process WebSocket that reads no files); and background jobs already running when you

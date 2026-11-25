@@ -125,7 +125,7 @@ describe.skipIf(!supported)("a run's shell, on the operating system", () => {
 			runDir,
 			workspace: { root: worktree, source: captured.baseline.source, gitDir: captured.baseline.gitDir },
 			deny: [
-				{ cwd: source, rules: ["Read(secret.txt)", "Read(**/*.pem)", "Read(keys/id.txt)", "Edit(locked.txt)"] },
+				{ cwd: source, rules: ["Read(secret.txt)", "Read(**/*.pem)", "Read(/keys/id.txt)", "Edit(locked.txt)"] },
 				...deniedByDefault(agentDir),
 			],
 		};

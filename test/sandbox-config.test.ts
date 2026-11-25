@@ -149,7 +149,7 @@ describe("runtimeConfig", () => {
 	it("denies reading what Read rules deny, anchored at absolute paths", () => {
 		const config = runtimeConfig(
 			none,
-			["Read(**/.env*)", "Read(~/.ssh/**)", "Read(//etc/hosts)", "Read(/abs/k)", "Read(secrets/**)"],
+			["Read(**/.env*)", "Read(~/.ssh/**)", "Read(//etc/hosts)", "Read(/drafts/**)", "Read(*.txt)"],
 			cwd,
 			home,
 			tmp,
@@ -160,8 +160,8 @@ describe("runtimeConfig", () => {
 			"/proj/**/.env*",
 			"/home/u/.ssh/**",
 			"/etc/hosts",
-			"/abs/k",
-			"/proj/secrets/**",
+			"/proj/drafts/**",
+			"/proj/*.txt",
 		]);
 	});
 
@@ -191,7 +191,7 @@ describe("runtimeConfig", () => {
 			{
 				...none,
 				allowedDomains: ["github.com"],
-				allowWrite: ["~/.npm"],
+				allowWrite: ["~/.npm", "/Volumes/x"],
 				denyRead: ["~/**/.env*", "~/**/.env*"],
 				denyWrite: ["/etc"],
 			},
@@ -207,7 +207,7 @@ describe("runtimeConfig", () => {
 			network: { allowedDomains: ["github.com"], deniedDomains: [], denyUnixSockets: [] },
 			filesystem: {
 				denyRead: ["/home/u/**/.env*"],
-				allowWrite: ["/proj", "/tmp/x", "/home/u/.npm"],
+				allowWrite: ["/proj", "/tmp/x", "/home/u/.npm", "/Volumes/x"],
 				denyWrite: ["/etc"],
 			},
 		});

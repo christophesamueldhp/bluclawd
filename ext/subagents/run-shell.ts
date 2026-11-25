@@ -5,6 +5,7 @@ import { join, relative, sep } from "node:path";
 import type { SandboxRuntimeConfig } from "@anthropic-ai/sandbox-runtime";
 import { type BashOperations, createLocalBashOperations } from "@earendil-works/pi-coding-agent";
 import { runMachMarker } from "../../daemon/run-members.ts";
+import { resolveDenyRulePath } from "../_shared/deny-rule-path.ts";
 import { pathRule } from "../permissions/rules.ts";
 import {
 	checkRuntimeConfig,
@@ -47,7 +48,7 @@ export function runShellConfig(
 			rules.flatMap((rule) => {
 				const parsed = pathRule(rule);
 				return parsed && verbs.includes(parsed.verb)
-					? withCopy(sandboxPath(parsed.path, cwd, home), workspace)
+					? withCopy(resolveDenyRulePath(parsed.path, cwd, home), workspace)
 					: [];
 			}),
 		);

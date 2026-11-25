@@ -3,7 +3,9 @@ import { piCommand } from "../../daemon/tmux.ts";
 import {
 	cancelledByDelete,
 	forgetCancelled,
+	genuineWakeups,
 	type HeldWakeups,
+	isWakeupId,
 	type ProcessId,
 	pendingWakeupsOnAnyBranch,
 	WAKEUP_END_ENTRY,
@@ -50,9 +52,7 @@ export function wakeupDue(input: { delay?: number; at?: string }, now: number): 
 
 export { WAKEUP_END_ENTRY, WAKEUP_ENTRY, type WakeupRecord } from "../../daemon/wakeups.ts";
 
-export function isWakeupTaskId(id: string): boolean {
-	return /^w[0-9a-z]{8}$/.test(id);
-}
+export const isWakeupTaskId = isWakeupId;
 
 export interface Wakeup {
 	id: string;
@@ -204,6 +204,7 @@ interface WakeupLifecycleDeps {
 	holder: () => ProcessId | undefined;
 	now: () => number;
 	killedBySignal: () => Promise<boolean>;
+	log: (line: string) => void;
 }
 
 type ShutdownOutcome = "keep" | "cancel";
@@ -305,7 +306,8 @@ export function wakeupLifecycle(deps: WakeupLifecycleDeps) {
 			const session = deps.session();
 			if (!session) return 0;
 			const sessionId = session.sessionManager.getSessionId();
-			for (const record of pendingWakeupsOnAnyBranch(session.sessionManager.getEntries())) {
+			const pending = genuineWakeups(pendingWakeupsOnAnyBranch(session.sessionManager.getEntries()), deps.log);
+			for (const record of pending) {
 				const deleted = cancelledByDelete(record.id);
 				if (reason === "fork" || deleted) {
 					recordEnd(record, "cancelled");
