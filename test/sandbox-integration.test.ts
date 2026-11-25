@@ -1,10 +1,10 @@
-import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { SandboxManager } from "@anthropic-ai/sandbox-runtime";
 import { createLocalBashOperations } from "@earendil-works/pi-coding-agent";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import { runtimeConfig } from "../ext/sandbox/config.ts";
+import { agentDirs, runtimeConfig } from "../ext/sandbox/config.ts";
 import { networkAsker } from "../ext/sandbox/index.ts";
 import { setSandboxEngine, startSandbox, stopSandbox, wrapExec } from "../ext/sandbox/runtime.ts";
 import { beatsFromNow, descendantCommand, leavingBehind } from "./helpers/heartbeats.ts";
@@ -36,15 +36,7 @@ describe.skipIf(!supported)(
 			return { code: exitCode, output };
 		}
 
-		beforeAll(async () => {
-			dir = realpathSync(mkdtempSync(join(tmpdir(), "bluclawd-sandbox-it-")));
-			writeFileSync(join(dir, ".env"), "SECRET=hunter2\n");
-			writeFileSync(join(dir, "app.ts"), "const SECRET = process.env.SECRET;\n");
-			writeFileSync(join(dir, "draft.txt"), "draft\n");
-			process.env.BLUCLAWD_IT_TOKEN = "hunter3";
-			agentDir = mkdtempSync(join(tmpdir(), "bluclawd-sandbox-it-agent-"));
-			process.env.PI_CODING_AGENT_DIR = agentDir;
-			setSandboxEngine(undefined);
+		async function start(): Promise<void> {
 			const config = runtimeConfig(
 				{
 					allowedDomains: [],
@@ -53,17 +45,35 @@ describe.skipIf(!supported)(
 					denyWrite: [],
 					denyUnixSockets: [],
 					credentialFiles: [],
-					written: { credentials: { envVars: [{ name: "BLUCLAWD_IT_TOKEN", mode: "deny" }] } },
+					written: {
+						credentials: { envVars: [{ name: "BLUCLAWD_IT_TOKEN", mode: "deny" }] },
+						filesystem: { allowRead: [agentDir] },
+					},
 				},
 				["Read(**/.env*)", "Read(*.txt)"],
 				dir,
 				homedir(),
 				tmpdir(),
 				[],
-				[],
+				agentDirs(),
 			);
 			const asker = networkAsker(() => ({ hasUI: true, ui: { confirm } }) as never);
 			expect(await startSandbox(config, asker.ask)).toEqual({ kind: "ready" });
+		}
+
+		beforeAll(async () => {
+			dir = realpathSync(mkdtempSync(join(tmpdir(), "bluclawd-sandbox-it-")));
+			writeFileSync(join(dir, ".env"), "SECRET=hunter2\n");
+			writeFileSync(join(dir, "app.ts"), "const SECRET = process.env.SECRET;\n");
+			writeFileSync(join(dir, "draft.txt"), "draft\n");
+			process.env.BLUCLAWD_IT_TOKEN = "hunter3";
+			agentDir = mkdtempSync(join(tmpdir(), "bluclawd-sandbox-it-agent-"));
+			mkdirSync(join(agentDir, "bluclawd"));
+			writeFileSync(join(agentDir, "auth.json"), "test-pi-auth\n");
+			writeFileSync(join(agentDir, "bluclawd", "accounts.json"), "test-account-vault\n");
+			process.env.PI_CODING_AGENT_DIR = agentDir;
+			setSandboxEngine(undefined);
+			await start();
 		}, 60_000);
 
 		afterAll(async () => {
@@ -112,6 +122,28 @@ describe.skipIf(!supported)(
 			const { output } = await run('echo "token=$BLUCLAWD_IT_TOKEN"');
 			expect(output).toContain("token=");
 			expect(output).not.toContain("hunter3");
+		});
+
+		it("denies reads of pi's auth file and bluclawd's saved accounts", async () => {
+			const accounts = await run('cat "$PI_CODING_AGENT_DIR/bluclawd/accounts.json"');
+			expect(accounts.code).not.toBe(0);
+			expect(accounts.output).not.toContain("test-account-vault");
+			const auth = await run('cat "$PI_CODING_AGENT_DIR/auth.json"');
+			expect(auth.code).not.toBe(0);
+			expect(auth.output).not.toContain("test-pi-auth");
+		});
+
+		it("unsets EXA_API_KEY only in sandboxed shells", async () => {
+			vi.stubEnv("EXA_API_KEY", "test-exa-key");
+			const command = `echo "\${EXA_API_KEY-unset}"`;
+			expect(await run(command)).toMatchObject({ code: 0, output: expect.stringMatching(/^unset\n/) });
+			expect(process.env.EXA_API_KEY).toBe("test-exa-key");
+			await stopSandbox();
+			try {
+				expect(await run(command)).toEqual({ code: 0, output: "test-exa-key\n" });
+			} finally {
+				await start();
+			}
 		});
 
 		it("refuses a host the user did not allow", async () => {
