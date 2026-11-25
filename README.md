@@ -685,8 +685,8 @@ still reads it. Turn on the sandbox to have the operating system stop that. The 
 [sandbox runtime](https://github.com/anthropics/sandbox-runtime), the one bluclawd uses.
 Run `/sandbox` for a menu, `/sandbox on` to enable, `/sandbox off` to disable, or
 `/sandbox status` to inspect the current runtime. The on or off state is saved globally and applies
-as soon as the agent is idle; existing background jobs must be restarted. The command
-preserves existing policy settings and does not add any deny rules or allowed domains.
+as soon as the agent is idle. Restart existing background jobs to apply it to them.
+The command preserves your configured deny rules and allowed domains.
 
 Configure the policy in `~/.pi/agent/settings.json`, since a project's settings cannot change it.
 It is read when a session starts, so `/reload` after editing:
@@ -711,6 +711,9 @@ It is read when a session starts, so `/reload` after editing:
   `.claude/` and `.mcp.json` in the working directory, including a run's worktree. To remove
   a bluclawd deny, name that exact path in the global `sandbox.filesystem.allowWrite` list.
   The runtime's own write restrictions still apply.
+- While the sandbox is on, built-in deny rules also block pi's `write` and `edit` on the protected
+  project paths that remain after `allowWrite` exceptions. They block `read`, `grep`, `find`, and
+  `ls` calls that target either credential file. Pi reports the built-in rule when it blocks a call.
 - No write reaches pi's agent directory, whatever `filesystem.allowWrite` says: a command cannot
   turn the sandbox off in its `settings.json`, add an extension or a skill there, or `pi install`.
   On Linux the sandbox does not start when a symlink on the way to it lies where commands may write

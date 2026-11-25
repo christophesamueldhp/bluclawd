@@ -42,11 +42,14 @@ function denyReason(rule: string): string {
 	return `Blocked by permission rule (deny): ${displayRule(rule)}`;
 }
 
+const FILE_TOOLS = new Set(["read", "write", "edit", "grep", "find", "ls"]);
+
 export function evaluateToolCallDeny(
 	denyRules: readonly string[],
 	toolName: string,
 	rawInput: Record<string, unknown>,
 	cwd: string,
+	builtInFileDeny: readonly string[] = [],
 ): ToolCallEventResult | undefined {
 	const deny = [...denyRules];
 	const { tool, input } = governedToolCall(toolName, rawInput);
@@ -62,8 +65,11 @@ export function evaluateToolCallDeny(
 	const rule = batchItems(tool, input)
 		.map((item) => deniedBy(deny, tool, item, cwd))
 		.find((r) => r !== undefined);
-	if (rule === undefined) return undefined;
-	return { block: true, reason: denyReason(rule) };
+	if (rule !== undefined) return { block: true, reason: denyReason(rule) };
+	if (!FILE_TOOLS.has(tool)) return undefined;
+	const builtIn = deniedBy([...builtInFileDeny], tool, input, cwd);
+	if (builtIn === undefined) return undefined;
+	return { block: true, reason: `Blocked by built-in sandbox rule (deny): ${displayRule(builtIn)}` };
 }
 
 function batchItems(tool: string, input: Record<string, unknown>): Record<string, unknown>[] {

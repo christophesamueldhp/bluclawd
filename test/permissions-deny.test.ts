@@ -449,7 +449,7 @@ describe("the extension", () => {
 			registerShortcut: (_key: unknown, def: any) => {
 				shortcut = def.handler;
 			},
-			events: { emit: (name: string, data: unknown) => announced.push([name, data]) },
+			events: { on: () => {}, emit: (name: string, data: unknown) => announced.push([name, data]) },
 		} as any);
 		const ctx = {
 			cwd,
@@ -521,6 +521,99 @@ describe("the extension", () => {
 			reason: `Blocked by permission rule (deny): ${rule}`,
 		});
 		expect(await call("edit", { path: ".env.example", edits })).toBeUndefined();
+	});
+
+	it("blocks a write to a new file under .pi when the sandbox is on", async () => {
+		const { handlers, ctx, call } = load({ sandbox: { enabled: true } });
+		await handlers.session_start({}, ctx);
+		expect(await call("write", { path: ".pi/extensions/x.ts" })).toEqual({
+			block: true,
+			reason: `Blocked by built-in sandbox rule (deny): Edit(/${join(dir, ".pi")}/**)`,
+		});
+	});
+
+	it.each([true, false])("applies protected path rules according to sandbox.enabled=%s", async (enabled) => {
+		const { handlers, ctx, call } = load({ sandbox: { enabled } });
+		await handlers.session_start({}, ctx);
+		for (const [root, path] of [
+			[".pi", ".pi/settings.json"],
+			[".agents", ".agents/skills/example/SKILL.md"],
+			[".git/hooks", ".git/hooks/pre-commit"],
+			[".git/config", ".git/config"],
+			[".vscode", ".vscode/settings.json"],
+			[".idea", ".idea/workspace.xml"],
+			[".claude", ".claude/settings.json"],
+			[".mcp.json", ".mcp.json"],
+		]) {
+			const expected = enabled
+				? { block: true, reason: `Blocked by built-in sandbox rule (deny): Edit(/${join(dir, root)}/**)` }
+				: undefined;
+			for (const tool of ["write", "edit"]) {
+				expect(await call(tool, { path }), `${tool} ${path}`).toEqual(expected);
+			}
+		}
+		expect(await call("write", { path: ".pi-example/settings.json" })).toBeUndefined();
+	});
+
+	it("releases only paths named exactly in global sandbox allowWrite", async () => {
+		mkdirSync(join(dir, ".pi"));
+		writeFileSync(
+			join(dir, ".pi", "settings.json"),
+			JSON.stringify({ sandbox: { filesystem: { allowWrite: [".pi"] } } }),
+		);
+		const { handlers, ctx, call } = load({
+			sandbox: { enabled: true, filesystem: { allowWrite: [".", join(dir, ".vscode")] } },
+		});
+		await handlers.session_start({}, ctx);
+		for (const tool of ["write", "edit"]) {
+			expect(await call(tool, { path: ".vscode/settings.json" })).toBeUndefined();
+			expect(await call(tool, { path: ".pi/settings.json" })).toMatchObject({ block: true });
+			expect(await call(tool, { path: ".mcp.json" })).toMatchObject({ block: true });
+		}
+	});
+
+	it("matches built-in rules according to the working directory's case sensitivity", async () => {
+		writeFileSync(join(dir, ".case-check"), "");
+		const insensitive = existsSync(join(dir, ".CASE-CHECK"));
+		const { handlers, ctx, call } = load({ sandbox: { enabled: true } });
+		await handlers.session_start({}, ctx);
+		expect((await call("edit", { path: ".PI/settings.json" }))?.block).toBe(insensitive ? true : undefined);
+		expect((await call("read", { path: join(getAgentDir(), "AUTH.JSON") }))?.block).toBe(
+			insensitive ? true : undefined,
+		);
+	});
+
+	it("blocks file tools from opening either agent credential file when the sandbox is on", async () => {
+		const { handlers, ctx, call } = load({ sandbox: { enabled: true } });
+		await handlers.session_start({}, ctx);
+		for (const name of ["auth.json", "bluclawd/accounts.json"]) {
+			const path = join(getAgentDir(), name);
+			for (const tool of ["read", "grep", "find", "ls"]) {
+				expect(await call(tool, { path }), `${tool} ${name}`).toEqual({
+					block: true,
+					reason: `Blocked by built-in sandbox rule (deny): Read(/${path})`,
+				});
+			}
+		}
+		expect(await call("read", { path: join(getAgentDir(), "settings.json") })).toBeUndefined();
+		expect(await call("read", { path: ".pi/settings.json" })).toBeUndefined();
+	});
+
+	it("drops both credential files from a folder grep when the sandbox is on", async () => {
+		const { handlers, ctx } = load({ sandbox: { enabled: true } });
+		await handlers.session_start({}, ctx);
+		const result = await handlers.tool_result(
+			{
+				toolName: "grep",
+				input: { path: getAgentDir(), pattern: "example" },
+				content: [
+					{ type: "text", text: "auth.json:1: example\nbluclawd/accounts.json:2: example\nnotes.txt:3: example" },
+				],
+				isError: false,
+			},
+			ctx,
+		);
+		expect(result).toEqual({ content: [{ type: "text", text: "notes.txt:3: example" }] });
 	});
 
 	it("warns when a settings file cannot be read, and keeps the other file's rules", async () => {
