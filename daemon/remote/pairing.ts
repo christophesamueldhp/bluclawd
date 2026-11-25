@@ -237,7 +237,17 @@ export class RemoteStore {
 		const state = this.load();
 		const devices = state.devices.filter((device) => device.id !== deviceId);
 		if (devices.length === state.devices.length) return false;
-		this.save({ ...state, devices });
+		this.saveRevocation({ ...state, devices });
 		return true;
+	}
+
+	revokeAll(): void {
+		const state = this.editWithoutResetting();
+		this.saveRevocation({ ...state, devices: [] });
+	}
+
+	private saveRevocation(state: RemoteState): void {
+		this.save(state);
+		this.pairing = undefined;
 	}
 }

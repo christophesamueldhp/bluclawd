@@ -108,6 +108,21 @@ describe("remote pairing", () => {
 		expect(store.revoke(device.id)).toBe(false);
 	});
 
+	it.each(["claim", "claimSecret"] as const)("cancels pending pairing for %s when one phone is removed", (claim) => {
+		pairDevice();
+		const [device] = store.load().devices;
+		const { expiresAt } = store.createCode(10);
+
+		expect(store.revoke(device.id)).toBe(true);
+		expect(store[claim]("", "Phone", expiresAt + 1)).toMatchObject({ error: "invalid_code" });
+	});
+
+	it("cancels pending pairing when removing all phones from an empty list", () => {
+		const { expiresAt } = store.createCode(0);
+		store.revokeAll();
+		expect(store.claim("", "Phone", expiresAt + 1)).toMatchObject({ error: "invalid_code" });
+	});
+
 	it("reads remote.json again only once it changed, its own writes and anyone else's", () => {
 		const token = pairDevice("iPhone");
 		expect(store.authenticate(token, 2)?.name).toBe("iPhone");

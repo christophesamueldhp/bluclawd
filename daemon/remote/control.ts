@@ -355,6 +355,9 @@ export class RemoteControl {
 					return { type: "error", ok: false, error: `Unknown device: ${request.deviceId}` };
 				}
 				return this.result();
+			case "revoke_all":
+				this.store.revokeAll();
+				return this.result();
 			default:
 				return this.result();
 		}
