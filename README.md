@@ -714,8 +714,11 @@ It is read when a session starts, so `/reload` after editing:
 - When the sandbox cannot run, or its `sandbox` setting is malformed, the model's `bash` and
   `monitor` are refused and pi says why. There is no unsandboxed fallback. `bash` is also
   refused when bluclawd's background-bash extension is disabled, since pi's own `bash` does
-  not run inside the sandbox. pi's `powershell` tool is blocked while it is on. Settings pi
-  cannot parse at all turn the sandbox off, with a warning.
+  not run inside the sandbox. pi's `powershell` tool is blocked while it is on.
+- If pi cannot read or parse global settings, bluclawd refuses `bash` and `monitor` and names
+  the file. With the sandbox on, unreadable or unparseable settings in a trusted project or a
+  malformed `permissions.deny` in either scope also stop both tools. With the sandbox off, a
+  malformed deny list only warns. Fix the file and run `/reload` to restore the tools.
 - Outside the sandbox: commands you type with `!`, pi's own tools (`read`, `grep`, `edit`,
   …, which the deny rules govern), MCP servers and other extensions; `monitor`'s `ws` source
   (an in-process WebSocket that reads no files); and background jobs already running when you

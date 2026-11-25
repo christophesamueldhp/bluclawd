@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { SandboxRuntimeConfig } from "@anthropic-ai/sandbox-runtime";
-import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, type SessionStartEvent } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import permissions from "../ext/permissions/index.ts";
 import sandbox, { networkAsker } from "../ext/sandbox/index.ts";
@@ -156,7 +156,8 @@ describe("the extension", () => {
 				select: vi.fn<(...args: any[]) => Promise<string | undefined>>(async () => undefined),
 			},
 		};
-		const start = () => handlers.session_start({ type: "session_start", reason: "startup" }, ctx);
+		const start = (reason: SessionStartEvent["reason"] = "startup") =>
+			handlers.session_start({ type: "session_start", reason }, ctx);
 		const call = (toolName: string) => handlers.tool_call({ toolName, input: { command: "Get-Content x" } }, ctx);
 		const command = (args = "") => commands.sandbox.handler(args, ctx);
 		return { handlers, ctx, notes, start, call, command, commands };
@@ -324,13 +325,99 @@ describe("the extension", () => {
 		expect(notes[0]).toContain("boom");
 	});
 
-	it("warns when the global settings cannot be read", async () => {
-		const { start, notes } = load({});
-		writeFileSync(join(getAgentDir(), "settings.json"), "{ not json");
+	it("refuses bash and monitor when pi cannot parse the global settings", async () => {
+		const { start, call } = load({});
+		const path = join(getAgentDir(), "settings.json");
+		writeFileSync(path, "{ not json");
+		const exec = vi.fn(async () => ({ exitCode: 0 }));
+		const wrapped = wrapExec(exec, () => undefined);
 		await start();
-		expect(sandboxStatus()).toEqual({ kind: "off" });
-		expect(notes).toHaveLength(1);
-		expect(notes[0]).toContain("could not be read");
+		const bash = await call("bash");
+		if (!bash?.block) await wrapped("printf ticket-9", dir, { onData: () => {} });
+		expect(exec).not.toHaveBeenCalled();
+		for (const result of [bash, await call("monitor")]) {
+			expect(result).toMatchObject({ block: true, reason: expect.stringContaining(path) });
+		}
+		expect(await call("read")).toBeUndefined();
+		expect(await call("powershell")).toBeUndefined();
+	});
+
+	it.each(["global", "project"])(
+		"refuses bash and monitor with the sandbox on and a bad %s deny list",
+		async (scope) => {
+			const { start, call } = load({ sandbox: { enabled: true } });
+			const settings = { sandbox: { enabled: true }, permissions: { deny: { invalid: true } } };
+			mkdirSync(join(dir, ".pi"));
+			const path = join(scope === "global" ? getAgentDir() : join(dir, ".pi"), "settings.json");
+			writeFileSync(path, JSON.stringify(settings));
+			wrapExec(
+				async () => ({ exitCode: 0 }),
+				() => undefined,
+			);
+			await start();
+			for (const tool of ["bash", "monitor"]) {
+				const result = await call(tool);
+				expect(result).toMatchObject({ block: true, reason: expect.stringContaining(path) });
+				expect(result.reason).toContain("permissions.deny is not a list of rules");
+			}
+			expect(await call("read")).toBeUndefined();
+		},
+	);
+
+	it("refuses bash and monitor with the sandbox on when trusted project settings cannot be parsed", async () => {
+		const { start, call } = load({ sandbox: { enabled: true } });
+		mkdirSync(join(dir, ".pi"));
+		const path = join(dir, ".pi", "settings.json");
+		writeFileSync(path, "{ not json");
+		wrapExec(
+			async () => ({ exitCode: 0 }),
+			() => undefined,
+		);
+		await start();
+		for (const tool of ["bash", "monitor"]) {
+			const result = await call(tool);
+			expect(result).toMatchObject({ block: true, reason: expect.stringContaining(path) });
+			expect(result.reason).toContain("could not be read or parsed");
+		}
+	});
+
+	it("allows bash and monitor with the sandbox on and broken untrusted project settings", async () => {
+		const { start, call, ctx, notes } = load({ sandbox: { enabled: true } });
+		ctx.isProjectTrusted = () => false;
+		mkdirSync(join(dir, ".pi"));
+		writeFileSync(join(dir, ".pi", "settings.json"), "{ not json");
+		wrapExec(
+			async () => ({ exitCode: 0 }),
+			() => undefined,
+		);
+		await start();
+		expect(notes).toEqual([]);
+		expect(await call("bash")).toBeUndefined();
+		expect(await call("monitor")).toBeUndefined();
+	});
+
+	it("allows bash and monitor with a bad deny list while the sandbox is off", async () => {
+		const { start, call } = load({ sandbox: { enabled: false }, permissions: { deny: { invalid: true } } });
+		await start();
+		expect(await call("bash")).toBeUndefined();
+		expect(await call("monitor")).toBeUndefined();
+	});
+
+	it("restores bash and monitor on reload after fixing global settings", async () => {
+		const broken = load({});
+		writeFileSync(join(getAgentDir(), "settings.json"), "{ not json");
+		await broken.start();
+		expect(await broken.call("bash")).toMatchObject({ block: true });
+
+		const fixed = load({ sandbox: { enabled: true } });
+		wrapExec(
+			async () => ({ exitCode: 0 }),
+			() => undefined,
+		);
+		await fixed.start("reload");
+		expect(await fixed.call("bash")).toBeUndefined();
+		expect(await fixed.call("monitor")).toBeUndefined();
+		expect(await fixed.call("powershell")).toMatchObject({ block: true });
 	});
 
 	it("still warns when permissions read the same session_start's settings first", async () => {
@@ -353,7 +440,7 @@ describe("the extension", () => {
 		const path = join(getAgentDir(), "settings.json");
 		expect(notes).toEqual([
 			`${path} could not be read: its deny rules are not in effect`,
-			`Sandbox is off: ${path} could not be read.`,
+			`Sandbox cannot run: ${path} could not be read or parsed. The model's bash and monitor are refused.`,
 		]);
 	});
 
@@ -362,7 +449,7 @@ describe("the extension", () => {
 		const missing = load({ sandbox: { enabled: true } });
 		await missing.start();
 		expect(missing.notes).toHaveLength(1);
-		expect(missing.notes[0]).toContain("Sandbox is on but cannot run: socat not installed");
+		expect(missing.notes[0]).toContain("Sandbox cannot run: socat not installed");
 		expect(missing.notes[0]).toContain("The model's bash and monitor are refused.");
 
 		await stopSandbox();
