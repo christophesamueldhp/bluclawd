@@ -45,11 +45,10 @@ export function invalidDenyScopes(sm: SettingsManager): Array<"global" | "projec
 }
 
 function rulesOf(settings: unknown): string[] | undefined {
-	const permissions = (settings as Mergeable).permissions;
+	const permissions = isPlainObject(settings) ? settings.permissions : undefined;
 	const deny = isPlainObject(permissions) ? permissions.deny : undefined;
 	if (deny === undefined) return [];
-	if (typeof deny === "string") return [deny];
-	if (Array.isArray(deny)) return deny.filter((rule): rule is string => typeof rule === "string");
+	if (Array.isArray(deny) && deny.every((rule) => typeof rule === "string")) return deny;
 	return undefined;
 }
 

@@ -185,7 +185,7 @@ describe("startSandbox", () => {
 			network: { ...config.network, allowAllUnixSockets: true },
 			filesystem: { ...config.filesystem, disabled: true },
 		};
-		expect(await startSandbox(open, deny, "darwin")).toEqual({ kind: "ready" });
+		expect(await startSandbox(open, deny, "darwin")).toEqual({ kind: "ready", filesystemDisabled: true });
 	});
 
 	it("is unavailable on Linux when filesystem.disabled drops the read deny while every Unix socket is allowed", async () => {

@@ -13,6 +13,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, onTestFinished, vi } from "vitest";
+import { processAlive } from "../daemon/processes.ts";
 import { conversation, FAUX, type FauxRequest, hasTmux, PI_CLI, type RealPi, startRealPi } from "./helpers/real-pi.ts";
 import { findRun, reportSeqs } from "./helpers/run-files.ts";
 import { piStartsTimeout } from "./helpers/run-timing.ts";
@@ -93,11 +94,11 @@ function runOf(real: RealPi, name: string): { dir: string; status: string } | un
 const chainIds = (request: FauxRequest) =>
 	toolResults(request).flatMap((text) => /^Chain (chain_\w+):/m.exec(text)?.[1] ?? []);
 
-function scriptProtectedRun(real: RealPi) {
+function scriptProtectedRun(real: RealPi, editorDir = ".idea") {
 	repository(real.cwd, { "notes.txt": "original\n" });
 	real.script("w", [
 		{ tool: "write", args: { path: ".pi/notes.txt", content: "project notes\n" } },
-		{ tool: "write", args: { path: ".IDEA/notes.txt", content: "editor notes\n" } },
+		{ tool: "write", args: { path: `${editorDir}/notes.txt`, content: "editor notes\n" } },
 		{ tool: "write", args: { path: "notes.txt", content: "updated\n" } },
 		{ text: "Updated the notes." },
 	]);
@@ -109,6 +110,47 @@ describe.skipIf(!hasTmux)("integrating an RPC run's changes", () => {
 	afterEach(async () => {
 		await pi?.stop();
 		pi = undefined;
+	});
+
+	it("refuses an Integration when the run's worktree changes during approval", async () => {
+		const real = await startOrchestrator();
+		pi = real;
+		real.script("main", [
+			scriptProtectedRun(real),
+			{ tool: "subagent_integrate", args: { agent: "w" } },
+			{ text: "done" },
+		]);
+		const pane = real.start(["--", "delegate"]);
+		await waitFor(() => expect(real.tmux.capture(pane, 80).join("\n")).toContain("Integrate everything else"));
+		const run = findRun(real.agentDir, "w");
+		if (!run) throw new Error("Expected the run awaiting Integration");
+		write(run.record.cwd, { ".pi/notes.txt": "changed while awaiting approval\n" });
+		real.tmux.sendKeys(pane, ["Down", "Down", "Enter"]);
+
+		const main = await real.waitForRequests("main", 3);
+		expect(toolResults(main[2])[1]).toMatch(/^Not integrated: .*worktree changed/m);
+		expect(read(real.cwd, "notes.txt")).toBe("original\n");
+		expect(existsSync(join(real.cwd, ".pi/notes.txt"))).toBe(false);
+	});
+
+	it("uses the checkout's case sensitivity when listing protected paths", async () => {
+		const real = await startOrchestrator();
+		pi = real;
+		const launch = scriptProtectedRun(real, ".IDEA");
+		const foldsCase = existsSync(join(real.cwd, "NOTES.txt"));
+		real.script("main", [
+			launch,
+			{ tool: "subagent_integrate", args: { agent: "w", preview: true } },
+			{ text: "done" },
+		]);
+		real.start(["--", "delegate"]);
+		const main = await real.waitForRequests("main", 3);
+		const protectedLine = toolResults(main[2])[1]
+			?.split("\n")
+			.find((line) => line.startsWith("Protected paths"));
+		expect(protectedLine).toBe(
+			`Protected paths requiring approval: ${foldsCase ? ".IDEA/notes.txt, " : ""}.pi/notes.txt`,
+		);
 	});
 
 	it.each([
@@ -135,19 +177,19 @@ describe.skipIf(!hasTmux)("integrating an RPC run's changes", () => {
 		expect(existsSync(join(repo, ".pi/notes.txt"))).toBe(false);
 		expect(read(repo, "notes.txt")).toBe("original\n");
 		expect(screen()).toContain(".pi/notes.txt");
-		expect(screen()).toContain(".IDEA/notes.txt");
+		expect(screen()).toContain(".idea/notes.txt");
 		real.tmux.sendKeys(pane, keys.includes("Escape") ? keys : [...keys, "Enter"]);
 
 		const main = await real.waitForRequests("main", 4);
 		const [, preview, applied] = toolResults(main[3]);
-		expect(preview).toContain("Protected paths requiring approval: .IDEA/notes.txt, .pi/notes.txt");
+		expect(preview).toContain("Protected paths requiring approval: .idea/notes.txt, .pi/notes.txt");
 		expect(read(repo, "notes.txt")).toBe(ordinary ? "updated\n" : "original\n");
 		expect(existsSync(join(repo, ".pi/notes.txt"))).toBe(include);
-		expect(existsSync(join(repo, ".IDEA/notes.txt"))).toBe(include);
+		expect(existsSync(join(repo, ".idea/notes.txt"))).toBe(include);
 		if (include)
-			expect(applied).toMatch(/^Integration: applied A \.IDEA\/notes\.txt, A \.pi\/notes\.txt, M notes\.txt to /m);
+			expect(applied).toMatch(/^Integration: applied A \.idea\/notes\.txt, A \.pi\/notes\.txt, M notes\.txt to /m);
 		else {
-			expect(applied).toContain("Skipped protected paths: .IDEA/notes.txt, .pi/notes.txt");
+			expect(applied).toContain("Skipped protected paths: .idea/notes.txt, .pi/notes.txt");
 			expect(applied).toMatch(ordinary ? /^Integration: applied M notes\.txt to /m : /^Integration cancelled\./m);
 		}
 	});
@@ -173,7 +215,18 @@ describe.skipIf(!hasTmux)("integrating an RPC run's changes", () => {
 			if (!session) throw new Error("The orchestrator has no session file yet.");
 			return session;
 		});
+		const panePid = spawnSync(
+			"tmux",
+			["-S", real.tmux.socket, "display-message", "-p", "-t", `=${pane}:`, "#{pane_pid}"],
+			{
+				encoding: "utf8",
+			},
+		);
+		const pid = Number(panePid.stdout.trim());
+		if (panePid.status !== 0 || !Number.isInteger(pid) || pid <= 1)
+			throw new Error("Could not find the orchestrator PID");
 		real.tmux.hangUpAsQuit(pane);
+		await waitFor(() => expect(processAlive(pid)).toBe(false));
 		write(repo, { ".pi/notes.txt": "local notes\n" });
 		const run = spawnSync(
 			process.execPath,
@@ -191,9 +244,9 @@ describe.skipIf(!hasTmux)("integrating an RPC run's changes", () => {
 		const [, applied] = toolResults(main[3]);
 		expect(read(repo, "notes.txt")).toBe("updated\n");
 		expect(read(repo, ".pi/notes.txt")).toBe("local notes\n");
-		expect(existsSync(join(repo, ".IDEA/notes.txt"))).toBe(false);
+		expect(existsSync(join(repo, ".idea/notes.txt"))).toBe(false);
 		expect(applied).toMatch(/^Integration: applied M notes\.txt to /m);
-		expect(applied).toContain("Skipped protected paths: .IDEA/notes.txt, .pi/notes.txt");
+		expect(applied).toContain("Skipped protected paths: .idea/notes.txt, .pi/notes.txt");
 	});
 
 	it("can integrate previously skipped protected paths without reapplying ordinary changes", async () => {
@@ -221,7 +274,7 @@ describe.skipIf(!hasTmux)("integrating an RPC run's changes", () => {
 
 		const main = await real.waitForRequests("main", 5);
 		const applied = toolResults(main[4]).at(-1);
-		expect(applied).toMatch(/^Integration: applied A \.IDEA\/notes\.txt, A \.pi\/notes\.txt to /m);
+		expect(applied).toMatch(/^Integration: applied A \.idea\/notes\.txt, A \.pi\/notes\.txt to /m);
 		expect(read(real.cwd, ".pi/notes.txt")).toBe("project notes\n");
 		expect(read(real.cwd, "notes.txt")).toBe("edited after Integration\n");
 	});

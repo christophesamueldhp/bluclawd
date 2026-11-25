@@ -399,27 +399,29 @@ describe("the extension", () => {
 		expect(await call("powershell")).toBeUndefined();
 	});
 
-	it.each(["global", "project"])(
-		"refuses bash and monitor with the sandbox on and a bad %s deny list",
-		async (scope) => {
-			const { start, call } = load({ sandbox: { enabled: true } });
-			const settings = { sandbox: { enabled: true }, permissions: { deny: { invalid: true } } };
-			mkdirSync(join(dir, ".pi"));
-			const path = join(scope === "global" ? getAgentDir() : join(dir, ".pi"), "settings.json");
-			writeFileSync(path, JSON.stringify(settings));
-			wrapExec(
-				async () => ({ exitCode: 0 }),
-				() => undefined,
-			);
-			await start();
-			for (const tool of ["bash", "monitor"]) {
-				const result = await call(tool);
-				expect(result).toMatchObject({ block: true, reason: expect.stringContaining(path) });
-				expect(result.reason).toContain("permissions.deny is not a list of rules");
-			}
-			expect(await call("read")).toBeUndefined();
-		},
-	);
+	it.each([
+		["global", { invalid: true }],
+		["project", { invalid: true }],
+		["global", "Write(notes.txt)"],
+		["project", ["Write(notes.txt)", false]],
+	])("refuses bash and monitor with the sandbox on and a bad %s deny list (%j)", async (scope, deny) => {
+		const { start, call } = load({ sandbox: { enabled: true } });
+		const settings = { sandbox: { enabled: true }, permissions: { deny } };
+		mkdirSync(join(dir, ".pi"));
+		const path = join(scope === "global" ? getAgentDir() : join(dir, ".pi"), "settings.json");
+		writeFileSync(path, JSON.stringify(settings));
+		wrapExec(
+			async () => ({ exitCode: 0 }),
+			() => undefined,
+		);
+		await start();
+		for (const tool of ["bash", "monitor"]) {
+			const result = await call(tool);
+			expect(result).toMatchObject({ block: true, reason: expect.stringContaining(path) });
+			expect(result.reason).toContain("permissions.deny is not a list of rules");
+		}
+		expect(await call("read")).toBeUndefined();
+	});
 
 	it("refuses bash and monitor with the sandbox on when trusted project settings cannot be parsed", async () => {
 		const { start, call } = load({ sandbox: { enabled: true } });
@@ -453,11 +455,26 @@ describe("the extension", () => {
 		expect(await call("monitor")).toBeUndefined();
 	});
 
-	it("allows bash and monitor with a bad deny list while the sandbox is off", async () => {
-		const { start, call } = load({ sandbox: { enabled: false }, permissions: { deny: { invalid: true } } });
+	it.each([{ deny: { invalid: true } }, { deny: "Write(notes.txt)" }, { deny: ["Write(notes.txt)", false] }])(
+		"warns about a bad deny list ($deny) with the sandbox off",
+		async ({ deny }) => {
+			const { start, call, ctx, notes, events } = load({ sandbox: { enabled: false }, permissions: { deny } });
+			const policy = loadPermissions(ctx, events);
+			await start();
+			await policy.start({ type: "session_start", reason: "startup" });
+			expect(notes).toContain("global permissions.deny is not a list of rules: none of it is in effect");
+			expect(await policy.call("write", "notes.txt")).toBeUndefined();
+			expect(await call("bash")).toBeUndefined();
+			expect(await call("monitor")).toBeUndefined();
+		},
+	);
+
+	it("reports disabled filesystem protection in /sandbox status while the sandbox is on", async () => {
+		const { start, command, notes } = load({ sandbox: { enabled: true, filesystem: { disabled: true } } });
 		await start();
-		expect(await call("bash")).toBeUndefined();
-		expect(await call("monitor")).toBeUndefined();
+		await command("status");
+		expect(notes.at(-1)).toContain("Filesystem protection is off");
+		expect(engine.configs[0]?.filesystem.disabled).toBe(true);
 	});
 
 	it("restores bash and monitor on reload after fixing global settings", async () => {

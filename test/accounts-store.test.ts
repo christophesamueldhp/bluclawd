@@ -281,6 +281,21 @@ describe("named provider accounts", () => {
 		expect(readVault().accounts[0].credential).toEqual(original);
 	});
 
+	it.each(["other", "saved"])(
+		"keeps the fresh live login when selecting its inactive account (active identity: %s)",
+		async (activeIdentity) => {
+			const other = await store.add("example", "Other", login(activeIdentity));
+			const saved = await store.add("example", "Saved", login("saved"));
+			await store.switchTo(other.id);
+			const fresh = login("saved", "fresh");
+			seedAuth({ example: fresh });
+
+			expect(await store.switchTo(saved.id)).toEqual({ ...saved, active: true });
+			expect(readAuth().example).toEqual(fresh);
+			expect(await store.list()).toEqual([other, { ...saved, active: true }]);
+		},
+	);
+
 	it("saves an opaque login under a new name only after approval", async () => {
 		const original = opaque("original");
 		const live = opaque("live");

@@ -38,7 +38,6 @@ function events(sessionId, streamId) {
 	const query = new URLSearchParams({ stream: streamId });
 	if (sessionId) query.set("session", sessionId);
 	const path = `/api/events?${query}`;
-	let lastEventId = "";
 	let retryMs = 3000;
 	/** @type {AbortController | undefined} */
 	let attempt;
@@ -75,7 +74,6 @@ function events(sessionId, streamId) {
 	async function read(signal) {
 		const token = getToken() ?? "";
 		const headers = new Headers({ accept: "text/event-stream", authorization: `Bearer ${token}` });
-		if (lastEventId) headers.set("last-event-id", lastEventId);
 		const res = await fetch(path, { headers, signal });
 		const type = res.headers.get("content-type")?.split(";", 1)[0].trim().toLowerCase();
 		if (res.status !== 200 || type !== "text/event-stream" || !res.body) {
@@ -93,7 +91,6 @@ function events(sessionId, streamId) {
 		const decoder = new TextDecoder();
 		let partial = "";
 		let afterCr = false;
-		let id = lastEventId;
 		let event = "";
 		/** @type {string[]} */
 		let data = [];
@@ -110,9 +107,8 @@ function events(sessionId, streamId) {
 				for (const line of lines) {
 					if (signal.aborted) return;
 					if (line === "") {
-						lastEventId = id;
 						if (data.length)
-							stream.dispatchEvent(new MessageEvent(event || "message", { data: data.join("\n"), lastEventId }));
+							stream.dispatchEvent(new MessageEvent(event || "message", { data: data.join("\n") }));
 						event = "";
 						data = [];
 						continue;
@@ -122,7 +118,6 @@ function events(sessionId, streamId) {
 					const value = colon < 0 ? "" : line.slice(colon + 1).replace(/^ /, "");
 					if (field === "data") data.push(value);
 					else if (field === "event") event = value;
-					else if (field === "id" && !value.includes("\0")) id = value;
 					else if (field === "retry" && /^\d+$/.test(value)) retryMs = Math.min(Number(value), 2_147_483_647);
 				}
 			}

@@ -35,14 +35,14 @@ describe("the phone's event stream", () => {
 		);
 	}
 
-	it("reconnects with the last delivered event ID and keeps the device token in the header", async () => {
+	it("reconnects with the device token in the header and delivers new live events", async () => {
 		pairedPhone();
 		const first = Buffer.from("\nid: 7\r\nevent: live\r\ndata: Hi 👋\r\ndata: there\r\n\r\nid: 8\n");
 		const split = first.indexOf("👋") + 1;
 		const fetch = vi
 			.fn<typeof globalThis.fetch>()
 			.mockResolvedValueOnce(response(Buffer.from(": connected\r"), first.subarray(0, split), first.subarray(split)))
-			.mockResolvedValueOnce(response(Buffer.from("id: 8\nevent: live\ndata: again\n\n")));
+			.mockResolvedValueOnce(response(Buffer.from("event: live\ndata: again\n\n")));
 		vi.stubGlobal("fetch", fetch);
 		const source = api.events("pane/a", "stream b");
 		try {
@@ -57,11 +57,13 @@ describe("the phone's event stream", () => {
 			expect(Object.fromEntries(url.searchParams)).toEqual({ session: "pane/a", stream: "stream b" });
 			expect(new Headers(init?.headers).get("authorization")).toBe("Bearer test-device");
 			expect(new Headers(init?.headers).has("last-event-id")).toBe(false);
-			expect(live).toHaveBeenNthCalledWith(1, expect.objectContaining({ data: "Hi 👋\nthere", lastEventId: "7" }));
+			expect(live).toHaveBeenNthCalledWith(1, expect.objectContaining({ data: "Hi 👋\nthere" }));
 			await vi.advanceTimersByTimeAsync(3000);
 			expect(fetch.mock.calls[1][0]).toBe(path);
-			expect(new Headers(fetch.mock.calls[1][1]?.headers).get("last-event-id")).toBe("7");
-			expect(live).toHaveBeenNthCalledWith(2, expect.objectContaining({ data: "again", lastEventId: "8" }));
+			const reconnectHeaders = new Headers(fetch.mock.calls[1][1]?.headers);
+			expect(reconnectHeaders.get("authorization")).toBe("Bearer test-device");
+			expect(reconnectHeaders.has("last-event-id")).toBe(false);
+			expect(live).toHaveBeenNthCalledWith(2, expect.objectContaining({ data: "again" }));
 			expect(opened).toHaveBeenCalledTimes(2);
 		} finally {
 			source.close();

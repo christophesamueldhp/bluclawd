@@ -105,7 +105,9 @@ describe.skipIf(!supported)(
 		});
 
 		it("applies a leading wildcard to paths in the working directory", async () => {
-			expect((await run("cat ./draft.txt")).code).not.toBe(0);
+			const draft = await run("cat ./draft.txt");
+			expect(draft.code).not.toBe(0);
+			expect(draft.output).not.toContain("draft\n");
 			expect((await run("cat ./app.ts")).code).toBe(0);
 		});
 
@@ -153,6 +155,9 @@ describe.skipIf(!supported)(
 				expect(existsSync(join(dir, ".pi"))).toBe(false);
 				expect((await run("mkdir -p .PI/extensions && touch .PI/extensions/case-fixture")).code).not.toBe(0);
 				expect(existsSync(join(dir, ".pi/extensions/case-fixture"))).toBe(false);
+				const env = await run("cat .ENV");
+				expect(env.code).not.toBe(0);
+				expect(env.output).not.toContain("hunter2");
 			},
 		);
 
@@ -190,6 +195,23 @@ describe.skipIf(!supported)(
 				expect(readFileSync(join(dir, ".agents/released-fixture"), "utf8")).toBe("allowed");
 				expect(existsSync(join(dir, ".pi/other-fixture"))).toBe(false);
 			} finally {
+				await configure();
+			}
+		});
+
+		it("releases .pi and keeps .vscode protected when a file inside it is allowed", async () => {
+			try {
+				await configure([".pi", ".vscode/settings.json"]);
+				expect((await run("mkdir -p .pi && printf allowed > .pi/released-fixture")).code).toBe(0);
+				expect(readFileSync(join(dir, ".pi/released-fixture"), "utf8")).toBe("allowed");
+				mkdirSync(join(dir, ".vscode"), { recursive: true });
+				const settings = join(dir, ".vscode/settings.json");
+				writeFileSync(settings, "original\n");
+				expect((await run("printf changed > .vscode/settings.json")).code).not.toBe(0);
+				expect(readFileSync(settings, "utf8")).toBe("original\n");
+			} finally {
+				rmSync(join(dir, ".pi"), { recursive: true, force: true });
+				rmSync(join(dir, ".vscode"), { recursive: true, force: true });
 				await configure();
 			}
 		});
@@ -248,12 +270,10 @@ describe.skipIf(!supported)(
 				const tail = await run('tail -n 1 "$JOB_OUTPUT"', env);
 				expect(tail.code).toBe(0);
 				expect(tail.output).toContain("[exited with code 0]");
-				const writeAccess = await run(
-					`node -e 'const fs = require("node:fs"); fs.closeSync(fs.openSync(process.env.JOB_OUTPUT, "r+"));'`,
-					env,
-				);
+				const original = readFileSync(outputFile, "utf8");
+				const writeAccess = await run('printf changed > "$JOB_OUTPUT"', env);
 				expect(writeAccess.code).not.toBe(0);
-				expect(writeAccess.output).toMatch(/EACCES|EROFS|EPERM/);
+				expect(readFileSync(outputFile, "utf8")).toBe(original);
 			} finally {
 				if (previousHome === undefined) delete process.env.HOME;
 				else process.env.HOME = previousHome;

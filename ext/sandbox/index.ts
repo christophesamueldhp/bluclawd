@@ -173,8 +173,8 @@ function factory(pi: ExtensionAPI): void {
 				return;
 			}
 			commandCtx.ui.notify(
-				`Sandbox: ${status.kind === "ready" ? "on" : "off"}.${status.kind === "ready" && !sandboxWraps() ? " Enable bluclawd's background-bash extension; bash is blocked without it." : ""}${action !== "status" ? " Saved globally. Restart existing background jobs; they do not change sandbox mode." : ""}`,
-				"info",
+				`Sandbox: ${status.kind === "ready" ? "on" : "off"}.${status.kind === "ready" && status.filesystemDisabled ? " Filesystem protection is off (sandbox.filesystem.disabled)." : ""}${status.kind === "ready" && !sandboxWraps() ? " Enable bluclawd's background-bash extension; bash is blocked without it." : ""}${action !== "status" ? " Saved globally. Restart existing background jobs; they do not change sandbox mode." : ""}`,
+				status.kind === "ready" && status.filesystemDisabled ? "warning" : "info",
 			);
 		},
 	});

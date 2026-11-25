@@ -3,7 +3,6 @@ import { piCommand } from "../../daemon/tmux.ts";
 import {
 	cancelledByDelete,
 	forgetCancelled,
-	genuineWakeups,
 	type HeldWakeups,
 	isWakeupId,
 	type ProcessId,
@@ -306,7 +305,7 @@ export function wakeupLifecycle(deps: WakeupLifecycleDeps) {
 			const session = deps.session();
 			if (!session) return 0;
 			const sessionId = session.sessionManager.getSessionId();
-			const pending = genuineWakeups(pendingWakeupsOnAnyBranch(session.sessionManager.getEntries()), deps.log);
+			const pending = pendingWakeupsOnAnyBranch(session.sessionManager.getEntries(), deps.log);
 			for (const record of pending) {
 				const deleted = cancelledByDelete(record.id);
 				if (reason === "fork" || deleted) {

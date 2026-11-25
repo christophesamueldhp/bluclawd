@@ -23,50 +23,75 @@ export interface WakeupEndRecord {
 	end: WakeupEnd;
 }
 
-type Entry = { type: string; customType?: string; data?: unknown };
-
 export function isWakeupId(id: unknown): id is string {
 	return typeof id === "string" && /^w[0-9a-z]{8}$/.test(id);
 }
 
-export function skippedWakeupLine(id: unknown): string {
-	return `Skipped a wake-up whose id bluclawd did not generate: ${JSON.stringify(id)?.slice(0, 80)}`;
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-export function genuineWakeups<T extends { id: unknown }>(records: readonly T[], log: (line: string) => void): T[] {
-	return records.filter((record) => {
-		if (isWakeupId(record?.id)) return true;
-		log(skippedWakeupLine(record?.id));
+function isWakeupRecord(value: unknown): value is WakeupRecord {
+	return (
+		isRecord(value) &&
+		isWakeupId(value.id) &&
+		typeof value.prompt === "string" &&
+		typeof value.dueAt === "number" &&
+		Number.isFinite(value.dueAt) &&
+		typeof value.scheduledAt === "number" &&
+		Number.isFinite(value.scheduledAt)
+	);
+}
+
+function skippedWakeupLine(record: unknown): string {
+	const id = isRecord(record) ? record.id : undefined;
+	if (typeof id === "string" && !isWakeupId(id)) {
+		return `Skipped a wake-up whose id bluclawd did not generate: ${JSON.stringify(id).slice(0, 80)}`;
+	}
+	return `Skipped a wake-up with a malformed record${typeof id === "string" ? `: ${id}` : ""}`;
+}
+
+function validWakeupRecords(records: readonly unknown[], log: (line: string) => void): WakeupRecord[] {
+	return records.filter((record): record is WakeupRecord => {
+		if (isWakeupRecord(record)) return true;
+		log(skippedWakeupLine(record));
 		return false;
 	});
 }
 
-export function pendingWakeupsOnAnyBranch(entries: readonly Entry[]): WakeupRecord[] {
+export function pendingWakeupsOnAnyBranch(entries: readonly unknown[], log: (line: string) => void): WakeupRecord[] {
 	const ended = new Set<string>();
 	const scheduled: WakeupRecord[] = [];
 	for (const entry of entries) {
-		if (entry.type !== "custom") continue;
-		if (entry.customType === WAKEUP_END_ENTRY) ended.add((entry.data as WakeupEndRecord).id);
-		else if (entry.customType === WAKEUP_ENTRY) scheduled.push(entry.data as WakeupRecord);
+		if (!isRecord(entry) || entry.type !== "custom") continue;
+		const { customType, data } = entry;
+		if (customType === WAKEUP_END_ENTRY) {
+			if (isRecord(data) && isWakeupId(data.id) && (data.end === "fired" || data.end === "cancelled")) {
+				ended.add(data.id);
+			} else log(skippedWakeupLine(data));
+		} else if (customType === WAKEUP_ENTRY) {
+			if (isWakeupRecord(data)) scheduled.push(data);
+			else log(skippedWakeupLine(data));
+		}
 	}
 	return scheduled.filter((record) => !ended.has(record.id)).sort((a, b) => a.dueAt - b.dueAt);
 }
 
-export function readPendingWakeups(file: string): WakeupRecord[] {
+export function readPendingWakeups(file: string, log: (line: string) => void): WakeupRecord[] {
 	let text: string;
 	try {
 		text = readFileSync(file, "utf8");
 	} catch {
 		return [];
 	}
-	const entries = text.split("\n").flatMap((line): Entry[] => {
+	const entries = text.split("\n").flatMap((line): unknown[] => {
 		try {
-			return line ? [JSON.parse(line) as Entry] : [];
+			return line ? [JSON.parse(line)] : [];
 		} catch {
 			return [];
 		}
 	});
-	return pendingWakeupsOnAnyBranch(entries);
+	return pendingWakeupsOnAnyBranch(entries, log);
 }
 
 const cancelMark = (dir: string, id: string) => join(dir, "wakeups-cancelled", id);
@@ -139,7 +164,7 @@ export interface WakeupKeeperDeps {
 	dir: string;
 	now: () => number;
 	alive: (holder: ProcessId) => boolean;
-	pending: (sessionFile: string) => WakeupRecord[];
+	pending: typeof readPendingWakeups;
 	reopen: (held: HeldWakeups) => unknown;
 	log: (line: string) => void;
 }
@@ -154,14 +179,14 @@ export class WakeupKeeper {
 		this.deps = deps;
 		this.held = new Map(
 			loadWakeups(deps.dir).flatMap((stored) => {
-				const held = { ...stored, wakeups: this.genuine(stored.wakeups) };
+				const held = { ...stored, wakeups: validWakeupRecords(stored.wakeups, deps.log) };
 				return held.wakeups.length > 0 ? [[held.sessionFile, held] as const] : [];
 			}),
 		);
 	}
 
 	hold(handed: HeldWakeups): void {
-		const held = { ...handed, wakeups: this.genuine(handed.wakeups) };
+		const held = { ...handed, wakeups: validWakeupRecords(handed.wakeups, this.deps.log) };
 		if (held.wakeups.length > 0) this.held.set(held.sessionFile, held);
 		else this.held.delete(held.sessionFile);
 		this.reopened.delete(held.sessionFile);
@@ -223,12 +248,8 @@ export class WakeupKeeper {
 		this.timer.unref();
 	}
 
-	private genuine(wakeups: readonly WakeupRecord[]): WakeupRecord[] {
-		return genuineWakeups(wakeups, this.deps.log);
-	}
-
 	private pending(sessionFile: string): WakeupRecord[] {
-		return this.genuine(this.deps.pending(sessionFile));
+		return validWakeupRecords(this.deps.pending(sessionFile, this.deps.log), this.deps.log);
 	}
 
 	private tryReopen(held: HeldWakeups): void {

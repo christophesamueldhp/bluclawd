@@ -4,7 +4,18 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { saveInstances } from "../daemon/storage.ts";
 import { ServerSupervisor } from "../daemon/supervisor.ts";
-import { type HeldWakeups, processAlive, processStart, WakeupKeeper, type WakeupRecord } from "../daemon/wakeups.ts";
+import {
+	cancelledByDelete,
+	type HeldWakeups,
+	processAlive,
+	processStart,
+	readPendingWakeups,
+	WAKEUP_END_ENTRY,
+	WAKEUP_ENTRY,
+	WakeupKeeper,
+	type WakeupKeeperDeps,
+	type WakeupRecord,
+} from "../daemon/wakeups.ts";
 
 const MINUTE = 60_000;
 const NOW = Date.UTC(2026, 10, 10, 12, 0);
@@ -15,7 +26,7 @@ afterEach(() => {
 	keepers = [];
 });
 
-function fixture(dir = mkdtempSync(join(tmpdir(), "bluclawd-wakeups-"))) {
+function fixture(dir = mkdtempSync(join(tmpdir(), "bluclawd-wakeups-")), pending?: WakeupKeeperDeps["pending"]) {
 	let now = NOW;
 	const alive = new Set<number>();
 	const logs = new Map<string, WakeupRecord[]>();
@@ -25,7 +36,7 @@ function fixture(dir = mkdtempSync(join(tmpdir(), "bluclawd-wakeups-"))) {
 		dir,
 		now: () => now,
 		alive: ({ pid }) => alive.has(pid),
-		pending: (file) => logs.get(file) ?? [],
+		pending: pending ?? ((file) => logs.get(file) ?? []),
 		reopen: (held) => {
 			reopened.push(held.sessionFile);
 		},
@@ -55,6 +66,30 @@ function hold(f: ReturnType<typeof fixture>, file: string, pid: number, wakeups:
 }
 
 describe("the daemon's copy of a session's wake-ups", () => {
+	it("skips malformed records in the session log and still cancels the valid wake-up", () => {
+		const dir = mkdtempSync(join(tmpdir(), "bluclawd-wakeups-"));
+		const f = fixture(dir, readPendingWakeups);
+		const file = join(dir, "session.jsonl");
+		writeFileSync(
+			file,
+			[
+				{ type: "custom", customType: WAKEUP_ENTRY, data: null },
+				{ type: "custom", customType: WAKEUP_END_ENTRY, data: null },
+				{ type: "custom", customType: WAKEUP_ENTRY, data: { id: "wbad00001" } },
+				{ type: "custom", customType: WAKEUP_ENTRY, data: wakeup("wkept0001", NOW + MINUTE) },
+			]
+				.map((entry) => JSON.stringify(entry))
+				.join("\n"),
+		);
+
+		f.keeper.drop(file);
+
+		expect(f.logged).toHaveLength(3);
+		expect(f.logged.every((line) => line.startsWith("Skipped a wake-up"))).toBe(true);
+		expect(cancelledByDelete("wbad00001", dir)).toBe(false);
+		expect(cancelledByDelete("wkept0001", dir)).toBe(true);
+	});
+
 	it("reopens the session once one falls due and its pi is gone", () => {
 		const f = fixture();
 		hold(f, "/s/a.jsonl", 41, [wakeup("wfirst001", NOW + 10 * MINUTE)]);

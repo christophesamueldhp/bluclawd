@@ -5,14 +5,13 @@ import { join, relative, sep } from "node:path";
 import { type BashOperations, createLocalBashOperations } from "@earendil-works/pi-coding-agent";
 import { runMachMarker } from "../../daemon/run-members.ts";
 import { resolveDenyRulePath } from "../_shared/deny-rule-path.ts";
-import { taskOutputRoot } from "../background-bash/output-path.ts";
 import { pathRule } from "../permissions/rules.ts";
 import {
 	checkRuntimeConfig,
 	linuxGlobRefusal,
-	protectedProjectWritePaths,
 	type SandboxSetting,
 	sandboxPath,
+	sandboxWriteDenies,
 	type UncheckedRuntimeConfig,
 } from "../sandbox/config.ts";
 import { endRunProcesses, prepareRunContainment, type RunContainment } from "../sandbox/run-containment.ts";
@@ -65,8 +64,8 @@ export function runShellConfig(
 	const unique = (list: string[]) => [...new Set(list)];
 	const deniedDomains = written.network?.deniedDomains;
 	const dotGit = join(workspace.root, ".git");
-	const protectedPaths = protectedProjectWritePaths(workspace.root, home, on?.allowWrite ?? []).filter(
-		(path) => !path.startsWith(dotGit + sep),
+	const writeDenies = sandboxWriteDenies(workspace.root, home, on?.allowWrite ?? []).filter(
+		({ path }) => !path.startsWith(dotGit + sep),
 	);
 	return {
 		config: {
@@ -94,8 +93,7 @@ export function runShellConfig(
 						...ruled(["Edit", "Write"]),
 						...userPaths(on?.denyWrite ?? []),
 					]),
-					...protectedPaths.map((path) => ({ path, literal: true as const })),
-					{ path: taskOutputRoot(home), literal: true },
+					...writeDenies,
 				],
 			},
 		},

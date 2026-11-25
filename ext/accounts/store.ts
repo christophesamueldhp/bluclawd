@@ -339,9 +339,11 @@ export class AccountStore {
 			if (live) {
 				const tracked = vault.accounts.find((account) => account.id === vault.active[target.provider]);
 				const comparison = tracked ? compareLogins(tracked.credential, live) : undefined;
+				const targetMatches = identity(live) !== undefined && compareLogins(target.credential, live) === "same";
+				if (targetMatches) target.credential = live;
 				if (tracked && comparison === "same") {
 					tracked.credential = live;
-				} else {
+				} else if (!targetMatches) {
 					let name = "Original login";
 					let suffix = 2;
 					while (vault.accounts.some((account) => account.provider === target.provider && account.name === name)) {

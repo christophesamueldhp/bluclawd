@@ -673,9 +673,9 @@ both `x.env` and `./x.env` in the working directory. At startup, bluclawd warns 
 starts with a single slash and its old absolute path exists. The warning shows the `//` spelling
 for that path.
 
-When the permissions matcher detects a case-insensitive filesystem in the working
-directory, it ignores case in file paths. For example, `Read(.env)` also blocks `cat .ENV`.
-Bash command rules still match case exactly.
+File deny rules and Integration's protected path check follow the working directory's
+case sensitivity. They ignore case when detection is inconclusive. On a case-insensitive
+filesystem, `Read(.env)` also blocks `cat .ENV`. Bash command rules match case exactly.
 
 The footer shows pi's own `defaultProjectTrust` (`⏵⏵ always`, `⏸ ask` or
 `✕ never`), and Alt+M cycles it, saving to global settings. It decides whether a
@@ -728,14 +728,15 @@ It is read when a session starts, so `/reload` after editing:
   These denies apply before the paths exist. To remove one, name the protected path itself,
   such as `.pi`, in the global `sandbox.filesystem.allowWrite` list. An entry for `.` or a file
   inside a protected directory leaves that deny in place.
-- The sandbox runtime also denies shell writes to `.git/hooks`, `.git/config` (by default),
-  `.mcp.json`, `.vscode/`, `.idea/`, `.claude/commands/`, and `.claude/agents/`. `allowWrite`
-  cannot override the runtime's denies. With an exact global entry, you can release `.pi/`,
-  `.agents/`, or the rest of `.claude/` for shell writes, subject to other applicable denies.
+- `.git/hooks`, `.git/config`, `.mcp.json`, `.vscode/`, `.idea/`, `.claude/commands/`,
+  and `.claude/agents/` stay protected regardless of `allowWrite`. An exact global entry can
+  release `.pi/`, `.agents/`, or the rest of `.claude/`, subject to other deny rules.
 - While the sandbox is on, built-in deny rules also block pi's `write` and `edit` on the protected
-  project paths. An exact global `allowWrite` entry removes pi's built-in deny even when the
-  runtime still blocks shell writes there. The built-in rules also block `read`, `grep`, `find`,
-  and `ls` calls that target either credential file. Pi reports the built-in rule when it blocks a call.
+  project paths and follow the same releases as the shell. The built-in rules also block `read`,
+  `grep`, `find`, and `ls` calls that target either credential file. Pi reports the rule when it blocks a call.
+- `sandbox.filesystem.disabled: true` turns off shell filesystem protection. Shells can then
+  access the protected project paths, credential files, and background job output. `/sandbox status`
+  reports when filesystem protection is off.
 - No write reaches pi's agent directory, whatever `filesystem.allowWrite` says: a command cannot
   turn the sandbox off in its `settings.json`, add an extension or a skill there, or `pi install`.
   On Linux the sandbox does not start when a symlink on the way to it lies where commands may write

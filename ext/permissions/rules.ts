@@ -199,10 +199,10 @@ function absoluteRuleSpelling(pat: string): string {
 	return pat.replace(/^\/\//, "/");
 }
 
-const pathCaseFlags = new Map<string, string>();
+const caseFoldingByDirectory = new Map<string, boolean>();
 
-function pathRuleFlags(cwd: string): string {
-	const cached = pathCaseFlags.get(cwd);
+export function workingDirectoryFoldsCase(cwd: string): boolean {
+	const cached = caseFoldingByDirectory.get(cwd);
 	if (cached !== undefined) return cached;
 	try {
 		let dir = realpathSync.native(cwd);
@@ -216,22 +216,21 @@ function pathRuleFlags(cwd: string): string {
 				);
 				const foldsCase =
 					!entries.includes(alternate) && lstatSync(join(dir, alternate), { throwIfNoEntry: false }) !== undefined;
-				const flags = foldsCase ? "iu" : "";
-				pathCaseFlags.set(cwd, flags);
-				return flags;
+				caseFoldingByDirectory.set(cwd, foldsCase);
+				return foldsCase;
 			}
 			const parent = dirname(dir);
-			if (parent === dir || statSync(parent).dev !== device) return "";
+			if (parent === dir || statSync(parent).dev !== device) return true;
 			dir = parent;
 		}
 	} catch {
-		return "";
+		return true;
 	}
 }
 
 function pathRulePatterns(ruleSubject: string, cwd: string): RegExp[] {
 	const path = resolveDenyRulePath(ruleSubject, cwd, homedir());
-	const flags = pathRuleFlags(cwd);
+	const flags = workingDirectoryFoldsCase(cwd) ? "iu" : "";
 	const patterns = [globToRegExp(path, "deny-path", flags)];
 	const starIdx = path.indexOf("*");
 	const prefix = starIdx === -1 ? path : path.slice(0, path.lastIndexOf("/", starIdx));
