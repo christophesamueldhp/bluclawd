@@ -31,7 +31,8 @@ What bluclawd adds before it hands the config to `srt`:
 | `network.allowedDomains` | Sent as written |
 | `network.deniedDomains` | Empty when unset, because `srt` requires the key |
 | `network.denyUnixSockets` | Plus bluclawd's server directories ([below](#bluclawds-own-sockets)) |
-| `credentials.files` | Plus bluclawd's server directories, as `deny` |
+| `credentials.files` | Plus bluclawd's server directories, pi's `auth.json`, and `bluclawd/accounts.json`, as `deny` |
+| `credentials.envVars` | Forces `deny` for `EXA_API_KEY` in sandboxed shells |
 | `filesystem.denyRead` | Plus every `Read(<path>)` deny rule |
 | `filesystem.denyWrite` | Plus every `Edit(<path>)` and `Write(<path>)` deny rule, and pi's agent directory (`~/.pi/agent`, or `$PI_CODING_AGENT_DIR`), by every spelling through its symlinks; no `allowWrite` reopens it. On Linux a symlink on the way that lies in a writable path can still be swapped |
 | `filesystem.allowWrite` | Plus the working directory and the temp directory |

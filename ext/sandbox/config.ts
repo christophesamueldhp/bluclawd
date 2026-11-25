@@ -166,6 +166,10 @@ export function agentDirs(): string[] {
 	return linkSpellings(resolve(getAgentDir()));
 }
 
+export function agentCredentialPaths(agentDir = getAgentDir()): string[] {
+	return [resolve(agentDir, "auth.json"), resolve(agentDir, "bluclawd", "accounts.json")];
+}
+
 /**
  * The symlinks on the way to `spellings` that lie where a command may write. srt on Linux binds a deny path by its real
  * path, so a command there could swap such a link for a directory of its own.
@@ -196,12 +200,13 @@ export function runtimeConfig(
 		...new Set([...rulePaths, ...list.map((path) => sandboxPath(path, cwd, home))]),
 	];
 	const { network, filesystem, credentials, ...rest } = settings.written;
+	const credentialDenies = new Set([...ownServerDirs, ...ownAgentDirs.flatMap(agentCredentialPaths)]);
 	return {
 		...rest,
-		// A credential deny has nothing carved out of it, so no `allowRead` reopens a server directory.
+		// Credential denies take precedence over `allowRead`.
 		credentials: {
 			...(credentials as object),
-			files: [...settings.credentialFiles, ...ownServerDirs.map((path) => ({ path, mode: "deny" }))],
+			files: [...settings.credentialFiles, ...Array.from(credentialDenies, (path) => ({ path, mode: "deny" }))],
 		},
 		network: {
 			deniedDomains: [],

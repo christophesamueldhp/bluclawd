@@ -157,6 +157,13 @@ async function start(
 	try {
 		const checked = await checkRuntimeConfig(config);
 		if (typeof checked === "string") return markSandboxUnavailable(checked);
+		checked.credentials = {
+			...checked.credentials,
+			envVars: [
+				...(checked.credentials?.envVars ?? []).filter(({ name }) => name !== "EXA_API_KEY"),
+				{ name: "EXA_API_KEY", mode: "deny" },
+			],
+		};
 		const refusal = refusedEvenForRunningSandbox(checked, platform, agentDirSpellings);
 		if (refusal) return markSandboxUnavailable(refusal);
 		const sandbox = await engine();

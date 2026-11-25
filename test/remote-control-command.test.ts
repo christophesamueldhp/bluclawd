@@ -135,6 +135,17 @@ describe("/remote-control", () => {
 		expect(deps.launchctl).not.toHaveBeenCalled();
 	});
 
+	it.each([false, true])("explains the Funnel refusal when remote control was already enabled: %s", async (on) => {
+		enabled = on;
+		vi.mocked(tailscaleInfo).mockResolvedValue({ installed: true, dnsName: HOST, serve: "ours", funnel: true });
+		const { ui, done } = run("");
+		await done;
+		expect(ui.notify).toHaveBeenCalledWith(
+			expect.stringMatching(/refuses requests through Funnel and from tagged devices/),
+			"warning",
+		);
+	});
+
 	it("pairs a new phone with a new code's QR code", async () => {
 		enabled = true;
 		code = "105377";
