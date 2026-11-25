@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, globSync, realpathSync, statSync } from "node:fs";
+import { existsSync, globSync, lstatSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { resolveDenyRulePath } from "../_shared/deny-rule-path.ts";
@@ -181,13 +181,13 @@ function homeExpand(s: string): string {
 
 type GlobKind = "path" | "deny-path" | "command";
 
-function globToRegExp(pat: string, kind: GlobKind = "path"): RegExp {
+function globToRegExp(pat: string, kind: GlobKind = "path", flags = ""): RegExp {
 	const dirPrefix = pat.slice(0, -3);
 	if (kind !== "command" && pat.endsWith("/**") && !/^\/*$/.test(dirPrefix)) {
-		return new RegExp(`^${globBody(dirPrefix, kind)}(?:/[\\s\\S]*)?$`);
+		return new RegExp(`^${globBody(dirPrefix, kind)}(?:/[\\s\\S]*)?$`, flags);
 	}
 	if (kind === "command" && (pat.endsWith(":*") || pat.endsWith(" *"))) return commandPrefixRegExp(pat.slice(0, -2));
-	return new RegExp(`^${globBody(pat, kind)}$`);
+	return new RegExp(`^${globBody(pat, kind)}$`, flags);
 }
 
 function commandPrefixRegExp(prefix: string): RegExp {
@@ -198,14 +198,45 @@ function absoluteRuleSpelling(pat: string): string {
 	return pat.replace(/^\/\//, "/");
 }
 
+const pathCaseFlags = new Map<string, string>();
+
+function pathRuleFlags(cwd: string): string {
+	const cached = pathCaseFlags.get(cwd);
+	if (cached !== undefined) return cached;
+	try {
+		let dir = realpathSync.native(cwd);
+		const device = statSync(dir).dev;
+		while (true) {
+			const entries = readdirSync(dir);
+			const entry = entries.find((name) => /[a-z]/i.test(name));
+			if (entry !== undefined) {
+				const alternate = entry.replace(/[a-z]/i, (letter) =>
+					letter === letter.toLowerCase() ? letter.toUpperCase() : letter.toLowerCase(),
+				);
+				const foldsCase =
+					!entries.includes(alternate) && lstatSync(join(dir, alternate), { throwIfNoEntry: false }) !== undefined;
+				const flags = foldsCase ? "iu" : "";
+				pathCaseFlags.set(cwd, flags);
+				return flags;
+			}
+			const parent = dirname(dir);
+			if (parent === dir || statSync(parent).dev !== device) return "";
+			dir = parent;
+		}
+	} catch {
+		return "";
+	}
+}
+
 function pathRulePatterns(ruleSubject: string, cwd: string): RegExp[] {
 	const path = resolveDenyRulePath(ruleSubject, cwd, homedir());
-	const patterns = [globToRegExp(path, "deny-path")];
+	const flags = pathRuleFlags(cwd);
+	const patterns = [globToRegExp(path, "deny-path", flags)];
 	const starIdx = path.indexOf("*");
 	const prefix = starIdx === -1 ? path : path.slice(0, path.lastIndexOf("/", starIdx));
 	const realPrefix = prefix && realpathAllowingMissingLeaf(prefix);
 	if (realPrefix && realPrefix !== prefix) {
-		patterns.push(globToRegExp(`${realPrefix}${path.slice(prefix.length)}`, "deny-path"));
+		patterns.push(globToRegExp(`${realPrefix}${path.slice(prefix.length)}`, "deny-path", flags));
 	}
 	return patterns;
 }
