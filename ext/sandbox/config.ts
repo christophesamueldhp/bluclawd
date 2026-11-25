@@ -3,6 +3,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "nod
 import type { SandboxRuntimeConfig } from "@anthropic-ai/sandbox-runtime";
 import { getAgentDir, type SettingsManager } from "@earendil-works/pi-coding-agent";
 import { defaultServerDir, getServerDir } from "../../daemon/paths.ts";
+import { resolveDenyRulePath } from "../_shared/deny-rule-path.ts";
 import { pathRule } from "../permissions/rules.ts";
 
 export interface SandboxSettings {
@@ -97,7 +98,7 @@ export function parseSandbox(value: unknown): SandboxSetting {
 }
 
 /**
- * A rule or settings path as the sandbox takes it, absolute because `srt` on Linux skips a
+ * A settings path as the sandbox takes it, absolute because `srt` on Linux skips a
  * pattern whose first component is a wildcard.
  */
 export function sandboxPath(written: string, cwd: string, home: string): string {
@@ -189,9 +190,11 @@ export function runtimeConfig(
 	const ruled = (verbs: string[]) =>
 		denyRules.flatMap((rule) => {
 			const parsed = pathRule(rule);
-			return parsed && verbs.includes(parsed.verb) ? [parsed.path] : [];
+			return parsed && verbs.includes(parsed.verb) ? [resolveDenyRulePath(parsed.path, cwd, home)] : [];
 		});
-	const paths = (list: string[]) => [...new Set(list.map((path) => sandboxPath(path, cwd, home)))];
+	const paths = (list: string[], rulePaths: string[] = []) => [
+		...new Set([...rulePaths, ...list.map((path) => sandboxPath(path, cwd, home))]),
+	];
 	const { network, filesystem, credentials, ...rest } = settings.written;
 	return {
 		...rest,
@@ -209,9 +212,9 @@ export function runtimeConfig(
 		},
 		filesystem: {
 			...(filesystem as object),
-			denyRead: paths([...ruled(["Read"]), ...settings.denyRead]),
+			denyRead: paths(settings.denyRead, ruled(["Read"])),
 			allowWrite: paths([cwd, tmp, ...settings.allowWrite]),
-			denyWrite: paths([...ruled(["Edit", "Write"]), ...settings.denyWrite, ...ownAgentDirs]),
+			denyWrite: paths([...settings.denyWrite, ...ownAgentDirs], ruled(["Edit", "Write"])),
 		},
 	};
 }

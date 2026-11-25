@@ -646,6 +646,11 @@ file. Deny rules
 match text, not behavior. A command that builds the path or name at run time
 (`$(printf rm)`, a variable set earlier, a glob like `~/.ss*`) is not caught.
 
+The permissions matcher and the sandbox resolve file deny rules the same way.
+`Read(/drafts/**)` covers the working directory's `drafts` folder. At startup,
+bluclawd warns when a single-slash rule used to name an existing absolute path
+and shows the `//` spelling that keeps it absolute.
+
 The footer shows pi's own `defaultProjectTrust` (`⏵⏵ always`, `⏸ ask` or
 `✕ never`), and Alt+M cycles it, saving to global settings. It decides whether a
 project's `.pi` settings and extensions load when no `/trust` decision was saved;
