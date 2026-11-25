@@ -118,7 +118,7 @@ describe("remote control switch", () => {
 		});
 		await control.handle({ type: "remote", action: "revoke", deviceId: departed.deviceId });
 		const recent = pair("New phone");
-		const { expiresAt } = control.store.createCode(2);
+		const { secret } = control.store.createCode(2);
 
 		expect(await control.handle({ type: "remote", action: "revoke_all" })).toMatchObject({
 			type: "remote_result",
@@ -126,7 +126,7 @@ describe("remote control switch", () => {
 		});
 		expect(control.store.authenticate(staying.token, 3)).toBeUndefined();
 		expect(control.store.authenticate(recent.token, 3)).toBeUndefined();
-		expect(control.store.claimSecret("", "Phone", expiresAt + 1)).toMatchObject({ error: "invalid_code" });
+		expect(control.store.claimSecret(secret, "Phone", 3)).toEqual({ error: "invalid_code" });
 	});
 
 	it("keeps one launch command in remote.json: a heartbeat's only while none usable is there, /remote-control's always", async () => {

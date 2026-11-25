@@ -324,7 +324,8 @@ its own, apart from Safari's, so it is the app that pairs, and only it gets noti
 Safari instead" pairs Safari itself with the QR code's secret, unless the app paired first. On
 Android or a computer, the link pairs the browser at once, as it carries a one-time secret, and the
 app added to the Home Screen from it opens already paired. If you can't scan, type the 6-digit code into
-the app. If either code expired, run `/remote-control` again for a new one.
+the app. If pairing fails, run `/remote-control` again for a new code. After five incorrect
+attempts, the 6-digit code stops working and macOS shows a notification.
 
 On the iPhone, turn on VPN On Demand in the Tailscale app, so the phone is on your tailnet whenever
 you open bluclawd, and keep the Mac awake on power. In System Settings, open Battery, then Options, and turn on Prevent
@@ -341,7 +342,8 @@ Once remote control is on, `/remote-control` shows a menu:
 - **Pair a new phone**: a new QR code (and 6-digit code).
 - **Paired phones (n)…** shows when each phone paired and was last used. Select a phone to remove it,
   or choose **Remove all phones** to remove every phone paired when you confirm. Either action cancels
-  any pending QR code and 6-digit code. Removed phones have to pair again.
+  any pending QR code and 6-digit code. Removed phones have to pair again. Device names are shown
+  without terminal escapes or control characters, up to 64 characters.
 - **Start at login: on/off** (macOS): starts the daemon at login with a LaunchAgent
   (`~/Library/LaunchAgents/dev.bluclawd.daemon.plist`, its log in `~/.pi/server/daemon.log`), so
   the phone reaches the Mac before any `pi` has run.

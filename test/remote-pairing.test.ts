@@ -53,7 +53,7 @@ describe("remote pairing", () => {
 
 	it("expires a code after ten minutes", () => {
 		const { code } = store.createCode(0);
-		expect(store.claim(code, "iPhone", 10 * 60_000 + 1)).toEqual({ error: "expired_code" });
+		expect(store.claim(code, "iPhone", 10 * 60_000 + 1)).toEqual({ error: "invalid_code" });
 		const { code: again } = store.createCode(0);
 		expect("token" in store.claim(again, "iPhone", 10 * 60_000)).toBe(true);
 	});
@@ -70,7 +70,7 @@ describe("remote pairing", () => {
 		expect(store.claimSecret(secret, "iPhone", 4)).toEqual({ error: "invalid_code" });
 		expect(readFileSync(path, "utf8")).not.toContain(secret);
 		const later = store.createCode(0).secret;
-		expect(store.claimSecret(later, "iPhone", 10 * 60_000 + 1)).toEqual({ error: "expired_code" });
+		expect(store.claimSecret(later, "iPhone", 10 * 60_000 + 1)).toEqual({ error: "invalid_code" });
 	});
 
 	it("pairs one device per QR code: the secret and the code end together", () => {
@@ -94,7 +94,8 @@ describe("remote pairing", () => {
 	it("invalidates a code after five wrong attempts", () => {
 		const { code } = store.createCode(0);
 		const wrong = code === "000000" ? "111111" : "000000";
-		for (let i = 0; i < 5; i++) expect(store.claim(wrong, "x", 1)).toEqual({ error: "invalid_code" });
+		for (let i = 0; i < 4; i++) expect(store.claim(wrong, "x", 1)).toEqual({ error: "invalid_code" });
+		expect(store.claim(wrong, "x", 1)).toEqual({ error: "code_attempts_exhausted" });
 		expect(store.claim(code, "x", 1)).toEqual({ error: "invalid_code" });
 	});
 
@@ -111,16 +112,16 @@ describe("remote pairing", () => {
 	it.each(["claim", "claimSecret"] as const)("cancels pending pairing for %s when one phone is removed", (claim) => {
 		pairDevice();
 		const [device] = store.load().devices;
-		const { expiresAt } = store.createCode(10);
+		const { code, secret } = store.createCode(10);
 
 		expect(store.revoke(device.id)).toBe(true);
-		expect(store[claim]("", "Phone", expiresAt + 1)).toMatchObject({ error: "invalid_code" });
+		expect(store[claim](claim === "claim" ? code : secret, "Phone", 11)).toEqual({ error: "invalid_code" });
 	});
 
 	it("cancels pending pairing when removing all phones from an empty list", () => {
-		const { expiresAt } = store.createCode(0);
+		const { code } = store.createCode(0);
 		store.revokeAll();
-		expect(store.claim("", "Phone", expiresAt + 1)).toMatchObject({ error: "invalid_code" });
+		expect(store.claim(code, "Phone", 1)).toEqual({ error: "invalid_code" });
 	});
 
 	it("reads remote.json again only once it changed, its own writes and anyone else's", () => {
@@ -143,6 +144,24 @@ describe("remote pairing", () => {
 	it("names a device that sent no name", () => {
 		pairDevice("");
 		expect(store.load().devices[0].name).toBe("Phone");
+	});
+
+	it("stores a device name without terminal escapes or controls and keeps at most 64 characters", () => {
+		const prefix = "a".repeat(63);
+		const token = pairDevice(` \u001b[32m${prefix}\u001b[0m\t\u0085😀\nextra `);
+		const name = `${prefix}😀`;
+		expect(store.authenticate(token, 2)?.name).toBe(name);
+		expect(JSON.parse(readFileSync(path, "utf8"))).toMatchObject({ devices: [{ name }] });
+	});
+
+	it("shows names from an older remote.json without terminal escapes or controls", () => {
+		pairDevice();
+		const state = store.load();
+		const name = "a".repeat(64);
+		const legacy = { ...state, devices: [{ ...state.devices[0], name: ` \u001b[31m${name}\u001b[0m\rextra ` }] };
+		writeFileSync(path, JSON.stringify(legacy));
+
+		expect(store.load().devices[0].name).toBe(name);
 	});
 
 	it("keeps devices and the port when switching on and off", () => {
