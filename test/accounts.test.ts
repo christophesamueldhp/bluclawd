@@ -4,7 +4,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
 	list: vi.fn(),
-	add: vi.fn(),
+	addAndSwitch: vi.fn(),
 	saveCurrent: vi.fn(),
 	switchTo: vi.fn(),
 	remove: vi.fn(),
@@ -13,10 +13,11 @@ const mocks = vi.hoisted(() => ({
 	login: vi.fn(),
 	tasks: vi.fn(),
 }));
-vi.mock("../ext/accounts/store.ts", () => ({
+vi.mock("../ext/accounts/store.ts", async (importOriginal) => ({
+	...(await importOriginal<typeof import("../ext/accounts/store.ts")>()),
 	AccountStore: class {
 		list = mocks.list;
-		add = mocks.add;
+		addAndSwitch = mocks.addAndSwitch;
 		saveCurrent = mocks.saveCurrent;
 		switchTo = mocks.switchTo;
 		remove = mocks.remove;
@@ -82,7 +83,9 @@ function harness(choices: (string | undefined)[] = []) {
 beforeEach(() => {
 	vi.clearAllMocks();
 	mocks.list.mockResolvedValue([personal, work]);
-	mocks.add.mockResolvedValue({ id: "three" });
+	mocks.addAndSwitch.mockResolvedValue({ id: "three" });
+	mocks.saveCurrent.mockResolvedValue({ name: "New account" });
+	mocks.switchTo.mockResolvedValue(work);
 	mocks.login.mockResolvedValue({ type: "api_key", key: "fixture-key" } satisfies Credential);
 	mocks.tasks.mockReturnValue(undefined);
 });
@@ -119,8 +122,10 @@ describe("/accounts", () => {
 		const { run } = harness(["Add account…", "Sign in with an API key"]);
 		await run();
 		expect(mocks.login).toHaveBeenCalledWith(expect.anything(), provider, "api_key", expect.any(String));
-		expect(mocks.add).toHaveBeenCalledWith("example", "New account", { type: "api_key", key: "fixture-key" });
-		expect(mocks.switchTo).toHaveBeenCalledWith("three");
+		expect(mocks.addAndSwitch).toHaveBeenCalledWith("example", "New account", {
+			type: "api_key",
+			key: "fixture-key",
+		});
 	});
 
 	it("uses the same account workflow for OAuth", async () => {
@@ -133,7 +138,7 @@ describe("/accounts", () => {
 		mocks.login.mockResolvedValue(undefined);
 		const { run } = harness(["Add account…", "Sign in with OAuth", "Back"]);
 		await run();
-		expect(mocks.add).not.toHaveBeenCalled();
+		expect(mocks.addAndSwitch).not.toHaveBeenCalled();
 		expect(mocks.switchTo).not.toHaveBeenCalled();
 	});
 

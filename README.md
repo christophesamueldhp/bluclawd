@@ -128,8 +128,10 @@ see connection status and active-account names; press **Tab** to move between se
 provider, then **Add account…** to sign in with OAuth or an API key.
 Give each account a name such as Personal or Work. A successful sign-in activates that account,
 and the previous login stays saved. **Save current login…** names the login already
-stored by Pi without signing in again; if already saved, this renames the active account rather
-than duplicating its OAuth grant. Select a saved account to switch; `✓` marks the active one.
+stored by Pi. A matching login updates the active account with the name you enter.
+When the current login changes and `/accounts` cannot tell whether it belongs to the active account,
+it offers to save the login under a new name before saving or switching. Cancel keeps both logins.
+Select a saved account to switch. `✓` marks the active account.
 **`/accounts provider-id`** opens that provider directly, for example `/accounts openai-codex`.
 Removing an inactive saved account requires confirmation; the active account cannot be removed.
 
@@ -176,8 +178,8 @@ owner-only file permissions, alongside Pi's active credentials in `auth.json`. B
 `PI_CODING_AGENT_DIR`. These are local plaintext credential files, not an encrypted keychain;
 do not share them or commit them. Entered keys and authorization codes are masked and are not
 sent into the conversation. OAuth sign-in shows the provider's URL or device code; open it in
-the browser account you want to add. Token refresh remains Pi's responsibility; switching away
-saves the latest refreshed credential for reuse.
+the browser account you want to add. Pi refreshes tokens. Switching away saves the latest
+refreshed credential when `/accounts` can match it to the active account.
 
 ## What it adds
 
@@ -335,8 +337,9 @@ address and pairs on its own.
 Once remote control is on, `/remote-control` shows a menu:
 
 - **Pair a new phone**: a new QR code (and 6-digit code).
-- **Paired phones (n)…**: each phone with when it paired and was last used; enter removes one, or
-  all of them with **Remove all phones**, once confirmed. A removed phone has to pair again.
+- **Paired phones (n)…** shows when each phone paired and was last used. Select a phone to remove it,
+  or choose **Remove all phones** to remove every phone paired when you confirm. Either action cancels
+  any pending QR code and 6-digit code. Removed phones have to pair again.
 - **Start at login: on/off** (macOS): starts the daemon at login with a LaunchAgent
   (`~/Library/LaunchAgents/dev.bluclawd.daemon.plist`, its log in `~/.pi/server/daemon.log`), so
   the phone reaches the Mac before any `pi` has run.

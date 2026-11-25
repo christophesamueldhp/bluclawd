@@ -15,7 +15,7 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import type { Credential } from "@earendil-works/pi-ai";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { AccountStore } from "../ext/accounts/store.ts";
+import { AccountStore, SaveAsNewAccount } from "../ext/accounts/store.ts";
 
 vi.mock("node:fs", async (importOriginal) => {
 	const actual = await importOriginal<typeof import("node:fs")>();
@@ -33,6 +33,12 @@ const oauth = (value: string): Credential => ({
 	refresh: `fake-refresh-${value}`,
 	expires: 1_900_000_000_000,
 	accountId: "fake-account",
+});
+const opaque = (value: string): Credential => ({
+	type: "oauth",
+	access: `opaque-${value}`,
+	refresh: `refresh-${value}`,
+	expires: 100,
 });
 
 const jwt = (claims: Record<string, unknown>) =>
@@ -258,6 +264,60 @@ describe("named provider accounts", () => {
 		if (!original) throw new Error("Expected imported login");
 		await store.switchTo(original.id);
 		expect(readAuth().example).toEqual(login("home"));
+	});
+
+	it("leaves both opaque logins untouched when switching without approval", async () => {
+		const original = opaque("original");
+		const live = opaque("live");
+		seedAuth({ example: original });
+		const saved = await store.saveCurrent("example", "Personal");
+		const target = await store.add("example", "Work", key("fake-work"));
+		seedAuth({ example: live });
+
+		await expect(store.switchTo(target.id)).rejects.toBeInstanceOf(SaveAsNewAccount);
+
+		expect(readAuth().example).toEqual(live);
+		expect(await store.list()).toEqual([saved, target]);
+		expect(readVault().accounts[0].credential).toEqual(original);
+	});
+
+	it("saves an opaque login under a new name only after approval", async () => {
+		const original = opaque("original");
+		const live = opaque("live");
+		seedAuth({ example: original });
+		const saved = await store.saveCurrent("example", "Personal");
+		seedAuth({ example: live });
+
+		const pending: unknown = await store.saveCurrent("example", "Work").catch((error: unknown) => error);
+
+		expect(await store.list()).toEqual([saved]);
+		expect(readVault().accounts[0].credential).toEqual(original);
+		expect(readAuth().example).toEqual(live);
+		if (!(pending instanceof SaveAsNewAccount)) throw new Error("Expected a save-as-new request");
+		expect(pending.suggestedName).toBe("Work");
+		const work = await pending.saveAs("Office");
+		expect(await store.list()).toEqual([
+			{ ...saved, active: false },
+			{ ...work, name: "Office", active: true },
+		]);
+		await store.switchTo(saved.id);
+		expect(readAuth().example).toEqual(original);
+		await store.switchTo(work.id);
+		expect(readAuth().example).toEqual(live);
+	});
+
+	it("rejects approval to save an opaque login if another login replaced it meanwhile", async () => {
+		seedAuth({ example: opaque("original") });
+		const saved = await store.saveCurrent("example", "Personal");
+		const target = await store.add("example", "Work", key("fake-work"));
+		seedAuth({ example: opaque("live") });
+		const pending: unknown = await store.switchTo(target.id).catch((error: unknown) => error);
+		if (!(pending instanceof SaveAsNewAccount)) throw new Error("Expected a save-as-new request");
+
+		seedAuth({ example: opaque("latest") });
+		await expect(pending.saveAs("New login")).rejects.toThrow("changed while awaiting confirmation");
+		expect(await store.list()).toEqual([saved, target]);
+		expect(readAuth().example).toEqual(opaque("latest"));
 	});
 
 	it("replaces an inactive account's credential without touching live auth", async () => {

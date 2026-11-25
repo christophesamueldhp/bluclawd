@@ -4,7 +4,7 @@ import { type ExtensionAPI, type ExtensionCommandContext, getAgentDir } from "@e
 import { agentTasks, isStillRunning } from "../_shared/agent-tasks.ts";
 import { type ChooserView, chooseAccountOrModel } from "./chooser.ts";
 import { loginAccount } from "./login.ts";
-import { type AccountMetadata, AccountStore } from "./store.ts";
+import { type AccountMetadata, AccountStore, SaveAsNewAccount } from "./store.ts";
 
 const authLabel = (type: AuthType) => (type === "oauth" ? "OAuth" : "API key");
 const usage = "Usage: /accounts [provider-id] | /accounts --models | /accounts --scoped";
@@ -86,6 +86,30 @@ async function askName(
 		return;
 	}
 	return name;
+}
+
+async function applyAccountChange(
+	ctx: ExtensionCommandContext,
+	accounts: AccountMetadata[],
+	change: () => Promise<AccountMetadata>,
+): Promise<AccountMetadata | undefined> {
+	try {
+		return await change();
+	} catch (error) {
+		if (!(error instanceof SaveAsNewAccount)) throw error;
+		const suggested = `Save as ${error.suggestedName}`;
+		const custom = "Choose a different name…";
+		const choice = await ctx.ui.select("Could not match the current login. Save as a new account?", [
+			suggested,
+			custom,
+			"Cancel",
+		]);
+		if (choice !== suggested && choice !== custom) return;
+		const name =
+			choice === suggested ? error.suggestedName : await askName(ctx, accounts, "Name for the current login");
+		if (!name || !requireIdle(ctx)) return;
+		return error.saveAs(name);
+	}
 }
 
 async function signIn(
@@ -183,7 +207,7 @@ async function chooseAccount(
 		if (!requireIdle(ctx)) return;
 		const selected = accounts[labels.indexOf(choice)];
 		if (selected) {
-			await store.switchTo(selected.id);
+			if (!(await applyAccountChange(ctx, accounts, () => store.switchTo(selected.id)))) continue;
 			await refresh(ctx, provider.id);
 			ctx.ui.notify(
 				`Active account for ${provider.name}: ${selected.name}. Model and conversation unchanged.`,
@@ -216,15 +240,15 @@ async function chooseAccount(
 			if (!name) continue;
 			if (choice === save) {
 				if (!requireIdle(ctx)) return;
-				await store.saveCurrent(provider.id, name);
-				ctx.ui.notify(`Current ${provider.name} login saved as ${name}.`, "info");
+				const saved = await applyAccountChange(ctx, accounts, () => store.saveCurrent(provider.id, name));
+				if (saved) ctx.ui.notify(`Current ${provider.name} login saved as ${saved.name}.`, "info");
 				continue;
 			}
 			const credential = await signIn(ctx, provider, "Adding an account");
 			if (!credential) continue;
 			if (!requireIdle(ctx)) return;
-			const account = await store.add(provider.id, name, credential);
-			await store.switchTo(account.id);
+			if (!(await applyAccountChange(ctx, accounts, () => store.addAndSwitch(provider.id, name, credential))))
+				continue;
 			await refresh(ctx, provider.id);
 			ctx.ui.notify(`Active account for ${provider.name}: ${name}. Your previous login was preserved.`, "info");
 			return "login";
