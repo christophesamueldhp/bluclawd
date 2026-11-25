@@ -146,7 +146,7 @@ code, not JSON, so these keys do nothing from settings. They are `allowPlaintext
 | `allowRead` | paths | Readable again inside a `denyRead` area; wins over `denyRead`. For example, deny `~/.ssh` and allow `~/.ssh/known_hosts` |
 | `allowWrite` | paths | Writable (plus the working directory and temp) |
 | `denyWrite` | paths | Not writable even inside `allowWrite`; wins over `allowWrite` |
-| `allowGitConfig` | boolean | Commands may write `.git/config`, for example with `git remote set-url`; `.git/hooks` stays protected |
+| `allowGitConfig` | boolean | Removes the runtime's `.git/config` deny. bluclawd's deny still requires an exact global `allowWrite` entry |
 
 Paths take globs: `*`, `**`, `?`, `[abc]`. On Linux, `allowWrite` and `denyWrite` take literal
 paths and accept a trailing `/**` for a directory and its contents. A read glob needs a literal
@@ -161,12 +161,12 @@ bluclawd protects `.pi/`, `.agents/`, `.git/hooks`, `.git/config`, `.vscode/`, `
 `.claude/` and `.mcp.json` in the working directory before those paths exist. A run's shell
 uses its worktree as the working directory. An exact entry such as `.agents` in the global
 `allowWrite` list removes that bluclawd deny. An entry for `.` leaves every protected path in
-place. Any other deny still applies, including the run shell's Git protections and the
-runtime's own write protections.
+place. Any other deny still applies to shells, including the run shell's Git protections and the
+runtime's own write protections. Pi's built-in file-tool rule follows the `allowWrite` exception.
 
-Always protected from writes, even inside the project: shell rc files (`.bashrc`, `.zshrc`,
+The runtime protects these paths from shell writes even inside `allowWrite`: shell rc files (`.bashrc`, `.zshrc`,
 `.profile`, …), `.gitconfig`, `.gitmodules`, `.ripgreprc`, `.mcp.json`, `.git/hooks`,
-`.git/config`, `.vscode`, `.idea`, `.claude/commands`, `.claude/agents`.
+`.vscode`, `.idea`, `.claude/commands`, and `.claude/agents`. It protects `.git/config` by default.
 
 ## Credentials
 
