@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getAgentDir, type SettingsManager } from "@earendil-works/pi-coding-agent";
@@ -436,7 +436,7 @@ describe("the extension", () => {
 
 	const globalSettings = () => join(getAgentDir(), "settings.json");
 
-	function load(settings: Record<string, unknown>) {
+	function load(settings: Record<string, unknown>, cwd = dir) {
 		writeFileSync(globalSettings(), JSON.stringify(settings));
 		const handlers: Record<string, (event: any, ctx: any) => Promise<any>> = {};
 		let shortcut: ((ctx: any) => Promise<void>) | undefined;
@@ -453,7 +453,7 @@ describe("the extension", () => {
 			events: { emit: (name: string, data: unknown) => announced.push([name, data]) },
 		} as any);
 		const ctx = {
-			cwd: dir,
+			cwd,
 			isProjectTrusted: () => true,
 			ui: {
 				setStatus: (key: string, text: string | undefined) => {
@@ -466,6 +466,41 @@ describe("the extension", () => {
 		const call = (toolName: string, input: Record<string, unknown>) => handlers.tool_call({ toolName, input }, ctx);
 		return { handlers, ctx, call, status, notes, announced, press: () => shortcut?.(ctx) };
 	}
+
+	it("matches bash path arguments according to the working directory's case sensitivity", async () => {
+		writeFileSync(join(dir, ".env"), "A=1\n");
+		const { handlers, ctx, call } = load({ permissions: { deny: ["Read(.env)"] } });
+		await handlers.session_start({}, ctx);
+		const insensitive = existsSync(join(dir, ".ENV"));
+		expect(await call("bash", { command: "cat .ENV" })).toEqual(
+			insensitive ? { block: true, reason: "Blocked by permission rule (deny): Read(.env)" } : undefined,
+		);
+	});
+
+	it("applies the working directory's case sensitivity to file tools and keeps Bash rules exact", async () => {
+		const { handlers, ctx, call } = load({ permissions: { deny: ["Read(.env)", "Write(.env)", "Bash(rm -rf *)"] } });
+		await handlers.session_start({}, ctx);
+		writeFileSync(join(dir, ".case-check"), "");
+		const insensitive = existsSync(join(dir, ".CASE-CHECK"));
+		const blocked = (rule: string) =>
+			insensitive ? { block: true, reason: `Blocked by permission rule (deny): ${rule}` } : undefined;
+
+		expect(await call("read", { path: ".Env" })).toEqual(blocked("Read(.env)"));
+		expect(await call("bash", { command: "grep x .ENV" })).toEqual(blocked("Read(.env)"));
+		expect(await call("grep", { pattern: "x", path: ".ENV" })).toEqual(blocked("Read(.env)"));
+		expect(await call("write", { path: ".ENV" })).toEqual(blocked("Write(.env)"));
+		expect((await call("bash", { command: "rm -rf x" }))?.block).toBe(true);
+		expect(await call("bash", { command: "RM -rf x" })).toBeUndefined();
+	});
+
+	it("keeps file rules exact in a case-sensitive working directory", async () => {
+		const { handlers, ctx, call } = load({ permissions: { deny: ["Read(.env)"] } }, "/dev");
+		await handlers.session_start({}, ctx);
+		expect(existsSync(join(ctx.cwd, "null"))).toBe(true);
+		expect(existsSync(join(ctx.cwd, "NULL"))).toBe(false);
+		expect(await call("read", { path: ".ENV" })).toBeUndefined();
+		expect((await call("read", { path: ".env" }))?.block).toBe(true);
+	});
 
 	it("blocks a denied call with the rule, and runs everything else", async () => {
 		const { handlers, ctx, call } = load({ permissions: { deny: ["Bash(rm *)"] } });
