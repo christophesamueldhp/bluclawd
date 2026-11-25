@@ -307,7 +307,10 @@ describe("remote control switch", () => {
 		});
 		const { token } = (await paired.json()) as { token: string };
 		const controller = new AbortController();
-		const res = await fetch(`${base}/api/events?token=${token}&session=pane-1`, { signal: controller.signal });
+		const res = await fetch(`${base}/api/events?session=pane-1`, {
+			headers: { authorization: `Bearer ${token}` },
+			signal: controller.signal,
+		});
 		const reader = res.body!.getReader();
 		let received = "";
 		const until = async (needle: string) => {
@@ -369,7 +372,10 @@ describe("remote control switch", () => {
 		expect(await (await status()).json()).toEqual({ report });
 
 		const controller = new AbortController();
-		const res = await fetch(`${base}/api/events?token=${token}&session=pane-1`, { signal: controller.signal });
+		const res = await fetch(`${base}/api/events?session=pane-1`, {
+			headers: { authorization: `Bearer ${token}` },
+			signal: controller.signal,
+		});
 		const reader = res.body!.getReader();
 		let received = "";
 		const until = async (needle: string) => {
@@ -608,7 +614,8 @@ describe("remote control switch", () => {
 			const on = await control.handle({ type: "remote", action: "on", port: 0 });
 			if (on.type !== "remote_result") throw new Error(on.error);
 			const controller = new AbortController();
-			const res = await fetch(`http://127.0.0.1:${on.port}/api/events?token=${claimed.token}&session=pane-1`, {
+			const res = await fetch(`http://127.0.0.1:${on.port}/api/events?session=pane-1`, {
+				headers: { authorization: `Bearer ${claimed.token}` },
 				signal: controller.signal,
 			});
 			await res.body!.getReader().read();
@@ -629,7 +636,8 @@ describe("remote control switch", () => {
 			const on = await control.handle({ type: "remote", action: "on", port: 0 });
 			if (on.type !== "remote_result") throw new Error(on.error);
 			const controller = new AbortController();
-			const res = await fetch(`http://127.0.0.1:${on.port}/api/events?token=${claimed.token}`, {
+			const res = await fetch(`http://127.0.0.1:${on.port}/api/events`, {
+				headers: { authorization: `Bearer ${claimed.token}` },
 				signal: controller.signal,
 			});
 			await res.body!.getReader().read();

@@ -329,10 +329,10 @@ you open bluclawd, and keep the Mac awake on power. In System Settings, open Bat
 automatic sleeping when the display is off. If the app cannot reach the Mac, it says so and keeps
 retrying; it stays paired.
 
-The phone keeps a token; the daemon keeps only its hash, in `~/.pi/server/remote.json`. If your tailnet has Serve
-or HTTPS certificates turned off, `/remote-control` shows the link that turns them on, once for
-the tailnet. For more than one Mac, add one Home Screen app per Mac. Each has its own ts.net
-address and pairs on its own.
+The phone sends its token in an authorization header, including for live updates. The daemon keeps
+only its hash in `~/.pi/server/remote.json`. If your tailnet has Serve or HTTPS certificates turned
+off, `/remote-control` shows the link that turns them on, once for the tailnet. For more than one
+Mac, add one Home Screen app per Mac. Each has its own ts.net address and pairs on its own.
 
 Once remote control is on, `/remote-control` shows a menu:
 

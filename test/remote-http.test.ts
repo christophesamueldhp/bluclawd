@@ -298,6 +298,13 @@ describe("remote HTTP API", () => {
 		expect((await fetch(`${base}/api/events?token=bogus`)).status).toBe(401);
 	});
 
+	it("rejects a paired device's token in the event stream URL", async () => {
+		const token = await pair();
+		const res = await fetch(`${base}/api/events?token=${token}`);
+		await res.body?.cancel();
+		expect(res.status).toBe(401);
+	});
+
 	it("rejects a wrong pairing code", async () => {
 		store.createCode();
 		const res = await fetch(`${base}/api/pair`, {
@@ -1107,7 +1114,7 @@ describe("remote HTTP API", () => {
 	it("signals transcript and list changes over SSE", async () => {
 		const token = await pair();
 		const controller = new AbortController();
-		const res = await fetch(`${base}/api/events?token=${token}&session=live`, { signal: controller.signal });
+		const res = await fetch(`${base}/api/events?session=live`, { headers: auth(token), signal: controller.signal });
 		expect(res.headers.get("content-type")).toContain("text/event-stream");
 		const reader = res.body!.getReader();
 		const decoder = new TextDecoder();
@@ -1215,8 +1222,8 @@ describe("remote HTTP API", () => {
 	describe("event stream", () => {
 		const open = async (token: string, session?: string) => {
 			const controller = new AbortController();
-			const query = session ? `&session=${session}` : "";
-			const res = await fetch(`${base}/api/events?token=${token}${query}`, { signal: controller.signal });
+			const query = session ? `?session=${session}` : "";
+			const res = await fetch(`${base}/api/events${query}`, { headers: auth(token), signal: controller.signal });
 			const reader = res.body!.getReader();
 			const decoder = new TextDecoder();
 			// One read stays pending across calls, because abandoning a timed-out read would swallow its chunk.
@@ -1285,7 +1292,10 @@ describe("remote HTTP API", () => {
 			const token = await pair();
 			const watcher = await (async () => {
 				const controller = new AbortController();
-				const res = await fetch(`${base}/api/events?token=${token}&session=live`, { signal: controller.signal });
+				const res = await fetch(`${base}/api/events?session=live`, {
+					headers: auth(token),
+					signal: controller.signal,
+				});
 				const reader = res.body!.getReader();
 				const decoder = new TextDecoder();
 				let received = "";
@@ -1314,7 +1324,7 @@ describe("remote HTTP API", () => {
 
 			server.live("live", snapshot);
 			const late = new AbortController();
-			const res = await fetch(`${base}/api/events?token=${token}&session=live`, { signal: late.signal });
+			const res = await fetch(`${base}/api/events?session=live`, { headers: auth(token), signal: late.signal });
 			const reader = res.body!.getReader();
 			let text = "";
 			while (!text.includes("event: live")) text += new TextDecoder().decode((await reader.read()).value);
@@ -1346,8 +1356,8 @@ describe("remote HTTP API", () => {
 			const [device, otherDevice] = store.load().devices.map((d) => d.id);
 			const stream = async (as: string, id?: string) => {
 				const controller = new AbortController();
-				const named = id ? `&stream=${id}` : "";
-				const res = await fetch(`${base}/api/events?token=${as}${named}`, { signal: controller.signal });
+				const named = id ? `?stream=${id}` : "";
+				const res = await fetch(`${base}/api/events${named}`, { headers: auth(as), signal: controller.signal });
 				await res.body!.getReader().read();
 				return controller;
 			};
