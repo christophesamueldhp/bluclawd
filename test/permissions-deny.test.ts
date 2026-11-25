@@ -60,7 +60,6 @@ describe("deniedBy", () => {
 		expect(denied(["Read(.env)"], "grep", { pattern: "k", path: ".env" })).toBe(true);
 		expect(denied(["Read(//proj/**)"], "ls", { path: "sub" })).toBe(true);
 		expect(denied(["Read(//proj)"], "grep", { pattern: "k" })).toBe(true);
-		expect(denied(["Write(./x)"], "edit", { path: "./x" })).toBe(false);
 	});
 
 	it("matches paths resolved against the working directory, and //abs", () => {
@@ -511,6 +510,17 @@ describe("the extension", () => {
 		});
 		expect(await call("bash", { command: "npm test" })).toBeUndefined();
 		expect(await call("write", { path: ".git/hooks/pre-commit" })).toBeUndefined();
+	});
+
+	it.each(["Read(.env)", "Write(.env)", "Edit(.env)"])("blocks edits to .env with %s", async (rule) => {
+		const { handlers, ctx, call } = load({ permissions: { deny: [rule] } });
+		await handlers.session_start({}, ctx);
+		const edits = [{ oldText: "A=1", newText: "A=2" }];
+		expect(await call("edit", { path: ".env", edits })).toEqual({
+			block: true,
+			reason: `Blocked by permission rule (deny): ${rule}`,
+		});
+		expect(await call("edit", { path: ".env.example", edits })).toBeUndefined();
 	});
 
 	it("warns when a settings file cannot be read, and keeps the other file's rules", async () => {
