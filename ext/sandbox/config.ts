@@ -1,6 +1,6 @@
 import { lstatSync, mkdirSync, readFileSync, readlinkSync, realpathSync, writeFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
-import type { SandboxRuntimeConfig } from "@anthropic-ai/sandbox-runtime";
+import type { FilesystemPathEntry, SandboxRuntimeConfig } from "@anthropic-ai/sandbox-runtime";
 import { getAgentDir, type SettingsManager } from "@earendil-works/pi-coding-agent";
 import { defaultServerDir, getServerDir } from "../../daemon/paths.ts";
 import { resolveDenyRulePath } from "../_shared/deny-rule-path.ts";
@@ -23,7 +23,7 @@ export type SandboxSetting =
 
 export interface UncheckedRuntimeConfig {
 	network: { allowedDomains: string[]; [key: string]: unknown };
-	filesystem: { denyRead: string[]; allowWrite: string[]; denyWrite: string[]; [key: string]: unknown };
+	filesystem: { denyRead: string[]; allowWrite: string[]; denyWrite: FilesystemPathEntry[]; [key: string]: unknown };
 	[key: string]: unknown;
 }
 
@@ -108,6 +108,22 @@ export function sandboxPath(written: string, cwd: string, home: string): string 
 	if (path === "~") return home;
 	if (path.startsWith("~/")) return join(home, path.slice(2));
 	return isAbsolute(path) ? path : join(cwd, path);
+}
+
+export const PROTECTED_PROJECT_PATHS = [
+	".pi",
+	".agents",
+	".git/hooks",
+	".git/config",
+	".vscode",
+	".idea",
+	".claude",
+	".mcp.json",
+] as const;
+
+export function protectedProjectWritePaths(cwd: string, home: string, globalAllowWrite: readonly string[]): string[] {
+	const released = new Set(globalAllowWrite.map((path) => resolve(sandboxPath(path, cwd, home))));
+	return PROTECTED_PROJECT_PATHS.map((path) => resolve(cwd, path)).filter((path) => !released.has(path));
 }
 
 const MAX_LINKS = 40;
@@ -214,7 +230,13 @@ export function runtimeConfig(
 			...(filesystem as object),
 			denyRead: paths(settings.denyRead, ruled(["Read"])),
 			allowWrite: paths([cwd, tmp, ...settings.allowWrite]),
-			denyWrite: paths([...settings.denyWrite, ...ownAgentDirs], ruled(["Edit", "Write"])),
+			denyWrite: [
+				...paths([...settings.denyWrite, ...ownAgentDirs], ruled(["Edit", "Write"])),
+				...protectedProjectWritePaths(cwd, home, settings.allowWrite).map((path) => ({
+					path,
+					literal: true as const,
+				})),
+			],
 		},
 	};
 }

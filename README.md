@@ -696,6 +696,10 @@ It is read when a session starts, so `/reload` after editing:
 - Writes: the working directory and the temp directory, plus `filesystem.allowWrite`; never
   what an `Edit` or `Write` rule denies. Under the sandbox a `Write` rule blocks `>>` too. On
   Linux a file a `Read` rule or `filesystem.denyRead` denies is not writable either, `>>` included.
+- The shell protects `.pi/`, `.agents/`, `.git/hooks`, `.git/config`, `.vscode/`, `.idea/`,
+  `.claude/` and `.mcp.json` in the working directory, including a run's worktree. To remove
+  a bluclawd deny, name that exact path in the global `sandbox.filesystem.allowWrite` list.
+  The runtime's own write restrictions still apply.
 - No write reaches pi's agent directory, whatever `filesystem.allowWrite` says: a command cannot
   turn the sandbox off in its `settings.json`, add an extension or a skill there, or `pi install`.
   On Linux the sandbox does not start when a symlink on the way to it lies where commands may write

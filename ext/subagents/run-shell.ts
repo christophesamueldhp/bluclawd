@@ -9,6 +9,7 @@ import { resolveDenyRulePath } from "../_shared/deny-rule-path.ts";
 import { pathRule } from "../permissions/rules.ts";
 import {
 	checkRuntimeConfig,
+	protectedProjectWritePaths,
 	type SandboxSetting,
 	sandboxPath,
 	type UncheckedRuntimeConfig,
@@ -62,6 +63,10 @@ export function runShellConfig(
 	const userPaths = (list: string[]) => list.map((path) => sandboxPath(path, workspace.root, home));
 	const unique = (list: string[]) => [...new Set(list)];
 	const deniedDomains = written.network?.deniedDomains;
+	const dotGit = join(workspace.root, ".git");
+	const protectedPaths = protectedProjectWritePaths(workspace.root, home, on?.allowWrite ?? []).filter(
+		(path) => !path.startsWith(dotGit + sep),
+	);
 	return {
 		config: {
 			network: {
@@ -79,14 +84,17 @@ export function runShellConfig(
 				]),
 				allowRead: [workspace.root, runShellTmp(agentDir, scope.runId)],
 				allowWrite: [workspace.root, runShellTmp(agentDir, scope.runId)],
-				denyWrite: unique([
-					join(workspace.root, ".git"),
-					workspace.gitDir,
-					scope.runDir,
-					...userPaths(SHARED_WRITABLE),
-					...ruled(["Edit", "Write"]),
-					...userPaths(on?.denyWrite ?? []),
-				]),
+				denyWrite: [
+					...unique([
+						dotGit,
+						workspace.gitDir,
+						scope.runDir,
+						...userPaths(SHARED_WRITABLE),
+						...ruled(["Edit", "Write"]),
+						...userPaths(on?.denyWrite ?? []),
+					]),
+					...protectedPaths.map((path) => ({ path, literal: true as const })),
+				],
 			},
 		},
 		hiddenEnv: strings(written.credentials?.envVars?.map((entry) => entry.name)),
