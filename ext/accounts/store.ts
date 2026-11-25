@@ -12,6 +12,7 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
+import { isDeepStrictEqual } from "node:util";
 import type { Credential } from "@earendil-works/pi-ai";
 import { getPackageDir } from "@earendil-works/pi-coding-agent";
 
@@ -25,6 +26,17 @@ export interface AccountMetadata {
 	loginChangedElsewhere?: true;
 }
 
+export class SaveAsNewAccount extends Error {
+	readonly suggestedName: string;
+	readonly saveAs: (name: string) => Promise<AccountMetadata>;
+
+	constructor(suggestedName: string, saveAs: (name: string) => Promise<AccountMetadata>) {
+		super("The current login needs a new account name");
+		this.suggestedName = suggestedName;
+		this.saveAs = saveAs;
+	}
+}
+
 interface Account {
 	id: string;
 	name: string;
@@ -35,6 +47,11 @@ interface Account {
 interface Vault {
 	accounts: Account[];
 	active: Record<string, string>;
+}
+
+interface ApprovedLogin {
+	name: string;
+	credential: Credential;
 }
 
 interface AuthBackend {
@@ -102,9 +119,16 @@ function identity(credential: Credential): string | undefined {
 	return JSON.stringify([subject, accountId]);
 }
 
-function otherLogin(a: Credential, b: Credential): boolean {
+function compareLogins(a: Credential, b: Credential): "same" | "different" | "unknown" {
 	const [first, second] = [identity(a), identity(b)];
-	return first !== undefined && second !== undefined && first !== second;
+	if (first !== undefined && second !== undefined) return a.type === b.type && first === second ? "same" : "different";
+	return isDeepStrictEqual(a, b) ? "same" : "unknown";
+}
+
+function checkApprovedLogin(expected: Credential | undefined, live: Credential | undefined): void {
+	if (expected && !isDeepStrictEqual(expected, live)) {
+		throw new Error("The current login changed while awaiting confirmation");
+	}
 }
 
 function metadata(account: Account, vault: Vault, live?: Credential): AccountMetadata {
@@ -117,7 +141,9 @@ function metadata(account: Account, vault: Vault, live?: Credential): AccountMet
 		type: account.credential.type,
 		active,
 		...(email ? { email } : {}),
-		...(active && live && otherLogin(account.credential, live) ? { loginChangedElsewhere: true as const } : {}),
+		...(active && live && compareLogins(account.credential, live) === "different"
+			? { loginChangedElsewhere: true }
+			: {}),
 	};
 }
 
@@ -226,24 +252,6 @@ export class AccountStore {
 		}
 	}
 
-	private captureLiveLogin(vault: Vault, provider: string, credential: Credential | undefined): void {
-		const tracked = vault.accounts.find((account) => account.id === vault.active[provider]);
-		const liveIsOtherLogin =
-			tracked !== undefined && credential !== undefined && otherLogin(tracked.credential, credential);
-		const sameLoginAccount = liveIsOtherLogin ? undefined : tracked;
-		if (sameLoginAccount && credential) sameLoginAccount.credential = credential;
-		if (!sameLoginAccount && credential) {
-			let name = "Original login";
-			let suffix = 2;
-			while (vault.accounts.some((account) => account.provider === provider && account.name === name)) {
-				name = `Original login (${suffix++})`;
-			}
-			const original = this.create(vault, provider, name, credential);
-			vault.active = { ...vault.active, [provider]: original.id };
-		}
-		this.writeVault(vault);
-	}
-
 	private create(vault: Vault, provider: string, name: string, credential: Credential): Account {
 		if (!provider.trim()) throw new Error("Provider must not be empty");
 		const normalized = normalizeName(name);
@@ -278,15 +286,26 @@ export class AccountStore {
 	}
 
 	async saveCurrent(provider: string, name: string): Promise<AccountMetadata> {
+		return this.saveLogin(provider, name);
+	}
+
+	private async saveLogin(provider: string, name: string, approved?: Credential): Promise<AccountMetadata> {
 		return this.backend.withLockAsync(async (current) => {
 			const vault = this.readVault();
 			const credential = this.currentCredential(current, provider);
+			checkApprovedLogin(approved, credential);
 			if (!credential) throw new Error("No stored login for this provider");
 			const previous = vault.accounts.find((account) => account.id === vault.active[provider]);
-			if (previous && !otherLogin(previous.credential, credential)) {
-				resaveSameLogin(vault, previous, name, credential);
-				this.writeVault(vault);
-				return { result: metadata(previous, vault) };
+			if (previous && !approved) {
+				const comparison = compareLogins(previous.credential, credential);
+				if (comparison === "same") {
+					resaveSameLogin(vault, previous, name, credential);
+					this.writeVault(vault);
+					return { result: metadata(previous, vault) };
+				}
+				if (comparison === "unknown") {
+					throw new SaveAsNewAccount(name, (newName) => this.saveLogin(provider, newName, credential));
+				}
 			}
 			const account = this.create(vault, provider, name, credential);
 			vault.active = { ...vault.active, [provider]: account.id };
@@ -296,11 +315,48 @@ export class AccountStore {
 	}
 
 	async switchTo(id: string): Promise<AccountMetadata> {
-		return this.backend.withLockAsync(async (current) => {
-			const vault = this.readVault();
+		return this.switchAccount((vault) => {
 			const target = vault.accounts.find((account) => account.id === id);
 			if (!target) throw new Error("Account not found");
-			this.captureLiveLogin(vault, target.provider, this.currentCredential(current, target.provider));
+			return target;
+		});
+	}
+
+	async addAndSwitch(provider: string, name: string, credential: Credential): Promise<AccountMetadata> {
+		const snapshot = structuredClone(credential);
+		return this.switchAccount((vault) => this.create(vault, provider, name, snapshot));
+	}
+
+	private async switchAccount(
+		selectTarget: (vault: Vault) => Account,
+		approved?: ApprovedLogin,
+	): Promise<AccountMetadata> {
+		return this.backend.withLockAsync(async (current) => {
+			const vault = this.readVault();
+			const target = selectTarget(vault);
+			const live = this.currentCredential(current, target.provider);
+			checkApprovedLogin(approved?.credential, live);
+			if (live) {
+				const tracked = vault.accounts.find((account) => account.id === vault.active[target.provider]);
+				const comparison = tracked ? compareLogins(tracked.credential, live) : undefined;
+				if (tracked && comparison === "same") {
+					tracked.credential = live;
+				} else {
+					let name = "Original login";
+					let suffix = 2;
+					while (vault.accounts.some((account) => account.provider === target.provider && account.name === name)) {
+						name = `Original login (${suffix++})`;
+					}
+					if (!approved && (comparison === "unknown" || identity(live) === undefined)) {
+						throw new SaveAsNewAccount(name, (name) =>
+							this.switchAccount(selectTarget, { name, credential: live }),
+						);
+					}
+					const original = this.create(vault, target.provider, approved?.name ?? name, live);
+					vault.active = { ...vault.active, [target.provider]: original.id };
+				}
+			}
+			this.writeVault(vault);
 			const auth = { ...JSON.parse((current ?? "{}").replace(/^\uFEFF/, "")), [target.provider]: target.credential };
 			replaceFile(this.authPath, JSON.stringify(auth, null, 2));
 			vault.active = { ...vault.active, [target.provider]: target.id };

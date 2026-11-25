@@ -1,7 +1,13 @@
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fauxAssistantMessage, fauxProvider, fauxToolCall, type Provider } from "@earendil-works/pi-ai";
+import {
+	type Credential,
+	fauxAssistantMessage,
+	fauxProvider,
+	fauxToolCall,
+	type Provider,
+} from "@earendil-works/pi-ai";
 import {
 	createAgentSessionFromServices,
 	createAgentSessionRuntime,
@@ -665,6 +671,57 @@ describe("interactive /accounts", () => {
 			await h.shown("Fixture Alpha accounts");
 			expect(await h.store.list()).toEqual(accountsBefore);
 			expect(h.runtime.session.model?.id).toBe("alpha-main");
+		},
+		readinessMs * 2,
+	);
+
+	it(
+		"offers to save an opaque login as a new account before switching",
+		async () => {
+			const h = await fixture({ oauth: true });
+			const [personal] = await h.store.list("fixture-alpha");
+			if (!personal) throw new Error("Expected a saved account");
+			const original = {
+				type: "oauth",
+				access: "fixture-original",
+				refresh: "fixture-original",
+				expires: 100,
+			} satisfies Credential;
+			const live = { ...original, access: "fixture-live", refresh: "fixture-live" };
+			await h.store.replaceCredential(personal.id, original);
+			const target = await h.store.add("fixture-alpha", "Office", { type: "api_key", key: "fixture-office" });
+			const authPath = join(h.directory, "auth.json");
+			const auth = JSON.parse(await readFile(authPath, "utf8"));
+			await writeFile(authPath, JSON.stringify({ ...auth, "fixture-alpha": live }));
+			const before = await h.store.list("fixture-alpha");
+
+			h.command("/accounts fixture-alpha");
+			await h.shown("Office · API key");
+			h.terminal.send("\x1b[B");
+			h.terminal.send("\r");
+			await h.shown("Save as Original login");
+			h.terminal.send("\x1b");
+			await h.shown("Office · API key");
+			expect(await h.store.list("fixture-alpha")).toEqual(before);
+			expect(JSON.parse(await readFile(authPath, "utf8"))["fixture-alpha"]).toEqual(live);
+
+			h.terminal.send("\x1b[B");
+			h.terminal.send("\r");
+			await h.shown("Save as Original login");
+			h.terminal.send("\r");
+			await h.shown("Active account for Fixture Alpha: Office");
+			const saved = await h.store.list("fixture-alpha");
+			const captured = saved.find((account) => account.name === "Original login");
+			expect(saved).toEqual([
+				{ ...personal, type: "oauth", active: false },
+				{ ...target, active: true },
+				expect.objectContaining({ name: "Original login", type: "oauth", active: false }),
+			]);
+			if (!captured) throw new Error("Expected the captured account");
+			await h.store.switchTo(captured.id);
+			expect(JSON.parse(await readFile(authPath, "utf8"))["fixture-alpha"]).toEqual(live);
+			await h.store.switchTo(personal.id);
+			expect(JSON.parse(await readFile(authPath, "utf8"))["fixture-alpha"]).toEqual(original);
 		},
 		readinessMs * 2,
 	);
