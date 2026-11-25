@@ -148,10 +148,11 @@ code, not JSON, so these keys do nothing from settings. They are `allowPlaintext
 | `denyWrite` | paths | Not writable even inside `allowWrite`; wins over `allowWrite` |
 | `allowGitConfig` | boolean | Commands may write `.git/config`, for example with `git remote set-url`; `.git/hooks` stays protected |
 
-Paths take globs: `*`, `**`, `?`, `[abc]`. On Linux, `allowWrite`/`denyWrite` take literal paths
-only and drop a trailing `/**`. A read glob whose first component is a wildcard, such as
-`/**/*.pem`, is skipped and hides nothing. bluclawd makes `denyRead`, `allowWrite` and
-`denyWrite` absolute, which avoids that for them.
+Paths take globs: `*`, `**`, `?`, `[abc]`. On Linux, `allowWrite` and `denyWrite` take literal
+paths and accept a trailing `/**` for a directory and its contents. A read glob needs a literal
+directory below the filesystem root, so `/**/*.pem` is unsupported. If the runtime reports an
+unsupported pattern, `/sandbox status` names it and bluclawd refuses `bash` and `monitor`.
+Run shells also refuse to start. Replace the pattern with a literal path and run `/reload`.
 
 A leading `/` in `allowWrite`, `denyRead`, or `denyWrite` names an absolute path.
 File deny rules in `permissions.deny` follow the [permissions syntax](../README.md#permissions).

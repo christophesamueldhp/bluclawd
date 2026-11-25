@@ -274,3 +274,9 @@ export async function checkRuntimeConfig(config: UncheckedRuntimeConfig): Promis
 	const dropped = droppedKeys(config, result.data, "sandbox");
 	return dropped.length > 0 ? `${dropped.join(", ")} is not a sandbox setting` : result.data;
 }
+
+export function linuxGlobRefusal(patterns: string[]): string | undefined {
+	if (patterns.length === 0) return undefined;
+	const paths = [...new Set(patterns)].map((path) => JSON.stringify(path)).join(", ");
+	return `Linux cannot enforce these sandbox filesystem patterns (${paths}). Replace each pattern with a literal path`;
+}

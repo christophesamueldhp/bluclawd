@@ -39,8 +39,8 @@ describe.skipIf(!supported)(
 			return { code: exitCode, output };
 		}
 
-		async function configure(allowWrite: string[] = []): Promise<void> {
-			const config = runtimeConfig(
+		function configuration(allowWrite: string[], rules: string[]) {
+			return runtimeConfig(
 				{
 					allowedDomains: [],
 					allowWrite,
@@ -53,13 +53,17 @@ describe.skipIf(!supported)(
 						filesystem: { allowRead: [agentDir] },
 					},
 				},
-				["Read(**/.env*)", "Read(*.txt)"],
+				rules,
 				dir,
 				homedir(),
 				tmpdir(),
 				[],
 				agentDirs(),
 			);
+		}
+
+		async function configure(allowWrite: string[] = []): Promise<void> {
+			const config = configuration(allowWrite, ["Read(**/.env*)", "Read(*.txt)"]);
 			const asker = networkAsker(() => ({ hasUI: true, ui: { confirm } }) as never);
 			expect(await startSandbox(config, asker.ask)).toEqual({ kind: "ready" });
 		}
@@ -103,6 +107,36 @@ describe.skipIf(!supported)(
 		it("applies a leading wildcard to paths in the working directory", async () => {
 			expect((await run("cat ./draft.txt")).code).not.toBe(0);
 			expect((await run("cat ./app.ts")).code).toBe(0);
+		});
+
+		it.skipIf(process.platform !== "linux")("refuses glob write rules at startup and reload on Linux", async () => {
+			const glob = configuration([], ["Write(**/.env*)"]);
+			const deny = async () => false;
+			try {
+				await stopSandbox();
+				for (const phase of ["startup", "reload"]) {
+					if (phase === "reload") await configure();
+					expect(await startSandbox(glob, deny), phase).toEqual({
+						kind: "unavailable",
+						reason: expect.stringMatching(/\*\*\/\.env\*.*literal path/),
+					});
+					await expect(run("true")).rejects.toThrow("**/.env*");
+				}
+			} finally {
+				await configure();
+			}
+		});
+
+		it("enforces a supported write rule and leaves other files writable", async () => {
+			const rule = process.platform === "darwin" ? "Write(**/.env*)" : "Write(.env)";
+			try {
+				expect(await startSandbox(configuration([], [rule]), async () => false)).toEqual({ kind: "ready" });
+				expect((await run("printf changed > .env")).code).not.toBe(0);
+				expect(readFileSync(join(dir, ".env"), "utf8")).toBe("SECRET=hunter2\n");
+				expect((await run("printf allowed > allowed-write")).code).toBe(0);
+			} finally {
+				await configure();
+			}
 		});
 
 		it("refuses to create a project extension in a fresh working directory", async () => {
