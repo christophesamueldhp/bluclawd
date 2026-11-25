@@ -214,6 +214,7 @@ const backgroundBash: InlineExtension = {
 			killedBySignal,
 			log: (line) => {
 				if (ctx?.hasUI) ctx.ui.notify(line, "warning");
+				else console.error(line);
 			},
 		});
 
