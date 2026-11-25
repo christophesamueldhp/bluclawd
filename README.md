@@ -337,8 +337,9 @@ address and pairs on its own.
 Once remote control is on, `/remote-control` shows a menu:
 
 - **Pair a new phone**: a new QR code (and 6-digit code).
-- **Paired phones (n)…**: each phone with when it paired and was last used; enter removes one, or
-  all of them with **Remove all phones**, once confirmed. A removed phone has to pair again.
+- **Paired phones (n)…** shows when each phone paired and was last used. Select a phone to remove it,
+  or choose **Remove all phones** to remove every phone paired when you confirm. Either action cancels
+  any pending QR code and 6-digit code. Removed phones have to pair again.
 - **Start at login: on/off** (macOS): starts the daemon at login with a LaunchAgent
   (`~/Library/LaunchAgents/dev.bluclawd.daemon.plist`, its log in `~/.pi/server/daemon.log`), so
   the phone reaches the Mac before any `pi` has run.

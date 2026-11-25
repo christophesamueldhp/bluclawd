@@ -35,7 +35,7 @@ export type RemoteResult = Omit<RemoteResponse, "type" | "ok" | "version" | "bui
 
 export type RemoteAction =
 	| { action: "status"; launch?: PaneLaunch }
-	| { action: "off" | "pair" | "devices" }
+	| { action: "off" | "pair" | "devices" | "revoke_all" }
 	| { action: "on"; port?: number }
 	| { action: "revoke"; deviceId: string };
 

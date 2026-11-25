@@ -411,7 +411,7 @@ export interface RemoteReportRequest {
 /** Remote control from a phone (daemon/remote/): its switch, pairing codes and paired devices. */
 export interface RemoteRequest {
 	type: "remote";
-	action: "status" | "on" | "off" | "pair" | "devices" | "revoke";
+	action: "status" | "on" | "off" | "pair" | "devices" | "revoke" | "revoke_all";
 	/** With `on`, the port to listen on (pi's `remote.port` setting). */
 	port?: number;
 	/** With `revoke`. */

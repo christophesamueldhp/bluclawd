@@ -139,14 +139,22 @@ async function devices(client: OrchestratorClient, ctx: ExtensionCommandContext)
 		const picked = await ctx.ui.select("Paired phones (enter removes one)", [...labels, REMOVE_ALL]);
 		if (picked === undefined) return;
 		if (picked === REMOVE_ALL) {
-			const phones = `${devices.length} phone${devices.length === 1 ? "" : "s"}`;
-			if (!(await ctx.ui.confirm(`Remove all ${phones}?`, "Each will have to pair again."))) continue;
-			for (const device of devices) await client.remote({ action: "revoke", deviceId: device.id });
-			ctx.ui.notify(`Removed ${phones}`, "info");
+			const confirmed = await ctx.ui.confirm(
+				"Remove all phones?",
+				"Each will have to pair again. Any pending pairing will end.",
+			);
+			if (!confirmed) continue;
+			await client.remote({ action: "revoke_all" });
+			ctx.ui.notify("Removed all phones", "info");
 			return;
 		}
 		const device = devices[labels.indexOf(picked)];
-		if (!device || !(await ctx.ui.confirm(`Remove ${device.name}?`, "It will have to pair again."))) continue;
+		if (!device) continue;
+		const confirmed = await ctx.ui.confirm(
+			`Remove ${device.name}?`,
+			"It will have to pair again. Any pending pairing will end.",
+		);
+		if (!confirmed) continue;
 		await client.remote({ action: "revoke", deviceId: device.id });
 		ctx.ui.notify(`Removed ${device.name}`, "info");
 	}
