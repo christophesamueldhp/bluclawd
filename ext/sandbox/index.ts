@@ -18,6 +18,7 @@ import {
 	globalSandboxSetting,
 	ownAndDefaultServerDirs,
 	runtimeConfig,
+	SANDBOX_SETTINGS_CHANGED,
 	saveSandboxEnabled,
 } from "./config.ts";
 import { prepareReaper } from "./reaper.ts";
@@ -163,6 +164,7 @@ function factory(pi: ExtensionAPI): void {
 					);
 					return;
 				}
+				pi.events.emit(SANDBOX_SETTINGS_CHANGED, undefined);
 				await applySettings(commandCtx);
 			}
 			const status = sandboxStatus();
