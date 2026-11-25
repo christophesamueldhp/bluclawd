@@ -104,6 +104,31 @@ describe("remote control switch", () => {
 		});
 	});
 
+	it("removes the phones paired at confirmation, including one paired after listing", async () => {
+		const pair = (name: string) => {
+			const { code } = control.store.createCode(0);
+			const result = control.store.claim(code, name, 1);
+			if ("error" in result) throw new Error(result.error);
+			return result;
+		};
+		const departed = pair("Departed phone");
+		const staying = pair("Paired phone");
+		expect(await control.handle({ type: "remote", action: "devices" })).toMatchObject({
+			devices: [{ id: departed.deviceId }, { id: staying.deviceId }],
+		});
+		await control.handle({ type: "remote", action: "revoke", deviceId: departed.deviceId });
+		const recent = pair("New phone");
+		const { expiresAt } = control.store.createCode(2);
+
+		expect(await control.handle({ type: "remote", action: "revoke_all" })).toMatchObject({
+			type: "remote_result",
+			devices: [],
+		});
+		expect(control.store.authenticate(staying.token, 3)).toBeUndefined();
+		expect(control.store.authenticate(recent.token, 3)).toBeUndefined();
+		expect(control.store.claimSecret("", "Phone", expiresAt + 1)).toMatchObject({ error: "invalid_code" });
+	});
+
 	it("keeps one launch command in remote.json: a heartbeat's only while none usable is there, /remote-control's always", async () => {
 		remote = control;
 		const file = join(dir, "remote.json");

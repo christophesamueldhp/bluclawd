@@ -184,7 +184,10 @@ describe("/remote-control", () => {
 			enabled = true;
 			const declined = run("", { select: [PHONES, (await phoneLabel(1))!], confirm: false });
 			await declined.done;
-			expect(declined.ui.confirm).toHaveBeenCalledWith("Remove iPad?", "It will have to pair again.");
+			expect(declined.ui.confirm).toHaveBeenCalledWith(
+				"Remove iPad?",
+				"It will have to pair again. Any pending pairing will end.",
+			);
 			expect(removed()).toEqual([]);
 			const confirmed = run("", { select: [PHONES, (await phoneLabel(1))!], confirm: true });
 			await confirmed.done;
@@ -192,16 +195,20 @@ describe("/remote-control", () => {
 			expect(confirmed.ui.notify).toHaveBeenCalledWith("Removed iPad", "info");
 		});
 
-		it("removes every phone, once confirmed", async () => {
+		it("requests removal of all phones in one operation, once confirmed", async () => {
 			enabled = true;
 			const declined = run("", { select: [PHONES, REMOVE_ALL], confirm: false });
 			await declined.done;
-			expect(declined.ui.confirm).toHaveBeenCalledWith("Remove all 2 phones?", "Each will have to pair again.");
-			expect(removed()).toEqual([]);
+			expect(declined.ui.confirm).toHaveBeenCalledWith(
+				"Remove all phones?",
+				"Each will have to pair again. Any pending pairing will end.",
+			);
+			expect(actions.map((a) => a.action)).toEqual(["status", "devices", "devices"]);
+			actions = [];
 			const confirmed = run("", { select: [PHONES, REMOVE_ALL], confirm: true });
 			await confirmed.done;
-			expect(removed()).toEqual(["d1", "d2"]);
-			expect(confirmed.ui.notify).toHaveBeenCalledWith("Removed 2 phones", "info");
+			expect(actions.slice(2)).toEqual([{ action: "revoke_all" }]);
+			expect(confirmed.ui.notify).toHaveBeenCalledWith("Removed all phones", "info");
 		});
 
 		it("lists the phones left again after a removal, and after a declined one, until escape", async () => {
