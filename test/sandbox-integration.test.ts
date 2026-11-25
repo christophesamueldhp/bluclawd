@@ -40,6 +40,7 @@ describe.skipIf(!supported)(
 			dir = realpathSync(mkdtempSync(join(tmpdir(), "bluclawd-sandbox-it-")));
 			writeFileSync(join(dir, ".env"), "SECRET=hunter2\n");
 			writeFileSync(join(dir, "app.ts"), "const SECRET = process.env.SECRET;\n");
+			writeFileSync(join(dir, "draft.txt"), "draft\n");
 			process.env.BLUCLAWD_IT_TOKEN = "hunter3";
 			agentDir = mkdtempSync(join(tmpdir(), "bluclawd-sandbox-it-agent-"));
 			process.env.PI_CODING_AGENT_DIR = agentDir;
@@ -54,7 +55,7 @@ describe.skipIf(!supported)(
 					credentialFiles: [],
 					written: { credentials: { envVars: [{ name: "BLUCLAWD_IT_TOKEN", mode: "deny" }] } },
 				},
-				["Read(**/.env*)"],
+				["Read(**/.env*)", "Read(*.txt)"],
 				dir,
 				homedir(),
 				tmpdir(),
@@ -84,6 +85,11 @@ describe.skipIf(!supported)(
 			const { code, output } = await run(`node -e 'console.log(require("fs").readFileSync(".env","utf8"))'`);
 			expect(code).not.toBe(0);
 			expect(output).not.toContain("hunter2");
+		});
+
+		it("applies a leading wildcard to paths in the working directory", async () => {
+			expect((await run("cat ./draft.txt")).code).not.toBe(0);
+			expect((await run("cat ./app.ts")).code).toBe(0);
 		});
 
 		it("appends to .env in the project (not on Linux), but cannot write outside it", async () => {
