@@ -1,9 +1,13 @@
 import { lstatSync, mkdirSync, readFileSync, readlinkSync, realpathSync, writeFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
-import type { SandboxRuntimeConfig } from "@anthropic-ai/sandbox-runtime";
+import type { FilesystemPathEntry, SandboxRuntimeConfig } from "@anthropic-ai/sandbox-runtime";
 import { getAgentDir, type SettingsManager } from "@earendil-works/pi-coding-agent";
 import { defaultServerDir, getServerDir } from "../../daemon/paths.ts";
+import { resolveDenyRulePath } from "../_shared/deny-rule-path.ts";
+import { taskOutputRoot } from "../background-bash/output-path.ts";
 import { pathRule } from "../permissions/rules.ts";
+
+export const SANDBOX_SETTINGS_CHANGED = "bluclawd:sandbox-settings-changed";
 
 export interface SandboxSettings {
 	allowedDomains: string[];
@@ -22,7 +26,7 @@ export type SandboxSetting =
 
 export interface UncheckedRuntimeConfig {
 	network: { allowedDomains: string[]; [key: string]: unknown };
-	filesystem: { denyRead: string[]; allowWrite: string[]; denyWrite: string[]; [key: string]: unknown };
+	filesystem: { denyRead: string[]; allowWrite: string[]; denyWrite: FilesystemPathEntry[]; [key: string]: unknown };
 	[key: string]: unknown;
 }
 
@@ -97,7 +101,7 @@ export function parseSandbox(value: unknown): SandboxSetting {
 }
 
 /**
- * A rule or settings path as the sandbox takes it, absolute because `srt` on Linux skips a
+ * A settings path as the sandbox takes it, absolute because `srt` on Linux skips a
  * pattern whose first component is a wildcard.
  */
 export function sandboxPath(written: string, cwd: string, home: string): string {
@@ -107,6 +111,35 @@ export function sandboxPath(written: string, cwd: string, home: string): string 
 	if (path === "~") return home;
 	if (path.startsWith("~/")) return join(home, path.slice(2));
 	return isAbsolute(path) ? path : join(cwd, path);
+}
+
+export const PROTECTED_PROJECT_PATHS = [
+	".pi",
+	".agents",
+	".git/hooks",
+	".git/config",
+	".vscode",
+	".idea",
+	".claude",
+	".mcp.json",
+] as const;
+
+export function protectedProjectWritePaths(cwd: string, home: string, globalAllowWrite: readonly string[]): string[] {
+	const released = new Set(globalAllowWrite.map((path) => resolve(sandboxPath(path, cwd, home))));
+	return PROTECTED_PROJECT_PATHS.flatMap((entry) => {
+		const path = resolve(cwd, entry);
+		if (!released.has(path)) return [path];
+		if (entry === ".pi" || entry === ".agents") return [];
+		if (entry === ".claude") return [join(path, "commands"), join(path, "agents")];
+		return [path];
+	});
+}
+
+export function sandboxWriteDenies(cwd: string, home: string, globalAllowWrite: readonly string[]) {
+	return [...protectedProjectWritePaths(cwd, home, globalAllowWrite), taskOutputRoot(home)].map((path) => ({
+		path,
+		literal: true as const,
+	}));
 }
 
 const MAX_LINKS = 40;
@@ -165,6 +198,10 @@ export function agentDirs(): string[] {
 	return linkSpellings(resolve(getAgentDir()));
 }
 
+export function agentCredentialPaths(agentDir = getAgentDir()): string[] {
+	return [resolve(agentDir, "auth.json"), resolve(agentDir, "bluclawd", "accounts.json")];
+}
+
 /**
  * The symlinks on the way to `spellings` that lie where a command may write. srt on Linux binds a deny path by its real
  * path, so a command there could swap such a link for a directory of its own.
@@ -189,16 +226,19 @@ export function runtimeConfig(
 	const ruled = (verbs: string[]) =>
 		denyRules.flatMap((rule) => {
 			const parsed = pathRule(rule);
-			return parsed && verbs.includes(parsed.verb) ? [parsed.path] : [];
+			return parsed && verbs.includes(parsed.verb) ? [resolveDenyRulePath(parsed.path, cwd, home)] : [];
 		});
-	const paths = (list: string[]) => [...new Set(list.map((path) => sandboxPath(path, cwd, home)))];
+	const paths = (list: string[], rulePaths: string[] = []) => [
+		...new Set([...rulePaths, ...list.map((path) => sandboxPath(path, cwd, home))]),
+	];
 	const { network, filesystem, credentials, ...rest } = settings.written;
+	const credentialDenies = new Set([...ownServerDirs, ...ownAgentDirs.flatMap(agentCredentialPaths)]);
 	return {
 		...rest,
-		// A credential deny has nothing carved out of it, so no `allowRead` reopens a server directory.
+		// Credential denies take precedence over `allowRead`.
 		credentials: {
 			...(credentials as object),
-			files: [...settings.credentialFiles, ...ownServerDirs.map((path) => ({ path, mode: "deny" }))],
+			files: [...settings.credentialFiles, ...Array.from(credentialDenies, (path) => ({ path, mode: "deny" }))],
 		},
 		network: {
 			deniedDomains: [],
@@ -209,9 +249,12 @@ export function runtimeConfig(
 		},
 		filesystem: {
 			...(filesystem as object),
-			denyRead: paths([...ruled(["Read"]), ...settings.denyRead]),
+			denyRead: paths(settings.denyRead, ruled(["Read"])),
 			allowWrite: paths([cwd, tmp, ...settings.allowWrite]),
-			denyWrite: paths([...ruled(["Edit", "Write"]), ...settings.denyWrite, ...ownAgentDirs]),
+			denyWrite: [
+				...paths([...settings.denyWrite, ...ownAgentDirs], ruled(["Edit", "Write"])),
+				...sandboxWriteDenies(cwd, home, settings.allowWrite),
+			],
 		},
 	};
 }
@@ -239,4 +282,10 @@ export async function checkRuntimeConfig(config: UncheckedRuntimeConfig): Promis
 	}
 	const dropped = droppedKeys(config, result.data, "sandbox");
 	return dropped.length > 0 ? `${dropped.join(", ")} is not a sandbox setting` : result.data;
+}
+
+export function linuxGlobRefusal(patterns: string[]): string | undefined {
+	if (patterns.length === 0) return undefined;
+	const paths = [...new Set(patterns)].map((path) => JSON.stringify(path)).join(", ");
+	return `Linux cannot enforce these sandbox filesystem patterns (${paths}). Replace each pattern with a literal path`;
 }

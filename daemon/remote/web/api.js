@@ -33,6 +33,100 @@ export function pairLink(hash) {
 
 export class Unauthorized extends Error {}
 
+/** @param {string | undefined} sessionId @param {string} streamId */
+function events(sessionId, streamId) {
+	const query = new URLSearchParams({ stream: streamId });
+	if (sessionId) query.set("session", sessionId);
+	const path = `/api/events?${query}`;
+	let retryMs = 3000;
+	/** @type {AbortController | undefined} */
+	let attempt;
+	/** @type {ReturnType<typeof setTimeout> | undefined} */
+	let retry;
+	const stream = Object.assign(new EventTarget(), { close, reconnect: () => void connect() });
+	stream.reconnect();
+	return stream;
+
+	function close() {
+		clearTimeout(retry);
+		attempt?.abort();
+	}
+
+	async function connect() {
+		close();
+		attempt = new AbortController();
+		const { signal } = attempt;
+		try {
+			await read(signal);
+		} catch (error) {
+			if (signal.aborted) return;
+			if (error instanceof Unauthorized) {
+				stream.dispatchEvent(new Event("unauthorized"));
+				return;
+			}
+		}
+		if (signal.aborted) return;
+		stream.dispatchEvent(new Event("error"));
+		if (!signal.aborted) retry = setTimeout(connect, retryMs);
+	}
+
+	/** @param {AbortSignal} signal */
+	async function read(signal) {
+		const token = getToken() ?? "";
+		const headers = new Headers({ accept: "text/event-stream", authorization: `Bearer ${token}` });
+		const res = await fetch(path, { headers, signal });
+		const type = res.headers.get("content-type")?.split(";", 1)[0].trim().toLowerCase();
+		if (res.status !== 200 || type !== "text/event-stream" || !res.body) {
+			await res.body?.cancel();
+			if (res.status === 401 && !signal.aborted) {
+				if (token === getToken()) clearToken();
+				throw new Unauthorized("unauthorized");
+			}
+			return;
+		}
+		if (signal.aborted) return;
+		stream.dispatchEvent(new Event("open"));
+
+		const reader = res.body.getReader();
+		const decoder = new TextDecoder();
+		let partial = "";
+		let afterCr = false;
+		let event = "";
+		/** @type {string[]} */
+		let data = [];
+		try {
+			while (!signal.aborted) {
+				const { value, done } = await reader.read();
+				if (done || signal.aborted) return;
+				const chunk = decoder.decode(value, { stream: true });
+				if (!chunk) continue;
+				const text = partial + (afterCr && chunk.startsWith("\n") ? chunk.slice(1) : chunk);
+				afterCr = text.endsWith("\r");
+				const lines = text.split(/\r\n|\r|\n/);
+				partial = lines.pop() ?? "";
+				for (const line of lines) {
+					if (signal.aborted) return;
+					if (line === "") {
+						if (data.length)
+							stream.dispatchEvent(new MessageEvent(event || "message", { data: data.join("\n") }));
+						event = "";
+						data = [];
+						continue;
+					}
+					const colon = line.indexOf(":");
+					const field = colon < 0 ? line : line.slice(0, colon);
+					const value = colon < 0 ? "" : line.slice(colon + 1).replace(/^ /, "");
+					if (field === "data") data.push(value);
+					else if (field === "event") event = value;
+					else if (field === "retry" && /^\d+$/.test(value)) retryMs = Math.min(Number(value), 2_147_483_647);
+				}
+			}
+		} finally {
+			reader.releaseLock();
+		}
+	}
+}
+
 /**
  * @param {string} method
  * @param {string} path
@@ -156,12 +250,7 @@ export const api = {
 	/** @param {PushSubscriptionJSON} subscription */
 	subscribe: (subscription) => call("POST", "/api/push/subscribe", subscription),
 	unsubscribe: () => call("POST", "/api/push/unsubscribe", {}),
-	/** @param {string | undefined} sessionId @param {string} stream */
-	events(sessionId, stream) {
-		const token = encodeURIComponent(getToken() ?? "");
-		const open = sessionId ? `&session=${encodeURIComponent(sessionId)}` : "";
-		return new EventSource(`/api/events?token=${token}${open}&stream=${encodeURIComponent(stream)}`);
-	},
+	events,
 	/** A page going hidden may not finish a plain fetch; `keepalive` lets this one outlive it. @param {string} stream */
 	hidden(stream) {
 		fetch("/api/hidden", {

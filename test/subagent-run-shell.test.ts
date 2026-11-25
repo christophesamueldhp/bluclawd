@@ -125,7 +125,7 @@ describe.skipIf(!supported)("a run's shell, on the operating system", () => {
 			runDir,
 			workspace: { root: worktree, source: captured.baseline.source, gitDir: captured.baseline.gitDir },
 			deny: [
-				{ cwd: source, rules: ["Read(secret.txt)", "Read(**/*.pem)", "Read(keys/id.txt)", "Edit(locked.txt)"] },
+				{ cwd: source, rules: ["Read(secret.txt)", "Read(**/*.pem)", "Read(/keys/id.txt)", "Edit(locked.txt)"] },
 				...deniedByDefault(agentDir),
 			],
 		};
@@ -165,11 +165,35 @@ describe.skipIf(!supported)("a run's shell, on the operating system", () => {
 		rmSync(root, { recursive: true, force: true });
 	});
 
+	it.skipIf(process.platform !== "linux")("refuses the run's shell if Linux cannot enforce a write rule", async () => {
+		const restricted = createRunShell(
+			{ ...scope, deny: [...scope.deny, { cwd: source, rules: ["Write(**/.env*)"] }] },
+			{ agentDir, user: () => ({ kind: "off" }), ask: async () => false },
+		);
+		try {
+			await expect(restricted.exec("true", worktree, { onData: () => {} })).rejects.toThrow(
+				/\*\*\/\.env\*.*literal path/,
+			);
+		} finally {
+			await SandboxManager.reset();
+		}
+	});
+
 	it("runs a command in the worktree, writing there and in its own temp directory", async () => {
 		const result = await run('printf made > made.txt && printf temp > "$TMPDIR/t.txt" && cat a.txt');
 		expect(result).toMatchObject({ code: 0, output: "one\n" });
 		expect(readFileSync(join(worktree, "made.txt"), "utf8")).toBe("made");
 		expect(readFileSync(join(runShellTmp(agentDir, scope.runId), "t.txt"), "utf8")).toBe("temp");
+	});
+
+	it.each([".pi", ".agents", ".vscode", ".idea", ".claude"])("cannot create %s in the worktree", async (path) => {
+		expect((await run(`mkdir ${path}`)).code).not.toBe(0);
+		expect(existsSync(join(worktree, path))).toBe(false);
+	});
+
+	it("cannot create .mcp.json in the worktree", async () => {
+		expect((await run("touch .mcp.json")).code).not.toBe(0);
+		expect(existsSync(join(worktree, ".mcp.json"))).toBe(false);
 	});
 
 	it("writes nothing outside its worktree: the checkout, a sibling, through a link, or a temp directory others share", async () => {

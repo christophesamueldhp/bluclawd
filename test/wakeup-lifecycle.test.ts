@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { SessionShutdownEvent } from "@earendil-works/pi-coding-agent";
@@ -42,6 +42,7 @@ function fixture(
 	const calls: string[] = [];
 	const held: HeldWakeups[] = [];
 	const sent: { id: string; text: string }[] = [];
+	const logged: string[] = [];
 	let idle = true;
 	let signalAsked = false;
 	const client: WakeupDaemon = {
@@ -85,6 +86,7 @@ function fixture(
 			signalAsked = true;
 			return options.signalled ?? false;
 		},
+		log: (line) => logged.push(line),
 	});
 	return {
 		lifecycle,
@@ -93,6 +95,7 @@ function fixture(
 		calls,
 		held,
 		sent,
+		lines: logged,
 		setIdle: (value: boolean) => {
 			idle = value;
 		},
@@ -288,6 +291,38 @@ describe("restoring from the session log", () => {
 		expect(f.logged(WAKEUP_END_ENTRY)).toEqual([{ id: "wgone0001", end: "cancelled" }]);
 		expect(cancelledByDelete("wgone0001", dir)).toBe(false);
 		rmSync(dir, { recursive: true, force: true });
+	});
+
+	it("skips and logs one whose id bluclawd did not generate, and touches no file outside the wake-up folder", () => {
+		const root = mkdtempSync(join(tmpdir(), "bluclawd-wakeups-"));
+		vi.stubEnv("PI_SERVER_DIR", join(root, "server"));
+		const victim = join(root, "victim");
+		writeFileSync(victim, "keep me");
+		const f = fixture({
+			entries: [scheduled("../../victim", NOW + 5 * MINUTE), scheduled("wkept0001", NOW + 9 * MINUTE)],
+		});
+		expect(f.lifecycle.restore("resume")).toBe(1);
+		expect(readFileSync(victim, "utf8")).toBe("keep me");
+		expect(existsSync(join(root, "server"))).toBe(false);
+		expect(wakeups.list().map((w) => w.id)).toEqual(["wkept0001"]);
+		expect(f.logged(WAKEUP_END_ENTRY)).toEqual([]);
+		expect(f.lines).toEqual(['Skipped a wake-up whose id bluclawd did not generate: "../../victim"']);
+		rmSync(root, { recursive: true, force: true });
+	});
+
+	it("skips and logs malformed records without losing valid wake-ups on restore", () => {
+		const f = fixture({
+			entries: [
+				{ type: "custom", customType: WAKEUP_ENTRY, data: null },
+				{ type: "custom", customType: WAKEUP_END_ENTRY, data: null },
+				{ type: "custom", customType: WAKEUP_ENTRY, data: { id: "wbad00001", dueAt: NOW + MINUTE } },
+				scheduled("wkept0001", NOW + MINUTE),
+			],
+		});
+		expect(f.lifecycle.restore("resume")).toBe(1);
+		expect(wakeups.list().map(({ id }) => id)).toEqual(["wkept0001"]);
+		expect(f.lines).toHaveLength(3);
+		expect(f.lines.every((line) => line.startsWith("Skipped a wake-up"))).toBe(true);
 	});
 
 	it("leaves the Delete's word in place when a fork records the cancel in its own log", () => {

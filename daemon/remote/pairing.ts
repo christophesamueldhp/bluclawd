@@ -1,6 +1,7 @@
 import { createHash, randomBytes, randomInt, randomUUID, timingSafeEqual } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { stripAnsi } from "../ansi.ts";
 import type { PaneLaunch } from "../ipc/protocol.ts";
 import { getServerDir } from "../paths.ts";
 import { generateVapidKeys, parseSubscription, type VapidKeys, type WebPushSubscription } from "./webpush.ts";
@@ -8,6 +9,7 @@ import { generateVapidKeys, parseSubscription, type VapidKeys, type WebPushSubsc
 export const DEFAULT_PORT = 7878;
 const PAIRING_TTL_MS = 10 * 60_000;
 const CODE_ATTEMPTS = 5;
+const DEVICE_NAME_MAX = 64;
 const LAST_USED_RESOLUTION_MS = 60_000;
 
 export interface RemoteDevice {
@@ -27,7 +29,7 @@ export interface RemoteState {
 	vapid?: VapidKeys;
 }
 
-export type ClaimResult = { token: string; deviceId: string } | { error: "invalid_code" | "expired_code" };
+export type ClaimResult = { token: string; deviceId: string } | { error: "invalid_code" | "code_attempts_exhausted" };
 
 function getRemotePath(): string {
 	return join(getServerDir(), "remote.json");
@@ -54,6 +56,14 @@ function hashToken(token: string): string {
 
 function newSecret(): string {
 	return randomBytes(16).toString("base64url");
+}
+
+function cleanDeviceName(value: unknown): string {
+	const name = typeof value === "string" ? value : "";
+	const clean = stripAnsi(name)
+		.replace(/\p{Cc}/gu, "")
+		.trim();
+	return [...clean].slice(0, DEVICE_NAME_MAX).join("").trimEnd() || "Phone";
 }
 
 /** Timing-safe whatever was sent, because their hashes are the same length. */
@@ -111,9 +121,11 @@ export class RemoteStore {
 			enabled: raw.enabled === true,
 			port: Number.isInteger(raw.port) ? (raw.port as number) : DEFAULT_PORT,
 			devices: Array.isArray(raw.devices)
-				? raw.devices
-						.filter(isDevice)
-						.map(({ push, ...device }) => (parseSubscription(push) ? { ...device, push } : device))
+				? raw.devices.filter(isDevice).map(({ name, push, ...device }) => ({
+						...device,
+						name: cleanDeviceName(name),
+						...(parseSubscription(push) ? { push } : {}),
+					}))
 				: [],
 			launch: isLaunch(raw.launch) ? raw.launch : undefined,
 			vapid: isVapid(raw.vapid) ? raw.vapid : undefined,
@@ -176,11 +188,14 @@ export class RemoteStore {
 		if (!current?.code) return { error: "invalid_code" };
 		if (now > current.expiresAt) {
 			this.pairing = undefined;
-			return { error: "expired_code" };
+			return { error: "invalid_code" };
 		}
 		if (!same(code, current.code)) {
 			current.attempts++;
-			if (current.attempts >= CODE_ATTEMPTS) current.code = undefined;
+			if (current.attempts >= CODE_ATTEMPTS) {
+				current.code = undefined;
+				return { error: "code_attempts_exhausted" };
+			}
 			return { error: "invalid_code" };
 		}
 		this.pairing = undefined;
@@ -192,7 +207,7 @@ export class RemoteStore {
 		if (!current) return { error: "invalid_code" };
 		if (now > current.expiresAt) {
 			this.pairing = undefined;
-			return { error: "expired_code" };
+			return { error: "invalid_code" };
 		}
 		if (!same(secret, current.secret)) return { error: "invalid_code" };
 		this.pairing = undefined;
@@ -203,7 +218,7 @@ export class RemoteStore {
 		const token = randomBytes(32).toString("base64url");
 		const device: RemoteDevice = {
 			id: randomUUID(),
-			name: deviceName.trim().slice(0, 60) || "Phone",
+			name: cleanDeviceName(deviceName),
 			tokenHash: hashToken(token),
 			createdAt: new Date(now).toISOString(),
 		};
@@ -237,7 +252,17 @@ export class RemoteStore {
 		const state = this.load();
 		const devices = state.devices.filter((device) => device.id !== deviceId);
 		if (devices.length === state.devices.length) return false;
-		this.save({ ...state, devices });
+		this.saveRevocation({ ...state, devices });
 		return true;
+	}
+
+	revokeAll(): void {
+		const state = this.editWithoutResetting();
+		this.saveRevocation({ ...state, devices: [] });
+	}
+
+	private saveRevocation(state: RemoteState): void {
+		this.save(state);
+		this.pairing = undefined;
 	}
 }

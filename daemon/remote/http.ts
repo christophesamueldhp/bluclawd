@@ -40,6 +40,7 @@ import { parseSubscription } from "./webpush.ts";
 
 export interface RemoteDeps {
 	store: RemoteStore;
+	notifyPairingCodeExhausted?(): void;
 	listInstances(): InstanceSummary[];
 	send(sessionId: string, message: PaneMessage): Promise<boolean>;
 	launch(): PaneLaunch | undefined;
@@ -70,6 +71,7 @@ export interface RemoteServer {
 }
 
 export const BODY_MAX = 64 * 1024;
+const PAIR_BODY_MAX = 4 * 1024;
 export const PROMPT_MAX = 32 * 1024;
 export const IMAGES_MAX = 4;
 export const IMAGE_MAX = 2 * 1024 * 1024;
@@ -95,9 +97,9 @@ const COLS_MIN = 20;
 const COLS_MAX = 200;
 const TAIL_BYTES = 8192;
 const TAIL_LINES = 10;
-/** Guards against DNS rebinding, since a page whose name resolves to 127.0.0.1 still sends its own name. Tailscale
- *  serve forwards the tailnet name; a loopback name is the Mac itself. */
-const HOST_PATTERN = /^(127\.0\.0\.1|localhost|\[::1\]|([a-z0-9-]+\.)+ts\.net)(:\d+)?$/i;
+/** A page whose name resolves to 127.0.0.1 still sends its own name. */
+const LOOPBACK_HOST = /^(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/i;
+const TAILNET_HOST = /^([a-z0-9-]+\.)+ts\.net(:\d+)?$/i;
 
 const CONTENT_TYPES: Record<string, string> = {
 	".html": "text/html; charset=utf-8",
@@ -128,12 +130,19 @@ function json(res: ServerResponse, status: number, body: unknown): void {
 	res.end(JSON.stringify(body));
 }
 
-/** Reads the whole body even past the limit, so the 413 reaches a client still sending. */
-async function readJson(req: IncomingMessage, max = BODY_MAX): Promise<Record<string, unknown>> {
+async function readJson(
+	req: IncomingMessage,
+	max = BODY_MAX,
+	overflow: "drain" | "reject" = "drain",
+): Promise<Record<string, unknown>> {
+	if (overflow === "reject" && Number(req.headers["content-length"]) > max) {
+		throw new HttpError(413, "body_too_large");
+	}
 	let size = 0;
 	const chunks: Buffer[] = [];
-	for await (const chunk of req) {
+	for await (const chunk of req.iterator({ destroyOnReturn: false })) {
 		size += (chunk as Buffer).length;
+		if (size > max && overflow === "reject") throw new HttpError(413, "body_too_large");
 		if (size <= max) chunks.push(chunk as Buffer);
 	}
 	if (size > max) throw new HttpError(413, "body_too_large");
@@ -313,10 +322,6 @@ function bearer(req: IncomingMessage): string {
 	return header.startsWith("Bearer ") ? header.slice(7) : "";
 }
 
-function requestToken(req: IncomingMessage, url: URL): string {
-	return url.pathname === "/api/events" ? (url.searchParams.get("token") ?? "") : bearer(req);
-}
-
 function refuseChangesWithoutTerminal(
 	deps: RemoteDeps,
 	req: IncomingMessage,
@@ -349,9 +354,13 @@ function serveStatic(webDir: string, url: URL, req: IncomingMessage, res: Server
 	else res.end(body);
 }
 
-function claimed(res: ServerResponse, result: ClaimResult): void {
-	if ("token" in result) json(res, 200, { token: result.token });
-	else json(res, 400, { error: result.error });
+function claimed(deps: RemoteDeps, res: ServerResponse, result: ClaimResult): void {
+	if ("token" in result) {
+		json(res, 200, { token: result.token });
+		return;
+	}
+	json(res, 400, { error: "invalid_code" });
+	if (result.error === "code_attempts_exhausted") deps.notifyPairingCodeExhausted?.();
 }
 
 async function handle(
@@ -360,7 +369,19 @@ async function handle(
 	req: IncomingMessage,
 	res: ServerResponse,
 ): Promise<void> {
-	if (!HOST_PATTERN.test(req.headers.host ?? "")) return json(res, 421, { error: "bad_host" });
+	const host = req.headers.host ?? "";
+	const local = LOOPBACK_HOST.test(host);
+	if (!local && !TAILNET_HOST.test(host)) return json(res, 421, { error: "bad_host" });
+	if ("tailscale-funnel-request" in req.headers) {
+		return json(res, 403, { error: "funnel_refused", message: "Remote control refuses Tailscale Funnel requests." });
+	}
+	const login = req.headers["tailscale-user-login"];
+	if (!local && (typeof login !== "string" || !login.trim())) {
+		return json(res, 403, {
+			error: "tailnet_identity_required",
+			message: "Remote control requires a Tailscale user identity. Tagged devices are refused.",
+		});
+	}
 	const url = new URL(req.url ?? "/", "http://localhost");
 	const path = url.pathname;
 	if (!path.startsWith("/api/")) return serveStatic(deps.webDir, url, req, res);
@@ -370,13 +391,16 @@ async function handle(
 	}
 
 	if (path === "/api/pair" && req.method === "POST") {
-		const body = await readJson(req);
+		const body = await readJson(req, PAIR_BODY_MAX, "reject");
 		const name = String(body.deviceName ?? "");
-		if (typeof body.secret === "string") return claimed(res, deps.store.claimSecret(body.secret, name));
-		return claimed(res, deps.store.claim(String(body.code ?? ""), name));
+		const result =
+			typeof body.secret === "string"
+				? deps.store.claimSecret(body.secret, name)
+				: deps.store.claim(String(body.code ?? ""), name);
+		return claimed(deps, res, result);
 	}
 
-	const token = requestToken(req, url);
+	const token = bearer(req);
 	const device = deps.store.authenticate(token);
 	if (!device) return json(res, 401, { error: "unauthorized" });
 
@@ -677,7 +701,7 @@ function sessionsInIdOrder(deps: RemoteDeps): RemoteSession[] {
 	return remoteSessions(deps.listInstances()).sort((a, b) => a.id.localeCompare(b.id));
 }
 
-export function startRemoteServer(deps: RemoteDeps, port: number, host = "127.0.0.1"): Promise<RemoteServer> {
+export function startRemoteServer(deps: RemoteDeps, port: number): Promise<RemoteServer> {
 	const events = new RemoteEvents({
 		sessionsSignature: () => JSON.stringify([deps.terminalOpen(), sessionsInIdOrder(deps)]),
 		session: (id) => phoneSession(deps, id),
@@ -690,13 +714,15 @@ export function startRemoteServer(deps: RemoteDeps, port: number, host = "127.0.
 				res.end();
 				return;
 			}
-			if (error instanceof HttpError) json(res, error.status, { error: error.message });
-			else json(res, 500, { error: "internal_error" });
+			if (error instanceof HttpError) {
+				if (error.status === 413 && !req.complete) res.setHeader("connection", "close");
+				json(res, error.status, { error: error.message });
+			} else json(res, 500, { error: "internal_error" });
 		});
 	});
 	return new Promise((resolve, reject) => {
 		server.once("error", reject);
-		server.listen(port, host, () => {
+		server.listen(port, "127.0.0.1", () => {
 			server.off("error", reject);
 			const address = server.address();
 			resolve({

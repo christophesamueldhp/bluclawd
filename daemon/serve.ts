@@ -52,6 +52,7 @@ export async function serve(): Promise<void> {
 		alive: processAlive,
 		pending: readPendingWakeups,
 		reopen,
+		log: console.error,
 	});
 	const supervisor = new ServerSupervisor({ now: Date.now, tmux, dir: getServerDir(), wakeups });
 	const parts: HandlerParts = { wakeups };

@@ -1,8 +1,9 @@
+import { readFileSync } from "node:fs";
 import { validateToolArguments } from "@earendil-works/pi-ai";
-import { createLocalBashOperations } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { type BackgroundExec, BackgroundJobRegistry } from "../ext/background-bash/background-bash.ts";
-import { createMonitorTool, stdoutOnly, websocketExec } from "../ext/background-bash/monitor-tool.ts";
+import { monitorShellExec } from "../ext/background-bash/monitor-shell.ts";
+import { createMonitorTool, websocketExec } from "../ext/background-bash/monitor-tool.ts";
 import { waitFor } from "./helpers/wait-for.ts";
 
 function harness(exec: BackgroundExec, commandPrefix?: () => string | undefined) {
@@ -312,18 +313,6 @@ describe("monitor sources", () => {
 		expect(registry.list()[0].command).toBe("echo hi");
 	});
 
-	it("sends a command's stderr to the output file instead of the event stream", async () => {
-		const seen: string[] = [];
-		const exec: BackgroundExec = async (command) => {
-			seen.push(command);
-			return { exitCode: 0 };
-		};
-		await stdoutOnly(exec)("grep x log", "/", { onData: () => {}, outputFile: "/tmp/it's.output" });
-		expect(seen[0]).toBe("{ grep x log\n} 2>>'/tmp/it'\\''s.output'");
-		await stdoutOnly(exec)("grep x log", "/", { onData: () => {} });
-		expect(seen[1]).toBe("grep x log");
-	});
-
 	it("turns WebSocket frames into lines and close into the exit", async () => {
 		class FakeSocket {
 			static last: FakeSocket;
@@ -356,7 +345,7 @@ describe("monitor sources", () => {
 });
 
 describe("monitor tool with pi's shellCommandPrefix", () => {
-	const shell: BackgroundExec = (command, cwd, options) => createLocalBashOperations().exec(command, cwd, options);
+	const shell = monitorShellExec(() => undefined);
 	const watch = async (command: string, commandPrefix?: () => string | undefined) => {
 		const { tool, sent, registry } = harness(shell, commandPrefix);
 		await tool.execute("c1", { command, description: "d" }, undefined as any, undefined);
@@ -377,9 +366,18 @@ describe("monitor tool with pi's shellCommandPrefix", () => {
 	});
 
 	it("keeps the prefix's stderr out of the events, as the command's own", async () => {
-		const { content } = await watch("echo $PFX", () => "echo noise >&2; export PFX=applied");
+		const { content, job } = await watch("echo $PFX; echo detail >&2", () => "echo noise >&2; export PFX=applied");
 		expect(content).toContain("<event>applied</event>");
 		expect(content).not.toContain("noise");
+		expect(content).not.toContain("detail");
+		const outputFile = job.outputFile;
+		if (!outputFile) throw new Error("Monitor has no output file");
+		await waitFor(() => {
+			const output = readFileSync(outputFile, "utf8");
+			expect(output).toContain("noise\n");
+			expect(output).toContain("detail\n");
+			expect(output).toContain("applied\n");
+		});
 	});
 
 	it("lets the command use aliases the prefix defines, as pi's alias recipe does", async () => {

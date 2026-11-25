@@ -1,11 +1,17 @@
 import { randomUUID } from "node:crypto";
 import type { SandboxRuntimeConfig } from "@anthropic-ai/sandbox-runtime";
-import type { BashOperations } from "@earendil-works/pi-coding-agent";
 import { sharedRef } from "../_shared/global-state.ts";
-import { agentDirs, checkRuntimeConfig, swappableLinks, type UncheckedRuntimeConfig } from "./config.ts";
+import type { BackgroundExec } from "../background-bash/background-bash.ts";
+import {
+	agentDirs,
+	checkRuntimeConfig,
+	linuxGlobRefusal,
+	swappableLinks,
+	type UncheckedRuntimeConfig,
+} from "./config.ts";
 import { reapDescendantsOfSimpleCommand } from "./reaper.ts";
 
-export type Exec = BashOperations["exec"];
+export type Exec = BackgroundExec;
 
 export type AskNetwork = (request: { host: string; port: number | undefined }) => Promise<boolean>;
 
@@ -19,6 +25,7 @@ export interface SandboxEngine {
 	canBlockUnixSockets(seccomp: SandboxRuntimeConfig["seccomp"]): Promise<boolean>;
 	initialize(config: SandboxRuntimeConfig, ask: AskNetwork, enableLogMonitor: boolean): Promise<void>;
 	updateConfig(config: SandboxRuntimeConfig): void;
+	getLinuxGlobPatternWarnings(): string[];
 	wrapWithSandbox(
 		command: string,
 		binShell: string | undefined,
@@ -31,7 +38,10 @@ export interface SandboxEngine {
 	reset(): Promise<void>;
 }
 
-export type SandboxStatus = { kind: "off" } | { kind: "ready" } | { kind: "unavailable"; reason: string };
+export type SandboxStatus =
+	| { kind: "off" }
+	| { kind: "ready"; filesystemDisabled?: true }
+	| { kind: "unavailable"; reason: string };
 
 const state = sharedRef<{
 	status: SandboxStatus;
@@ -157,6 +167,13 @@ async function start(
 	try {
 		const checked = await checkRuntimeConfig(config);
 		if (typeof checked === "string") return markSandboxUnavailable(checked);
+		checked.credentials = {
+			...checked.credentials,
+			envVars: [
+				...(checked.credentials?.envVars ?? []).filter(({ name }) => name !== "EXA_API_KEY"),
+				{ name: "EXA_API_KEY", mode: "deny" },
+			],
+		};
 		const refusal = refusedEvenForRunningSandbox(checked, platform, agentDirSpellings);
 		if (refusal) return markSandboxUnavailable(refusal);
 		const sandbox = await engine();
@@ -164,19 +181,21 @@ async function start(
 		if (state.get().initialized) {
 			if (await unixSocketsOpen()) return markSandboxUnavailable(NO_UNIX_SOCKET_FILTER);
 			sandbox.updateConfig(checked);
-			return setStatus({ kind: "ready" });
+		} else {
+			if (!sandbox.isSupportedPlatform()) return markSandboxUnavailable(`the sandbox does not support ${platform}`);
+			const { errors } = sandbox.checkDependencies();
+			if (errors.length > 0) {
+				return markSandboxUnavailable(
+					platform === "linux" ? `${errors.join("; ")}: ${LINUX_HINT}` : errors.join("; "),
+				);
+			}
+			if (await unixSocketsOpen()) return markSandboxUnavailable(NO_UNIX_SOCKET_FILTER);
+			await sandbox.initialize(checked, (request) => state.get().ask(request), true);
+			state.set({ ...state.get(), initialized: true });
 		}
-		if (!sandbox.isSupportedPlatform()) return markSandboxUnavailable(`the sandbox does not support ${platform}`);
-		const { errors } = sandbox.checkDependencies();
-		if (errors.length > 0) {
-			return markSandboxUnavailable(
-				platform === "linux" ? `${errors.join("; ")}: ${LINUX_HINT}` : errors.join("; "),
-			);
-		}
-		if (await unixSocketsOpen()) return markSandboxUnavailable(NO_UNIX_SOCKET_FILTER);
-		await sandbox.initialize(checked, (request) => state.get().ask(request), true);
-		state.set({ ...state.get(), initialized: true });
-		return setStatus({ kind: "ready" });
+		const globRefusal = linuxGlobRefusal(sandbox.getLinuxGlobPatternWarnings());
+		if (globRefusal) return markSandboxUnavailable(globRefusal);
+		return setStatus(checked.filesystem.disabled ? { kind: "ready", filesystemDisabled: true } : { kind: "ready" });
 	} catch (error) {
 		return markSandboxUnavailable(error instanceof Error ? error.message : String(error));
 	}

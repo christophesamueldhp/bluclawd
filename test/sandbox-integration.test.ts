@@ -1,10 +1,12 @@
-import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { SandboxManager } from "@anthropic-ai/sandbox-runtime";
 import { createLocalBashOperations } from "@earendil-works/pi-coding-agent";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import { runtimeConfig } from "../ext/sandbox/config.ts";
+import { BackgroundJobRegistry } from "../ext/background-bash/background-bash.ts";
+import { monitorShellExec } from "../ext/background-bash/monitor-shell.ts";
+import { agentDirs, runtimeConfig } from "../ext/sandbox/config.ts";
 import { networkAsker } from "../ext/sandbox/index.ts";
 import { setSandboxEngine, startSandbox, stopSandbox, wrapExec } from "../ext/sandbox/runtime.ts";
 import { beatsFromNow, descendantCommand, leavingBehind } from "./helpers/heartbeats.ts";
@@ -26,9 +28,10 @@ describe.skipIf(!supported)(
 			() => undefined,
 		);
 
-		async function run(command: string): Promise<{ code: number | null; output: string }> {
+		async function run(command: string, env?: NodeJS.ProcessEnv): Promise<{ code: number | null; output: string }> {
 			let output = "";
 			const { exitCode } = await exec(command, dir, {
+				env,
 				onData: (data) => {
 					output += data.toString();
 				},
@@ -36,33 +39,48 @@ describe.skipIf(!supported)(
 			return { code: exitCode, output };
 		}
 
-		beforeAll(async () => {
-			dir = realpathSync(mkdtempSync(join(tmpdir(), "bluclawd-sandbox-it-")));
-			writeFileSync(join(dir, ".env"), "SECRET=hunter2\n");
-			writeFileSync(join(dir, "app.ts"), "const SECRET = process.env.SECRET;\n");
-			process.env.BLUCLAWD_IT_TOKEN = "hunter3";
-			agentDir = mkdtempSync(join(tmpdir(), "bluclawd-sandbox-it-agent-"));
-			process.env.PI_CODING_AGENT_DIR = agentDir;
-			setSandboxEngine(undefined);
-			const config = runtimeConfig(
+		function configuration(allowWrite: string[], rules: string[]) {
+			return runtimeConfig(
 				{
 					allowedDomains: [],
-					allowWrite: [],
+					allowWrite,
 					denyRead: [],
 					denyWrite: [],
 					denyUnixSockets: [],
 					credentialFiles: [],
-					written: { credentials: { envVars: [{ name: "BLUCLAWD_IT_TOKEN", mode: "deny" }] } },
+					written: {
+						credentials: { envVars: [{ name: "BLUCLAWD_IT_TOKEN", mode: "deny" }] },
+						filesystem: { allowRead: [agentDir] },
+					},
 				},
-				["Read(**/.env*)"],
+				rules,
 				dir,
 				homedir(),
 				tmpdir(),
 				[],
-				[],
+				agentDirs(),
 			);
+		}
+
+		async function configure(allowWrite: string[] = []): Promise<void> {
+			const config = configuration(allowWrite, ["Read(**/.env*)", "Read(*.txt)"]);
 			const asker = networkAsker(() => ({ hasUI: true, ui: { confirm } }) as never);
 			expect(await startSandbox(config, asker.ask)).toEqual({ kind: "ready" });
+		}
+
+		beforeAll(async () => {
+			dir = realpathSync(mkdtempSync(join(tmpdir(), "bluclawd-sandbox-it-")));
+			writeFileSync(join(dir, ".env"), "SECRET=hunter2\n");
+			writeFileSync(join(dir, "app.ts"), "const SECRET = process.env.SECRET;\n");
+			writeFileSync(join(dir, "draft.txt"), "draft\n");
+			process.env.BLUCLAWD_IT_TOKEN = "hunter3";
+			agentDir = mkdtempSync(join(tmpdir(), "bluclawd-sandbox-it-agent-"));
+			mkdirSync(join(agentDir, "bluclawd"));
+			writeFileSync(join(agentDir, "auth.json"), "test-pi-auth\n");
+			writeFileSync(join(agentDir, "bluclawd", "accounts.json"), "test-account-vault\n");
+			process.env.PI_CODING_AGENT_DIR = agentDir;
+			setSandboxEngine(undefined);
+			await configure();
 		}, 60_000);
 
 		afterAll(async () => {
@@ -86,6 +104,118 @@ describe.skipIf(!supported)(
 			expect(output).not.toContain("hunter2");
 		});
 
+		it("applies a leading wildcard to paths in the working directory", async () => {
+			const draft = await run("cat ./draft.txt");
+			expect(draft.code).not.toBe(0);
+			expect(draft.output).not.toContain("draft\n");
+			expect((await run("cat ./app.ts")).code).toBe(0);
+		});
+
+		it.skipIf(process.platform !== "linux")("refuses glob write rules at startup and reload on Linux", async () => {
+			const glob = configuration([], ["Write(**/.env*)"]);
+			const deny = async () => false;
+			try {
+				await stopSandbox();
+				for (const phase of ["startup", "reload"]) {
+					if (phase === "reload") await configure();
+					expect(await startSandbox(glob, deny), phase).toEqual({
+						kind: "unavailable",
+						reason: expect.stringMatching(/\*\*\/\.env\*.*literal path/),
+					});
+					await expect(run("true")).rejects.toThrow("**/.env*");
+				}
+			} finally {
+				await configure();
+			}
+		});
+
+		it("enforces a supported write rule and leaves other files writable", async () => {
+			const rule = process.platform === "darwin" ? "Write(**/.env*)" : "Write(.env)";
+			try {
+				expect(await startSandbox(configuration([], [rule]), async () => false)).toEqual({ kind: "ready" });
+				expect((await run("printf changed > .env")).code).not.toBe(0);
+				expect(readFileSync(join(dir, ".env"), "utf8")).toBe("SECRET=hunter2\n");
+				expect((await run("printf allowed > allowed-write")).code).toBe(0);
+			} finally {
+				await configure();
+			}
+		});
+
+		it("refuses to create a project extension in a fresh working directory", async () => {
+			expect(existsSync(join(dir, ".pi"))).toBe(false);
+			const result = await run("mkdir -p .pi/extensions && touch .pi/extensions/x.ts");
+			expect(result.code).not.toBe(0);
+			expect(existsSync(join(dir, ".pi/extensions/x.ts"))).toBe(false);
+		});
+
+		it.skipIf(process.platform !== "darwin")(
+			"protects case variants on a case-insensitive volume",
+			async (context) => {
+				if (!existsSync(join(dir, "APP.TS"))) context.skip();
+				expect(existsSync(join(dir, ".pi"))).toBe(false);
+				expect((await run("mkdir -p .PI/extensions && touch .PI/extensions/case-fixture")).code).not.toBe(0);
+				expect(existsSync(join(dir, ".pi/extensions/case-fixture"))).toBe(false);
+				const env = await run("cat .ENV");
+				expect(env.code).not.toBe(0);
+				expect(env.output).not.toContain("hunter2");
+			},
+		);
+
+		it.each([
+			[".pi", ".pi/extensions/fixture"],
+			[".agents", ".agents/fixture"],
+			[".git/hooks", ".git/hooks/fixture"],
+			[".git/config", ".git/config"],
+			[".vscode", ".vscode/fixture"],
+			[".idea", ".idea/fixture"],
+			[".claude", ".claude/fixture"],
+			[".mcp.json", ".mcp.json"],
+		])("blocks writes and renames into %s before and after it exists", async (protectedPath, target) => {
+			const path = join(dir, target);
+			mkdirSync(join(dir, dirname(protectedPath)), { recursive: true });
+			expect(existsSync(join(dir, protectedPath))).toBe(false);
+			expect((await run("printf allowed > move-source")).code).toBe(0);
+			expect((await run(`mv move-source ${protectedPath}`)).code).not.toBe(0);
+			expect((await run(`mkdir -p ${dirname(target)} && printf new > ${target}`)).code).not.toBe(0);
+			expect(existsSync(path)).toBe(false);
+
+			mkdirSync(dirname(path), { recursive: true });
+			writeFileSync(path, "original");
+			expect((await run(`printf new > ${target}`)).code).not.toBe(0);
+			expect((await run(`mv move-source ${target}`)).code).not.toBe(0);
+			expect(readFileSync(path, "utf8")).toBe("original");
+			expect(readFileSync(join(dir, "move-source"), "utf8")).toBe("allowed");
+		});
+
+		it("releases an exact global path and keeps other paths protected", async () => {
+			try {
+				await configure([".", "./.agents/"]);
+				expect((await run("mkdir -p .agents && printf allowed > .agents/released-fixture")).code).toBe(0);
+				expect((await run("mkdir -p .pi && printf denied > .pi/other-fixture")).code).not.toBe(0);
+				expect(readFileSync(join(dir, ".agents/released-fixture"), "utf8")).toBe("allowed");
+				expect(existsSync(join(dir, ".pi/other-fixture"))).toBe(false);
+			} finally {
+				await configure();
+			}
+		});
+
+		it("releases .pi and keeps .vscode protected when a file inside it is allowed", async () => {
+			try {
+				await configure([".pi", ".vscode/settings.json"]);
+				expect((await run("mkdir -p .pi && printf allowed > .pi/released-fixture")).code).toBe(0);
+				expect(readFileSync(join(dir, ".pi/released-fixture"), "utf8")).toBe("allowed");
+				mkdirSync(join(dir, ".vscode"), { recursive: true });
+				const settings = join(dir, ".vscode/settings.json");
+				writeFileSync(settings, "original\n");
+				expect((await run("printf changed > .vscode/settings.json")).code).not.toBe(0);
+				expect(readFileSync(settings, "utf8")).toBe("original\n");
+			} finally {
+				rmSync(join(dir, ".pi"), { recursive: true, force: true });
+				rmSync(join(dir, ".vscode"), { recursive: true, force: true });
+				await configure();
+			}
+		});
+
 		it("appends to .env in the project (not on Linux), but cannot write outside it", async () => {
 			const append = await run("echo ADDED=1 >> .env");
 			if (process.platform === "linux") {
@@ -106,6 +236,71 @@ describe.skipIf(!supported)(
 			const { output } = await run('echo "token=$BLUCLAWD_IT_TOKEN"');
 			expect(output).toContain("token=");
 			expect(output).not.toContain("hunter3");
+		});
+
+		it("keeps task output readable and refuses write access inside a writable directory", async () => {
+			const home = join(dir, "task-home[fixture]");
+			const previousHome = process.env.HOME;
+			mkdirSync(home);
+			process.env.HOME = home;
+			try {
+				await configure();
+				const registry = new BackgroundJobRegistry();
+				const lines: string[] = [];
+				const job = registry.start({
+					command: "echo monitor-event; echo diagnostic >&2",
+					cwd: dir,
+					kind: "monitor",
+					exec: wrapExec(
+						monitorShellExec(() => undefined),
+						() => undefined,
+					),
+					onLines: (batch) => lines.push(...batch),
+				});
+				const outputFile = job.outputFile;
+				if (!outputFile) throw new Error("Monitor has no output file");
+				await expect.poll(() => readFileSync(outputFile, "utf8")).toContain("[exited with code 0]");
+				expect(lines).toContain("monitor-event");
+				expect(lines).not.toContain("diagnostic");
+				const env = { ...process.env, JOB_OUTPUT: outputFile };
+				const cat = await run('cat "$JOB_OUTPUT"', env);
+				expect(cat.code).toBe(0);
+				expect(cat.output).toContain("monitor-event\n");
+				expect(cat.output).toContain("diagnostic\n");
+				const tail = await run('tail -n 1 "$JOB_OUTPUT"', env);
+				expect(tail.code).toBe(0);
+				expect(tail.output).toContain("[exited with code 0]");
+				const original = readFileSync(outputFile, "utf8");
+				const writeAccess = await run('printf changed > "$JOB_OUTPUT"', env);
+				expect(writeAccess.code).not.toBe(0);
+				expect(readFileSync(outputFile, "utf8")).toBe(original);
+			} finally {
+				if (previousHome === undefined) delete process.env.HOME;
+				else process.env.HOME = previousHome;
+				await configure();
+			}
+		});
+
+		it("denies reads of pi's auth file and bluclawd's saved accounts", async () => {
+			const accounts = await run('cat "$PI_CODING_AGENT_DIR/bluclawd/accounts.json"');
+			expect(accounts.code).not.toBe(0);
+			expect(accounts.output).not.toContain("test-account-vault");
+			const auth = await run('cat "$PI_CODING_AGENT_DIR/auth.json"');
+			expect(auth.code).not.toBe(0);
+			expect(auth.output).not.toContain("test-pi-auth");
+		});
+
+		it("unsets EXA_API_KEY only in sandboxed shells", async () => {
+			vi.stubEnv("EXA_API_KEY", "test-exa-key");
+			const command = `echo "\${EXA_API_KEY-unset}"`;
+			expect(await run(command)).toMatchObject({ code: 0, output: expect.stringMatching(/^unset\n/) });
+			expect(process.env.EXA_API_KEY).toBe("test-exa-key");
+			await stopSandbox();
+			try {
+				expect(await run(command)).toEqual({ code: 0, output: "test-exa-key\n" });
+			} finally {
+				await configure();
+			}
 		});
 
 		it("refuses a host the user did not allow", async () => {

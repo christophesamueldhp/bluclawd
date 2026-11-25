@@ -1,6 +1,8 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, realpathSync, statSync } from "node:fs";
+import { existsSync, globSync, lstatSync, readdirSync, realpathSync, statSync } from "node:fs";
+import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
+import { resolveDenyRulePath } from "../_shared/deny-rule-path.ts";
 import { resolveToCwd } from "../_shared/path-resolve.ts";
 
 const VERB: Record<string, string> = {
@@ -44,6 +46,7 @@ function verbFor(tool: string): string | undefined {
 
 const COVERING_VERBS: Record<string, string[]> = {
 	Write: ["edit"],
+	Edit: ["read", "write"],
 	Grep: ["read"],
 	Find: ["read"],
 	Ls: ["read"],
@@ -160,21 +163,32 @@ export function pathRule(rule: string): { verb: "Read" | "Edit" | "Write"; path:
 	return verb === "Read" || verb === "Edit" || verb === "Write" ? { verb, path: parts.subject } : undefined;
 }
 
+export function legacyAbsoluteDenyRule(rule: string): string | undefined {
+	const parts = ruleParts(rule);
+	if (!parts || !PATH_VERBS.has(capitalize(parts.verb))) return undefined;
+	const path = parts.subject;
+	if (!path.startsWith("/") || path.startsWith("//")) return undefined;
+	const literal = path.endsWith("/**") ? path.slice(0, -3) || "/" : path;
+	const absoluteRule = rule.replace("(/", "(//");
+	if (existsSync(literal.replace(/\\\*/g, "*"))) return absoluteRule;
+	if (!/(?<!\\)\*/.test(path)) return undefined;
+	let entries = 0;
+	return globSync(path, { exclude: () => ++entries > MAX_GLOB_ENTRIES }).length > 0 ? absoluteRule : undefined;
+}
+
 function homeExpand(s: string): string {
 	return s.replace(/^~/, process.env.HOME ?? "~");
 }
 
-type GlobKind = "path" | "command";
+type GlobKind = "path" | "deny-path" | "command";
 
-function globToRegExp(pat: string, kind: GlobKind = "path"): RegExp {
+function globToRegExp(pat: string, kind: GlobKind = "path", flags = ""): RegExp {
 	const dirPrefix = pat.slice(0, -3);
-	if (kind === "path" && pat.endsWith("/**") && !/^\/*$/.test(dirPrefix)) return dirAndContentsRegExp(dirPrefix);
+	if (kind !== "command" && pat.endsWith("/**") && !/^\/*$/.test(dirPrefix)) {
+		return new RegExp(`^${globBody(dirPrefix, kind)}(?:/[\\s\\S]*)?$`, flags);
+	}
 	if (kind === "command" && (pat.endsWith(":*") || pat.endsWith(" *"))) return commandPrefixRegExp(pat.slice(0, -2));
-	return new RegExp(`^${globBody(pat, kind)}$`);
-}
-
-function dirAndContentsRegExp(dir: string): RegExp {
-	return new RegExp(`^${globBody(dir, "path")}(?:/[\\s\\S]*)?$`);
+	return new RegExp(`^${globBody(pat, kind)}$`, flags);
 }
 
 function commandPrefixRegExp(prefix: string): RegExp {
@@ -185,28 +199,50 @@ function absoluteRuleSpelling(pat: string): string {
 	return pat.replace(/^\/\//, "/");
 }
 
-function pathRulePatterns(ruleSubject: string, cwd: string): RegExp[] {
-	const rawCandidates = [ruleSubject];
-	if (!/^[/~*]/.test(ruleSubject)) rawCandidates.push(resolveToCwd(ruleSubject, cwd));
-	const patterns: RegExp[] = [];
-	for (const candidate of rawCandidates) {
-		patterns.push(globToRegExp(candidate));
-		const expanded = homeExpand(absoluteRuleSpelling(candidate));
-		if (!expanded.startsWith("/")) continue;
-		const starIdx = expanded.indexOf("*");
-		const prefix = starIdx === -1 ? expanded : expanded.slice(0, expanded.lastIndexOf("/", starIdx));
-		if (!prefix) continue;
-		const realPrefix = realpathAllowingMissingLeaf(prefix);
-		if (realPrefix && realPrefix !== prefix) {
-			const suffix = starIdx === -1 ? "" : expanded.slice(prefix.length);
-			patterns.push(globToRegExp(`${realPrefix}${suffix}`));
+const caseFoldingByDirectory = new Map<string, boolean>();
+
+export function workingDirectoryFoldsCase(cwd: string): boolean {
+	const cached = caseFoldingByDirectory.get(cwd);
+	if (cached !== undefined) return cached;
+	try {
+		let dir = realpathSync.native(cwd);
+		const device = statSync(dir).dev;
+		while (true) {
+			const entries = readdirSync(dir);
+			const entry = entries.find((name) => /[a-z]/i.test(name));
+			if (entry !== undefined) {
+				const alternate = entry.replace(/[a-z]/i, (letter) =>
+					letter === letter.toLowerCase() ? letter.toUpperCase() : letter.toLowerCase(),
+				);
+				const foldsCase =
+					!entries.includes(alternate) && lstatSync(join(dir, alternate), { throwIfNoEntry: false }) !== undefined;
+				caseFoldingByDirectory.set(cwd, foldsCase);
+				return foldsCase;
+			}
+			const parent = dirname(dir);
+			if (parent === dir || statSync(parent).dev !== device) return true;
+			dir = parent;
 		}
+	} catch {
+		return true;
+	}
+}
+
+function pathRulePatterns(ruleSubject: string, cwd: string): RegExp[] {
+	const path = resolveDenyRulePath(ruleSubject, cwd, homedir());
+	const flags = workingDirectoryFoldsCase(cwd) ? "iu" : "";
+	const patterns = [globToRegExp(path, "deny-path", flags)];
+	const starIdx = path.indexOf("*");
+	const prefix = starIdx === -1 ? path : path.slice(0, path.lastIndexOf("/", starIdx));
+	const realPrefix = prefix && realpathAllowingMissingLeaf(prefix);
+	if (realPrefix && realPrefix !== prefix) {
+		patterns.push(globToRegExp(`${realPrefix}${path.slice(prefix.length)}`, "deny-path", flags));
 	}
 	return patterns;
 }
 
 function globBody(pat: string, kind: GlobKind): string {
-	const expanded = homeExpand(kind === "path" ? absoluteRuleSpelling(pat) : pat);
+	const expanded = kind === "deny-path" ? pat : homeExpand(kind === "path" ? absoluteRuleSpelling(pat) : pat);
 	let body = "";
 	for (let i = 0; i < expanded.length; i++) {
 		const c = expanded[i];
@@ -214,12 +250,15 @@ function globBody(pat: string, kind: GlobKind): string {
 			body += "\\*";
 			i++;
 		} else if (c === "*") {
-			if (expanded[i + 1] === "*") {
+			if (kind === "deny-path" && expanded[i - 1] === "/" && expanded.slice(i, i + 3) === "**/") {
+				body += "(?:[^/]+/)*";
+				i += 2;
+			} else if (expanded[i + 1] === "*") {
 				// `.*` would let a multiline command escape a `**` rule.
 				body += "[\\s\\S]*";
 				i++;
 			} else {
-				body += kind === "path" ? "[^/]*" : "[\\s\\S]*";
+				body += kind === "command" ? "[\\s\\S]*" : "[^/]*";
 			}
 		} else if (REGEX_META.has(c)) {
 			body += `\\${c}`;
@@ -513,7 +552,6 @@ function bashPathCandidates(subjects: string[], cwd: string): Record<BashPathUse
 			const pathLike = /^[~./]/.test(word) || word.includes("/") || redirects.has(word) || GLOB_CHARS.test(word);
 			for (const base of bases) {
 				if (pathLike || existsSync(resolveToCwd(word, base))) {
-					out.add(homeExpand(word));
 					addResolved(word, base);
 				}
 			}
@@ -570,7 +608,8 @@ export function deniedBy(
 	const verb = verbFor(tool);
 	if (!verb || deny.length === 0) return undefined;
 	const rawSubject = subject(tool, input);
-	const subj = homeExpand(rawSubject === "" && cwd && CWD_DEFAULTING_VERBS.has(verb) ? cwd : rawSubject);
+	const pathSubject = rawSubject === "" && cwd && CWD_DEFAULTING_VERBS.has(verb) ? cwd : rawSubject;
+	const subj = homeExpand(pathSubject);
 	const isBash = verb === "Bash";
 	let bashSubjects: string[] | undefined;
 	const respellings = (): string[] => {
@@ -578,9 +617,9 @@ export function deniedBy(
 		return bashSubjects;
 	};
 	const pathCandidates: string[] = [];
-	if (cwd && PATH_VERBS.has(verb) && subj) {
-		const resolved = resolveToCwd(subj, cwd);
-		pathCandidates.push(homeExpand(resolved));
+	if (cwd && PATH_VERBS.has(verb) && pathSubject) {
+		const resolved = resolveToCwd(pathSubject, cwd);
+		pathCandidates.push(resolved);
 		const real = realpathAllowingMissingLeaf(resolved);
 		if (real !== undefined) pathCandidates.push(real);
 	}
@@ -604,14 +643,13 @@ export function deniedBy(
 					return host !== undefined && globToRegExp(domain).test(host);
 				}
 			}
-			const patterns =
-				cwd && PATH_VERBS.has(verb)
-					? pathRulePatterns(parts.subject, cwd)
-					: [globToRegExp(parts.subject, isBash ? "command" : "path")];
+			if (cwd && PATH_VERBS.has(verb)) {
+				const patterns = pathRulePatterns(parts.subject, cwd);
+				return pathCandidates.some((candidate) => patterns.some((pattern) => pattern.test(candidate)));
+			}
+			const patterns = [globToRegExp(parts.subject, isBash ? "command" : "path")];
 			if (verb === "Mcp") patterns.push(...hashedMcpToolNamesByKeptPrefix(parts.subject));
-			return [subj, ...respellings(), ...pathCandidates].some((candidate) =>
-				patterns.some((pattern) => pattern.test(candidate)),
-			);
+			return [subj, ...respellings()].some((candidate) => patterns.some((pattern) => pattern.test(candidate)));
 		});
 	return deny.find(matches);
 }

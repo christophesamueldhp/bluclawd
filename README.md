@@ -113,8 +113,9 @@ highlights, or OpenAI, which returns a short cited answer plus its sources throu
 login pi already holds, whatever model you chat with. Store the Exa key like any other pi key.
 Run **`/login`**, pick *Sign in with an API key*, then **Exa**. Pi saves it in `~/.pi/agent/auth.json`, where a
 `!command` value, for example `"!security find-generic-password -ws exa"`, keeps it in the Keychain
-instead; `EXA_API_KEY` is the fallback. The key stays inside pi, out of the shell commands it runs. Each OpenAI search spends
-Codex quota. `webfetch` reads up to 10 known URLs through Exa. **`/web`** opens a searchable
+instead. Pi can also use `EXA_API_KEY` for search. Sandboxed shells run without that variable.
+When the orchestrator's sandbox is off, its shells inherit the variable if it is set.
+Each OpenAI search spends Codex quota. `webfetch` reads up to 10 known URLs through Exa. **`/web`** opens a searchable
 picker for the provider and for the Codex model OpenAI searches run on; **`/web exa`**,
 **`/web openai`** and **`/web status`** work without it. The model can pick a provider per call;
 when one cannot answer (rate limit, outage, no credits, no login), the other one does, and the
@@ -128,8 +129,11 @@ see connection status and active-account names; press **Tab** to move between se
 provider, then **Add account…** to sign in with OAuth or an API key.
 Give each account a name such as Personal or Work. A successful sign-in activates that account,
 and the previous login stays saved. **Save current login…** names the login already
-stored by Pi without signing in again; if already saved, this renames the active account rather
-than duplicating its OAuth grant. Select a saved account to switch; `✓` marks the active one.
+stored by Pi. A matching login updates the active account with the name you enter.
+When the current login changes and `/accounts` cannot tell whether it belongs to the active
+account, it offers to save it under a new name before saving or switching. This can happen with
+Anthropic or GitHub Copilot logins whose tokens have no comparable identity. Cancel keeps both logins.
+Select a saved account to switch. `✓` marks the active account.
 **`/accounts provider-id`** opens that provider directly, for example `/accounts openai-codex`.
 Removing an inactive saved account requires confirmation; the active account cannot be removed.
 
@@ -176,8 +180,8 @@ owner-only file permissions, alongside Pi's active credentials in `auth.json`. B
 `PI_CODING_AGENT_DIR`. These are local plaintext credential files, not an encrypted keychain;
 do not share them or commit them. Entered keys and authorization codes are masked and are not
 sent into the conversation. OAuth sign-in shows the provider's URL or device code; open it in
-the browser account you want to add. Token refresh remains Pi's responsibility; switching away
-saves the latest refreshed credential for reuse.
+the browser account you want to add. Pi refreshes tokens. Switching away saves the latest
+refreshed credential when `/accounts` can match it to the active account.
 
 ## What it adds
 
@@ -238,6 +242,9 @@ cache holds.
 - The first session that finds a pending wake-up without `schedule_wakeup`, or the Project's Memories
   without `memory` (and `/memory` on), tells you once, with the setting that turns the tool on; the
   model is not told.
+
+When pi or the daemon reads wake-ups from a session log, bluclawd skips and logs entries with
+invalid wake-up IDs.
 
 
 ## Updating
@@ -311,8 +318,11 @@ settings); the phone reaches it over [Tailscale](https://tailscale.com), never t
 internet. Once, on the Mac, install Tailscale and log in, then run `/remote-control` in any pi
 session. It offers to run `tailscale serve --bg 7878`, which gives this Mac an HTTPS address on
 your tailnet, and shows that address, a QR code and a 6-digit code under it (10 minutes, single
-use), drawn in the terminal's own colours. On the phone, also on your tailnet, scan it with the
-camera.
+use), drawn in the terminal's own colours. Scan it with the camera on a user-owned phone connected
+to your tailnet. The daemon refuses requests through Tailscale Funnel and requires Tailscale's
+user identity for remote requests. Tailscale omits that identity for tagged devices. If Funnel
+is on for the port, `/remote-control` explains why those requests are refused. A browser on the
+Mac can still open the app at `http://127.0.0.1:7878` or the configured port.
 
 On an iPhone, Safari then shows how to add the app to the Home Screen (Share, then Add to Home
 Screen). Open it from there and type the 6-digit code, once. iOS gives a Home Screen app storage of
@@ -320,23 +330,28 @@ its own, apart from Safari's, so it is the app that pairs, and only it gets noti
 Safari instead" pairs Safari itself with the QR code's secret, unless the app paired first. On
 Android or a computer, the link pairs the browser at once, as it carries a one-time secret, and the
 app added to the Home Screen from it opens already paired. If you can't scan, type the 6-digit code into
-the app. If either code expired, run `/remote-control` again for a new one.
+the app. Incorrect, expired, and used-up codes get the same error on the phone. If pairing fails,
+run `/remote-control` again for a new code. After five incorrect attempts, the 6-digit code stops
+working and macOS shows a notification. The daemon rejects pairing request bodies larger than 4 KiB
+before checking the code or QR secret.
 
 On the iPhone, turn on VPN On Demand in the Tailscale app, so the phone is on your tailnet whenever
 you open bluclawd, and keep the Mac awake on power. In System Settings, open Battery, then Options, and turn on Prevent
 automatic sleeping when the display is off. If the app cannot reach the Mac, it says so and keeps
 retrying; it stays paired.
 
-The phone keeps a token; the daemon keeps only its hash, in `~/.pi/server/remote.json`. If your tailnet has Serve
-or HTTPS certificates turned off, `/remote-control` shows the link that turns them on, once for
-the tailnet. For more than one Mac, add one Home Screen app per Mac. Each has its own ts.net
-address and pairs on its own.
+The phone sends its token in an authorization header, including for live updates. The daemon keeps
+only its hash in `~/.pi/server/remote.json`. If your tailnet has Serve or HTTPS certificates turned
+off, `/remote-control` shows the link that turns them on, once for the tailnet. For more than one
+Mac, add one Home Screen app per Mac. Each has its own ts.net address and pairs on its own.
 
 Once remote control is on, `/remote-control` shows a menu:
 
 - **Pair a new phone**: a new QR code (and 6-digit code).
-- **Paired phones (n)…**: each phone with when it paired and was last used; enter removes one, or
-  all of them with **Remove all phones**, once confirmed. A removed phone has to pair again.
+- **Paired phones (n)…** shows when each phone paired and was last used. Select a phone to remove it,
+  or choose **Remove all phones** to remove every phone paired when you confirm. Either action cancels
+  any pending QR code and 6-digit code. Removed phones have to pair again. Device names are shown
+  without terminal escapes or control characters, up to 64 characters.
 - **Start at login: on/off** (macOS): starts the daemon at login with a LaunchAgent
   (`~/Library/LaunchAgents/dev.bluclawd.daemon.plist`, its log in `~/.pi/server/daemon.log`), so
   the phone reaches the Mac before any `pi` has run.
@@ -383,9 +398,9 @@ marker in it, and so does a phone's. It draws a tool's image only outside tmux, 
 agent-view session runs in tmux, where pi turns image protocols off and does not wrap them for
 tmux's passthrough.
 
-A paired phone can read every session, tool output included, and prompt any of them. It amounts
-to a shell as you on this Mac. Its token does not expire; revoke a phone
-from `/remote-control`'s Paired phones.
+A paired phone can read every session, tool output included, and prompt any of them. It can
+also send a plain `!command` line to an idle session. Pi runs it as you on the Mac, outside the
+sandbox. The phone's token does not expire. Revoke it under **Paired phones** in `/remote-control`.
 
 The phone cannot work without the daemon running and the Mac awake. Any `pi` starts the daemon, and so does login
 with autostart on. A new bluclawd reaches the phone once the daemon restarts,
@@ -505,10 +520,14 @@ The orchestrator has these tools:
   new run to read.
 - `subagent_integrate({ agent, preview?, keep?, check? })`: applies what a completed run, or a
   completed chain (`chain_…`), changed since its baseline to your checkout as it is now, keeping your
-  edits there. It applies all or nothing, through a three-way merge. A conflict applies nothing and lists the
-  paths; `keep` leaves paths you resolved yourself, `preview` applies nothing, and `check` runs a
+  edits there. It uses a three-way merge. A conflict in a selected path stops Integration and lists the
+  paths. `keep` leaves paths you resolved yourself, `preview` applies nothing, and `check` runs a
   command in the checkout afterwards to validate the combined result, as your own bash would, and
-  only while your bash tool is active. Nothing is staged or committed.
+  only while your bash tool is active. Nothing is staged or committed. If the run changed protected
+  project paths (`.pi/`, `.agents/`, `.git/hooks`, `.git/config`, `.vscode/`, `.idea/`, `.claude/` or
+  `.mcp.json`), pi lists them and asks whether to integrate everything, integrate everything else,
+  or integrate nothing. In print and JSON mode, Integration skips the protected paths and names
+  them in its result. Skipped changes stay available for later Integration.
 - `subagent_models`: the models a run can use, with auth status and supported thinking levels.
 
 Inside a run, its own `subagent_message` reaches `parent` (its orchestrator) or a sibling by name.
@@ -610,11 +629,13 @@ blocked it:
 
 Rules come from `~/.pi/agent/settings.json` and the project's `.pi/settings.json`
 (read only when the project is trusted); the two lists add up, so a project cannot
-drop your global rules. In the syntax, `Bash(npm test *)` is `npm test` alone or with
-arguments; `*` stays within a path segment and `**` crosses them; `Edit(...)`
-also covers write and `Read(...)` also covers grep, find and ls; `//path` is
-absolute, `~/path` is home, anything else is relative to the working directory;
-`WebFetch(domain:x.com)`, `WebSearch(...)`, `Subagent` or `Subagent(explorer)`, and MCP tools as `mcp__server`,
+drop your global rules. `Bash(npm test *)` matches `npm test` with or without
+arguments. A `*` stays within a path segment and `**` crosses path segments.
+`Edit(...)` also covers `write`. `Read(...)` also covers `grep`, `find` and `ls`.
+Both `Read(...)` and `Write(...)` cover `edit` because it reads and writes the file.
+`//path` is absolute, `~/path` is relative to home, and other paths are relative to
+the working directory. The syntax also supports `WebFetch(domain:x.com)`,
+`WebSearch(...)`, `Subagent` or `Subagent(explorer)`, and MCP rules such as `mcp__server`,
 `mcp__server__*`, `mcp__server__tool`, `Mcp(server:*)` or `Mcp(server:tool)`. The web rules apply
 to bluclawd's own `websearch` and `webfetch` (each of a fetch's URLs is checked), and the MCP
 rules to the tools of the servers pi connects. MCP is pi's own (`mcp.json`, `/mcp`), every MCP call
@@ -646,6 +667,16 @@ file. Deny rules
 match text, not behavior. A command that builds the path or name at run time
 (`$(printf rm)`, a variable set earlier, a glob like `~/.ss*`) is not caught.
 
+The permissions matcher and the sandbox resolve file deny rules the same way.
+`Read(/drafts/**)` covers the working directory's `drafts` folder. `Read(*.env)` covers
+both `x.env` and `./x.env` in the working directory. At startup, bluclawd warns if a rule
+starts with a single slash and its old absolute path exists. The warning shows the `//` spelling
+for that path.
+
+File deny rules and Integration's protected path check follow the working directory's
+case sensitivity. They ignore case when detection is inconclusive. On a case-insensitive
+filesystem, `Read(.env)` also blocks `cat .ENV`. Bash command rules match case exactly.
+
 The footer shows pi's own `defaultProjectTrust` (`⏵⏵ always`, `⏸ ask` or
 `✕ never`), and Alt+M cycles it, saving to global settings. It decides whether a
 project's `.pi` settings and extensions load when no `/trust` decision was saved;
@@ -667,8 +698,8 @@ still reads it. Turn on the sandbox to have the operating system stop that. The 
 [sandbox runtime](https://github.com/anthropics/sandbox-runtime), the one bluclawd uses.
 Run `/sandbox` for a menu, `/sandbox on` to enable, `/sandbox off` to disable, or
 `/sandbox status` to inspect the current runtime. The on or off state is saved globally and applies
-as soon as the agent is idle; existing background jobs must be restarted. The command
-preserves existing policy settings and does not add any deny rules or allowed domains.
+as soon as the agent is idle. Restart existing background jobs to apply it to them.
+The command preserves your configured deny rules and allowed domains.
 
 Configure the policy in `~/.pi/agent/settings.json`, since a project's settings cannot change it.
 It is read when a session starts, so `/reload` after editing:
@@ -684,15 +715,36 @@ It is read when a session starts, so `/reload` after editing:
 }
 ```
 
-- Reads: everything except what a `Read` rule denies, plus `filesystem.denyRead`.
+- Read denies come from `Read` rules and `filesystem.denyRead`.
+- With filesystem protection enabled, sandboxed shells cannot read `auth.json` or
+  `bluclawd/accounts.json` in pi's agent directory.
 - Writes: the working directory and the temp directory, plus `filesystem.allowWrite`; never
   what an `Edit` or `Write` rule denies. Under the sandbox a `Write` rule blocks `>>` too. On
   Linux a file a `Read` rule or `filesystem.denyRead` denies is not writable either, `>>` included.
+- On Linux, an unsupported filesystem glob such as `Write(**/.env*)` makes the sandbox
+  unavailable. `/sandbox status` names the pattern. Use a literal path such as `Write(.env)`.
+- bluclawd blocks shell writes to `.pi/`, `.agents/`, `.git/hooks`, `.git/config`, `.vscode/`,
+  `.idea/`, `.claude/`, and `.mcp.json` in the working directory, including a run's worktree.
+  These denies apply before the paths exist. To remove one, name the protected path itself,
+  such as `.pi`, in the global `sandbox.filesystem.allowWrite` list. An entry for `.` or a file
+  inside a protected directory leaves that deny in place.
+- `.git/hooks`, `.git/config`, `.mcp.json`, `.vscode/`, `.idea/`, `.claude/commands/`,
+  and `.claude/agents/` stay protected regardless of `allowWrite`. An exact global entry can
+  release `.pi/`, `.agents/`, or the rest of `.claude/`, subject to other deny rules.
+- While the sandbox is on, built-in deny rules also block pi's `write` and `edit` on the protected
+  project paths and follow the same releases as the shell. The built-in rules also block `read`,
+  `grep`, `find`, and `ls` calls that target either credential file. Pi reports the rule when it blocks a call.
+- `sandbox.filesystem.disabled: true` turns off shell filesystem protection. Shells can then
+  access the protected project paths, credential files, and background job output. `/sandbox status`
+  reports when filesystem protection is off.
 - No write reaches pi's agent directory, whatever `filesystem.allowWrite` says: a command cannot
   turn the sandbox off in its `settings.json`, add an extension or a skill there, or `pi install`.
   On Linux the sandbox does not start when a symlink on the way to it lies where commands may write
   (`~/.pi` linked into a dotfiles directory, with the session in `~`), since a command could swap
   the link. Replace the link with its directory, or set `PI_CODING_AGENT_DIR` to the real path.
+- Pi writes background shell and monitor output under `~/.bluclawd-task-output`. The filesystem
+  sandbox keeps this directory read-only even if `filesystem.allowWrite` includes it. Use `cat`,
+  `tail`, or pi's `read` to inspect a job's output. Jobs already running keep their output paths.
 - Network: hosts in `network.allowedDomains`. For any other host, pi asks once per host and port
   per session, the one prompt bluclawd adds. Without a UI, the host is refused.
 - Rule paths are anchored at the working directory: `Read(**/.env*)` covers `.env` files
@@ -706,13 +758,18 @@ It is read when a session starts, so `/reload` after editing:
   `network.allowUnixSockets` or `network.allowAllUnixSockets` allows. On macOS a command cannot
   connect to them, nor read their directory unless `filesystem.disabled` is on. On Linux one
   socket path cannot be denied, and hiding the directory misses one made after a command
-  started, so the sandbox does not start with `network.allowAllUnixSockets` there. See
+  started, so the sandbox does not start with `network.allowAllUnixSockets` there. On macOS,
+  another pi install's private server sockets follow the configured Unix-socket rules. See
   [docs/sandbox-settings.md](docs/sandbox-settings.md#bluclawds-own-sockets).
 - When the sandbox cannot run, or its `sandbox` setting is malformed, the model's `bash` and
   `monitor` are refused and pi says why. There is no unsandboxed fallback. `bash` is also
   refused when bluclawd's background-bash extension is disabled, since pi's own `bash` does
-  not run inside the sandbox. pi's `powershell` tool is blocked while it is on. Settings pi
-  cannot parse at all turn the sandbox off, with a warning.
+  not run inside the sandbox. pi's `powershell` tool is blocked while it is on.
+- If pi cannot read or parse global settings, bluclawd refuses `bash` and `monitor` and names
+  the file. With the sandbox on, unreadable or unparseable settings in a trusted project or a
+  malformed `permissions.deny` in either scope also stop both tools. Settings in an untrusted
+  project are ignored. With the sandbox off, a malformed deny list only warns. Fix the file and
+  run `/reload` to restore the tools.
 - Outside the sandbox: commands you type with `!`, pi's own tools (`read`, `grep`, `edit`,
   …, which the deny rules govern), MCP servers and other extensions; `monitor`'s `ws` source
   (an in-process WebSocket that reads no files); and background jobs already running when you
@@ -734,10 +791,11 @@ It is read when a session starts, so `/reload` after editing:
   is on. It writes only in its isolated worktree and a temp directory of its own, never the worktree's `.git`,
   the Git directory it shares or the run's own state (approvals, inbox, definition). It reads nothing of
   `~/.pi/agent` but its worktree, nor what a `Read` rule denies, in the checkout or its copy in the worktree,
-  nor the credentials every run is kept from (see above). Its commands see no environment variable with a
-  word in its name that ends in `KEY`, `SECRET`, `TOKEN`, `CREDENTIAL` (or their plurals), `PASSWORD` or
-  `PASSWD`, or is `PASS` (`PGPASSWORD`, `NPM_TOKEN`, `npm_config_//host/:_authToken`), and no setting
-  passes one through. The run's pi keeps them.
+  nor the credentials every run is kept from (see above). If a denied file is tracked in Git,
+  a run can still read its committed contents through Git's object store. Its commands see no
+  environment variable with a word in its name that ends in `KEY`, `SECRET`, `TOKEN`, `CREDENTIAL`
+  (or their plurals), `PASSWORD`, or `PASSWD`, or is `PASS` (`PGPASSWORD`, `NPM_TOKEN`,
+  `npm_config_//host/:_authToken`), and no setting passes one through. The run's pi keeps them.
   It opens no Unix socket, so it reaches neither the daemon nor tmux, and a host no rule allows is asked about in the
   orchestrator. The settings above narrow it further, but never widen what it writes. Each command's processes
   are found however they left it, detached, double-forked, `setsid` and environment-scrubbed ones alike. They are

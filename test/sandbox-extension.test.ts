@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { SandboxRuntimeConfig } from "@anthropic-ai/sandbox-runtime";
-import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { createEventBus, type EventBus, getAgentDir, type SessionStartEvent } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import permissions from "../ext/permissions/index.ts";
 import sandbox, { networkAsker } from "../ext/sandbox/index.ts";
@@ -110,6 +110,7 @@ describe("the extension", () => {
 			updateConfig: (config) => {
 				configs.push(config);
 			},
+			getLinuxGlobPatternWarnings: () => [],
 			wrapWithSandbox: async (command) => command,
 			annotateStderrWithSandboxFailures: (_id, stderr) => stderr,
 			cleanupAfterCommand: () => {},
@@ -137,6 +138,7 @@ describe("the extension", () => {
 		const handlers: Record<string, (event: any, ctx: any) => Promise<any>> = {};
 		const notes: string[] = [];
 		const commands: Record<string, any> = {};
+		const events = createEventBus();
 		sandbox({
 			registerCommand: (name: string, command: any) => {
 				commands[name] = command;
@@ -144,6 +146,7 @@ describe("the extension", () => {
 			on: (event: string, handler: any) => {
 				handlers[event] = handler;
 			},
+			events,
 		} as any);
 		const ctx = {
 			cwd: dir,
@@ -156,11 +159,47 @@ describe("the extension", () => {
 				select: vi.fn<(...args: any[]) => Promise<string | undefined>>(async () => undefined),
 			},
 		};
-		const start = () => handlers.session_start({ type: "session_start", reason: "startup" }, ctx);
+		const start = (reason: SessionStartEvent["reason"] = "startup") =>
+			handlers.session_start({ type: "session_start", reason }, ctx);
 		const call = (toolName: string) => handlers.tool_call({ toolName, input: { command: "Get-Content x" } }, ctx);
 		const command = (args = "") => commands.sandbox.handler(args, ctx);
-		return { handlers, ctx, notes, start, call, command, commands };
+		return { handlers, ctx, notes, start, call, command, commands, events };
 	}
+
+	function loadPermissions(ctx: ReturnType<typeof load>["ctx"], events: EventBus) {
+		const handlers: Record<string, (event: any, ctx: any) => Promise<any>> = {};
+		permissions({
+			on: (event: string, handler: any) => {
+				handlers[event] = handler;
+			},
+			registerShortcut: () => {},
+			events,
+		} as any);
+		const permissionsCtx = {
+			...ctx,
+			ui: { ...ctx.ui, setStatus: () => {}, theme: { fg: (_c: string, t: string) => t } },
+		};
+		return {
+			start: (event: SessionStartEvent) => handlers.session_start(event, permissionsCtx),
+			call: (toolName: string, path: string) => handlers.tool_call({ toolName, input: { path } }, permissionsCtx),
+		};
+	}
+
+	it("reports unsupported filesystem globs in /sandbox and refuses bash and monitor", async () => {
+		engine.getLinuxGlobPatternWarnings = () => [join(dir, "**/.env*")];
+		const { start, command, notes, call } = load({
+			sandbox: { enabled: true },
+			permissions: { deny: ["Write(**/.env*)"] },
+		});
+		await start();
+		notes.length = 0;
+		await command("status");
+		const reason = expect.stringMatching(/Sandbox cannot run.*\*\*\/\.env\*.*literal path/);
+		expect(notes).toEqual([reason]);
+		for (const tool of ["bash", "monitor"]) {
+			expect(await call(tool)).toEqual({ block: true, reason });
+		}
+	});
 
 	it("enables immediately and preserves global settings and sandbox policy", async () => {
 		const settings = { theme: "system", sandbox: { enabled: false, network: { allowedDomains: ["github.com"] } } };
@@ -187,6 +226,25 @@ describe("the extension", () => {
 		expect(JSON.parse(readFileSync(join(getAgentDir(), "settings.json"), "utf8"))).toEqual({
 			sandbox: { ...settings.sandbox, enabled: false },
 		});
+	});
+
+	it("adds and removes built-in file tool rules when /sandbox changes", async () => {
+		const { handlers, ctx, events, command } = load({ permissions: { deny: ["Write(notes.txt)"] } });
+		const permission = loadPermissions(ctx, events);
+		const event: SessionStartEvent = { type: "session_start", reason: "startup" };
+		await permission.start(event);
+		await handlers.session_start(event, ctx);
+		const credential = join(getAgentDir(), "auth.json");
+
+		expect(await permission.call("write", ".pi/settings.json")).toBeUndefined();
+		expect(await permission.call("read", credential)).toBeUndefined();
+		await command("on");
+		expect(await permission.call("write", ".pi/settings.json")).toMatchObject({ block: true });
+		expect(await permission.call("read", credential)).toMatchObject({ block: true });
+		await command("off");
+		expect(await permission.call("write", ".pi/settings.json")).toBeUndefined();
+		expect(await permission.call("read", credential)).toBeUndefined();
+		expect(await permission.call("write", "notes.txt")).toMatchObject({ block: true });
 	});
 
 	it("shows status without writing or waiting, including without a UI", async () => {
@@ -324,36 +382,129 @@ describe("the extension", () => {
 		expect(notes[0]).toContain("boom");
 	});
 
-	it("warns when the global settings cannot be read", async () => {
-		const { start, notes } = load({});
-		writeFileSync(join(getAgentDir(), "settings.json"), "{ not json");
+	it("refuses bash and monitor when pi cannot parse the global settings", async () => {
+		const { start, call } = load({});
+		const path = join(getAgentDir(), "settings.json");
+		writeFileSync(path, "{ not json");
+		const exec = vi.fn(async () => ({ exitCode: 0 }));
+		const wrapped = wrapExec(exec, () => undefined);
 		await start();
-		expect(sandboxStatus()).toEqual({ kind: "off" });
-		expect(notes).toHaveLength(1);
-		expect(notes[0]).toContain("could not be read");
+		const bash = await call("bash");
+		if (!bash?.block) await wrapped("printf ticket-9", dir, { onData: () => {} });
+		expect(exec).not.toHaveBeenCalled();
+		for (const result of [bash, await call("monitor")]) {
+			expect(result).toMatchObject({ block: true, reason: expect.stringContaining(path) });
+		}
+		expect(await call("read")).toBeUndefined();
+		expect(await call("powershell")).toBeUndefined();
+	});
+
+	it.each([
+		["global", { invalid: true }],
+		["project", { invalid: true }],
+		["global", "Write(notes.txt)"],
+		["project", ["Write(notes.txt)", false]],
+	])("refuses bash and monitor with the sandbox on and a bad %s deny list (%j)", async (scope, deny) => {
+		const { start, call } = load({ sandbox: { enabled: true } });
+		const settings = { sandbox: { enabled: true }, permissions: { deny } };
+		mkdirSync(join(dir, ".pi"));
+		const path = join(scope === "global" ? getAgentDir() : join(dir, ".pi"), "settings.json");
+		writeFileSync(path, JSON.stringify(settings));
+		wrapExec(
+			async () => ({ exitCode: 0 }),
+			() => undefined,
+		);
+		await start();
+		for (const tool of ["bash", "monitor"]) {
+			const result = await call(tool);
+			expect(result).toMatchObject({ block: true, reason: expect.stringContaining(path) });
+			expect(result.reason).toContain("permissions.deny is not a list of rules");
+		}
+		expect(await call("read")).toBeUndefined();
+	});
+
+	it("refuses bash and monitor with the sandbox on when trusted project settings cannot be parsed", async () => {
+		const { start, call } = load({ sandbox: { enabled: true } });
+		mkdirSync(join(dir, ".pi"));
+		const path = join(dir, ".pi", "settings.json");
+		writeFileSync(path, "{ not json");
+		wrapExec(
+			async () => ({ exitCode: 0 }),
+			() => undefined,
+		);
+		await start();
+		for (const tool of ["bash", "monitor"]) {
+			const result = await call(tool);
+			expect(result).toMatchObject({ block: true, reason: expect.stringContaining(path) });
+			expect(result.reason).toContain("could not be read or parsed");
+		}
+	});
+
+	it("allows bash and monitor with the sandbox on and broken untrusted project settings", async () => {
+		const { start, call, ctx, notes } = load({ sandbox: { enabled: true } });
+		ctx.isProjectTrusted = () => false;
+		mkdirSync(join(dir, ".pi"));
+		writeFileSync(join(dir, ".pi", "settings.json"), "{ not json");
+		wrapExec(
+			async () => ({ exitCode: 0 }),
+			() => undefined,
+		);
+		await start();
+		expect(notes).toEqual([]);
+		expect(await call("bash")).toBeUndefined();
+		expect(await call("monitor")).toBeUndefined();
+	});
+
+	it.each([{ deny: { invalid: true } }, { deny: "Write(notes.txt)" }, { deny: ["Write(notes.txt)", false] }])(
+		"warns about a bad deny list ($deny) with the sandbox off",
+		async ({ deny }) => {
+			const { start, call, ctx, notes, events } = load({ sandbox: { enabled: false }, permissions: { deny } });
+			const policy = loadPermissions(ctx, events);
+			await start();
+			await policy.start({ type: "session_start", reason: "startup" });
+			expect(notes).toContain("global permissions.deny is not a list of rules: none of it is in effect");
+			expect(await policy.call("write", "notes.txt")).toBeUndefined();
+			expect(await call("bash")).toBeUndefined();
+			expect(await call("monitor")).toBeUndefined();
+		},
+	);
+
+	it("reports disabled filesystem protection in /sandbox status while the sandbox is on", async () => {
+		const { start, command, notes } = load({ sandbox: { enabled: true, filesystem: { disabled: true } } });
+		await start();
+		await command("status");
+		expect(notes.at(-1)).toContain("Filesystem protection is off");
+		expect(engine.configs[0]?.filesystem.disabled).toBe(true);
+	});
+
+	it("restores bash and monitor on reload after fixing global settings", async () => {
+		const broken = load({});
+		writeFileSync(join(getAgentDir(), "settings.json"), "{ not json");
+		await broken.start();
+		expect(await broken.call("bash")).toMatchObject({ block: true });
+
+		const fixed = load({ sandbox: { enabled: true } });
+		wrapExec(
+			async () => ({ exitCode: 0 }),
+			() => undefined,
+		);
+		await fixed.start("reload");
+		expect(await fixed.call("bash")).toBeUndefined();
+		expect(await fixed.call("monitor")).toBeUndefined();
+		expect(await fixed.call("powershell")).toMatchObject({ block: true });
 	});
 
 	it("still warns when permissions read the same session_start's settings first", async () => {
-		const { handlers, ctx, notes } = load({});
-		const permissionHandlers: Record<string, (event: any, ctx: any) => Promise<any>> = {};
-		permissions({
-			on: (event: string, handler: any) => {
-				permissionHandlers[event] = handler;
-			},
-			registerShortcut: () => {},
-		} as any);
-		const permissionsCtx = {
-			...ctx,
-			ui: { ...ctx.ui, setStatus: () => {}, theme: { fg: (_c: string, t: string) => t } },
-		};
+		const { handlers, ctx, events, notes } = load({});
+		const permission = loadPermissions(ctx, events);
 		writeFileSync(join(getAgentDir(), "settings.json"), "{ not json");
-		const event = { type: "session_start", reason: "startup" };
-		await permissionHandlers.session_start(event, permissionsCtx);
+		const event: SessionStartEvent = { type: "session_start", reason: "startup" };
+		await permission.start(event);
 		await handlers.session_start(event, ctx);
 		const path = join(getAgentDir(), "settings.json");
 		expect(notes).toEqual([
 			`${path} could not be read: its deny rules are not in effect`,
-			`Sandbox is off: ${path} could not be read.`,
+			`Sandbox cannot run: ${path} could not be read or parsed. The model's bash and monitor are refused.`,
 		]);
 	});
 
@@ -362,7 +513,7 @@ describe("the extension", () => {
 		const missing = load({ sandbox: { enabled: true } });
 		await missing.start();
 		expect(missing.notes).toHaveLength(1);
-		expect(missing.notes[0]).toContain("Sandbox is on but cannot run: socat not installed");
+		expect(missing.notes[0]).toContain("Sandbox cannot run: socat not installed");
 		expect(missing.notes[0]).toContain("The model's bash and monitor are refused.");
 
 		await stopSandbox();

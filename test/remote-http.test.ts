@@ -1,5 +1,5 @@
 import { appendFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { request } from "node:http";
+import { type RequestOptions, request } from "node:http";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { type SessionInfo, SessionManager } from "@earendil-works/pi-coding-agent";
@@ -18,6 +18,7 @@ import { RemoteStore } from "../daemon/remote/pairing.ts";
 import type { SessionSpec } from "../daemon/remote/spawn.ts";
 import type { StatusLine } from "../daemon/remote/statusline.ts";
 import type { ServerSupervisor } from "../daemon/supervisor.ts";
+import { readinessMs } from "./helpers/heartbeats.ts";
 import { testRegistry } from "./helpers/registry.ts";
 import { waitFor } from "./helpers/wait-for.ts";
 import { validP256dh } from "./support/push.ts";
@@ -44,8 +45,10 @@ describe("remote HTTP API", () => {
 	let renders: Array<{ id: string; cwd: string; cols: number }>;
 	let changed: unknown[][];
 	let registry: ServerSupervisor;
+	const notifyPairingCodeExhausted = vi.fn();
 
 	beforeEach(async () => {
+		notifyPairingCodeExhausted.mockClear();
 		vi.mocked(SessionManager.list).mockReset().mockResolvedValue([]);
 		dir = mkdtempSync(join(tmpdir(), "bluclawd-remote-http-"));
 		const web = join(dir, "web");
@@ -81,6 +84,7 @@ describe("remote HTTP API", () => {
 		server = await startRemoteServer(
 			{
 				store,
+				notifyPairingCodeExhausted,
 				webDir: web,
 				listInstances: () => instances,
 				send: async (id, message) => {
@@ -260,34 +264,72 @@ describe("remote HTTP API", () => {
 		expect((await fetch(`${base}/missing.js`)).status).toBe(404);
 	});
 
-	it("answers only a loopback or tailnet Host, so a rebound DNS name reaches nothing", async () => {
-		const get = (path: string, host: string) =>
-			new Promise<{ status: number; body: string }>((resolve, reject) => {
-				const req = request(`${base}${path}`, { headers: { host } }, (res) => {
-					let body = "";
-					res.on("data", (chunk) => {
-						body += chunk;
-					});
-					res.on("end", () => resolve({ status: res.statusCode ?? 0, body }));
+	function remoteRequest(path: string, options: RequestOptions, body?: string) {
+		return new Promise<{ status: number; body: string }>((resolve, reject) => {
+			const req = request(`${base}${path}`, options, (res) => {
+				let body = "";
+				res.on("data", (chunk) => {
+					body += chunk;
 				});
-				req.on("error", reject);
-				req.end();
+				res.on("end", () => resolve({ status: res.statusCode ?? 0, body }));
 			});
+			req.on("error", reject);
+			req.end(body);
+		});
+	}
+
+	it.each([
+		{ origin: "Tailscale Funnel", headers: { "tailscale-funnel-request": "?1" }, error: "funnel_refused" },
+		{ origin: "outside the tailnet", headers: {}, error: "tailnet_identity_required" },
+	])("refuses requests from $origin before routing or authenticating", async ({ headers, error }) => {
+		const forwarded = { host: "mac.tail1234.ts.net", ...headers };
+		for (const path of ["/", "/app.js", "/api/sessions", "/api/events"]) {
+			const res = await remoteRequest(path, { headers: forwarded });
+			expect([res.status, JSON.parse(res.body)], path).toEqual([403, expect.objectContaining({ error })]);
+		}
+		const res = await remoteRequest("/api/pair", { method: "POST", headers: { ...forwarded, ...json } });
+		expect([res.status, JSON.parse(res.body)]).toEqual([403, expect.objectContaining({ error })]);
+	});
+
+	it("refuses a Funnel-marked request even with a loopback Host and a login header", async () => {
+		const headers = {
+			host: "localhost",
+			"tailscale-funnel-request": "?1",
+			"tailscale-user-login": "phone@example.com",
+		};
+		expect((await remoteRequest("/", { headers })).status).toBe(403);
+	});
+
+	it("lets an identified tailnet phone pair and keeps requiring its token for the API", async () => {
+		const headers = { host: "mac.tail1234.ts.net", "tailscale-user-login": "phone@example.com" };
+		expect((await remoteRequest("/api/sessions", { headers })).status).toBe(401);
+		const { code } = store.createCode();
+		const res = await remoteRequest(
+			"/api/pair",
+			{ method: "POST", headers: { ...headers, ...json } },
+			JSON.stringify({ code, deviceName: "Phone" }),
+		);
+		expect(res.status).toBe(200);
+		const { token } = JSON.parse(res.body);
+		if (typeof token !== "string") throw new Error("Pairing did not return a token");
+		expect((await remoteRequest("/api/sessions", { headers: { ...headers, ...auth(token) } })).status).toBe(200);
+	});
+
+	it("answers only a loopback or tailnet Host, so a rebound DNS name reaches nothing", async () => {
 		const port = server.port;
-		for (const host of [
-			`127.0.0.1:${port}`,
-			"127.0.0.1",
-			`localhost:${port}`,
-			"LOCALHOST",
-			`[::1]:${port}`,
-			"mac.tail1234.ts.net",
-			"Mac.Tail1234.TS.NET:443",
-		]) {
-			expect((await get("/", host)).status, host).toBe(200);
+		for (const host of [`127.0.0.1:${port}`, "127.0.0.1", `localhost:${port}`, "LOCALHOST", `[::1]:${port}`]) {
+			expect((await remoteRequest("/", { headers: { host } })).status, host).toBe(200);
+		}
+		const identity = { "tailscale-user-login": "phone@example.com" };
+		for (const host of ["mac.tail1234.ts.net", "Mac.Tail1234.TS.NET:443"]) {
+			expect((await remoteRequest("/", { headers: { host, ...identity } })).status, host).toBe(200);
 		}
 		for (const host of ["evil.example", `evil.example:${port}`, "ts.net", "mac.ts.net.evil.example", "127.0.0.2"]) {
 			for (const path of ["/", "/app.js", "/api/sessions", "/api/events?token=x"]) {
-				expect(await get(path, host), `${host}${path}`).toEqual({ status: 421, body: '{"error":"bad_host"}' });
+				expect(await remoteRequest(path, { headers: { host, ...identity } }), `${host}${path}`).toEqual({
+					status: 421,
+					body: '{"error":"bad_host"}',
+				});
 			}
 		}
 	});
@@ -298,15 +340,55 @@ describe("remote HTTP API", () => {
 		expect((await fetch(`${base}/api/events?token=bogus`)).status).toBe(401);
 	});
 
-	it("rejects a wrong pairing code", async () => {
-		store.createCode();
-		const res = await fetch(`${base}/api/pair`, {
-			method: "POST",
-			headers: json,
-			body: JSON.stringify({ code: "abc", deviceName: "x" }),
+	it("rejects a paired device's token in the event stream URL", async () => {
+		const token = await pair();
+		const res = await fetch(`${base}/api/events?token=${token}`);
+		await res.body?.cancel();
+		expect(res.status).toBe(401);
+	});
+
+	it.each([
+		{ framing: "declared length", headers: { "content-length": 4097 }, chunk: "" },
+		{ framing: "chunked", headers: { "transfer-encoding": "chunked" }, chunk: "x".repeat(4097) },
+	])("rejects an oversized $framing pairing body before the upload ends", async ({ headers, chunk }) => {
+		const result = await new Promise<{ status: number | undefined; body: string }>((resolve, reject) => {
+			const req = request(`${base}/api/pair`, { method: "POST", headers: { ...json, ...headers } }, (res) => {
+				let body = "";
+				res.setEncoding("utf8");
+				res.on("data", (chunk) => {
+					body += chunk;
+				});
+				res.on("error", reject);
+				res.on("end", () => {
+					resolve({ status: res.statusCode, body });
+					req.destroy();
+				});
+			});
+			req.on("error", reject);
+			req.setTimeout(readinessMs, () =>
+				req.destroy(new Error("The server waited for the rest of the pairing body")),
+			);
+			req.flushHeaders();
+			if (chunk) req.write(chunk);
 		});
-		expect(res.status).toBe(400);
-		expect(await res.json()).toEqual({ error: "invalid_code" });
+		expect(result).toEqual({ status: 413, body: '{"error":"body_too_large"}' });
+	});
+
+	it("returns the same error for wrong, expired and exhausted codes, and tells the Mac once at the cap", async () => {
+		const submit = (code: string) =>
+			remoteRequest("/api/pair", { method: "POST", headers: json }, JSON.stringify({ code }));
+		const invalid = { status: 400, body: '{"error":"invalid_code"}' };
+		const expired = store.createCode(Date.now() - 11 * 60_000);
+		expect(await submit(expired.code)).toEqual(invalid);
+		const { code } = store.createCode();
+		const wrong = code === "000000" ? "111111" : "000000";
+		for (let attempt = 0; attempt < 4; attempt++) expect(await submit(wrong)).toEqual(invalid);
+		expect(notifyPairingCodeExhausted).not.toHaveBeenCalled();
+		expect(await submit(wrong)).toEqual(invalid);
+		expect(notifyPairingCodeExhausted).toHaveBeenCalledTimes(1);
+		expect(await submit(code)).toEqual(invalid);
+		expect(await submit(wrong)).toEqual(invalid);
+		expect(notifyPairingCodeExhausted).toHaveBeenCalledTimes(1);
 	});
 
 	it("pairs with the QR code's secret, once", async () => {
@@ -1107,7 +1189,7 @@ describe("remote HTTP API", () => {
 	it("signals transcript and list changes over SSE", async () => {
 		const token = await pair();
 		const controller = new AbortController();
-		const res = await fetch(`${base}/api/events?token=${token}&session=live`, { signal: controller.signal });
+		const res = await fetch(`${base}/api/events?session=live`, { headers: auth(token), signal: controller.signal });
 		expect(res.headers.get("content-type")).toContain("text/event-stream");
 		const reader = res.body!.getReader();
 		const decoder = new TextDecoder();
@@ -1215,8 +1297,8 @@ describe("remote HTTP API", () => {
 	describe("event stream", () => {
 		const open = async (token: string, session?: string) => {
 			const controller = new AbortController();
-			const query = session ? `&session=${session}` : "";
-			const res = await fetch(`${base}/api/events?token=${token}${query}`, { signal: controller.signal });
+			const query = session ? `?session=${session}` : "";
+			const res = await fetch(`${base}/api/events${query}`, { headers: auth(token), signal: controller.signal });
 			const reader = res.body!.getReader();
 			const decoder = new TextDecoder();
 			// One read stays pending across calls, because abandoning a timed-out read would swallow its chunk.
@@ -1285,7 +1367,10 @@ describe("remote HTTP API", () => {
 			const token = await pair();
 			const watcher = await (async () => {
 				const controller = new AbortController();
-				const res = await fetch(`${base}/api/events?token=${token}&session=live`, { signal: controller.signal });
+				const res = await fetch(`${base}/api/events?session=live`, {
+					headers: auth(token),
+					signal: controller.signal,
+				});
 				const reader = res.body!.getReader();
 				const decoder = new TextDecoder();
 				let received = "";
@@ -1314,7 +1399,7 @@ describe("remote HTTP API", () => {
 
 			server.live("live", snapshot);
 			const late = new AbortController();
-			const res = await fetch(`${base}/api/events?token=${token}&session=live`, { signal: late.signal });
+			const res = await fetch(`${base}/api/events?session=live`, { headers: auth(token), signal: late.signal });
 			const reader = res.body!.getReader();
 			let text = "";
 			while (!text.includes("event: live")) text += new TextDecoder().decode((await reader.read()).value);
@@ -1346,8 +1431,8 @@ describe("remote HTTP API", () => {
 			const [device, otherDevice] = store.load().devices.map((d) => d.id);
 			const stream = async (as: string, id?: string) => {
 				const controller = new AbortController();
-				const named = id ? `&stream=${id}` : "";
-				const res = await fetch(`${base}/api/events?token=${as}${named}`, { signal: controller.signal });
+				const named = id ? `?stream=${id}` : "";
+				const res = await fetch(`${base}/api/events${named}`, { headers: auth(as), signal: controller.signal });
 				await res.body!.getReader().read();
 				return controller;
 			};

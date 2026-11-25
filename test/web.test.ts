@@ -174,7 +174,10 @@ describe("Exa", () => {
 	it("takes the key /login stored over EXA_API_KEY, and EXA_API_KEY when /login has none", async () => {
 		process.env.EXA_API_KEY = "exa-from-env";
 		expect(await exaApiKey(registry())).toBe("exa-test");
-		expect(await exaApiKey(registry([], null))).toBe("exa-from-env");
+		const deps = fakeDeps([json({ results: [exaHit] })]);
+		const result = await exaSearch(deps, registry([], null), request);
+		expect(result.hits).toMatchObject([{ url: exaHit.url }]);
+		expect(deps.calls[0].headers["x-api-key"]).toBe("exa-from-env");
 		delete process.env.EXA_API_KEY;
 		expect(await exaApiKey(registry([], "  "))).toBeUndefined();
 	});

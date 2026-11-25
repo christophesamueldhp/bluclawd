@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getAgentDir, type SettingsManager } from "@earendil-works/pi-coding-agent";
@@ -31,13 +31,14 @@ describe("denyRules: global and project lists", () => {
 		expect(denyRules(sm({ deny: ["Read(~/.ssh/**)"] }, { deny: [] }))).toEqual(["Read(~/.ssh/**)"]);
 	});
 
-	it("reads a lone rule as one rule, never as its letters, and skips what is not a rule", () => {
-		expect(denyRules(sm({ deny: "Bash(rm *)" }, { deny: ["WebFetch", 3] }))).toEqual(["Bash(rm *)", "WebFetch"]);
+	it("ignores each malformed list in full", () => {
+		expect(denyRules(sm({ deny: "Bash(rm *)" }, { deny: ["WebFetch", 3] }))).toEqual([]);
+		expect(denyRules(sm({ deny: ["WebFetch"] }, { deny: [false] }))).toEqual(["WebFetch"]);
 	});
 
 	it("names each scope whose deny is not a list of rules", () => {
 		expect(invalidDenyScopes(sm({ deny: { rm: true } }, { deny: ["WebFetch"] }))).toEqual(["global"]);
-		expect(invalidDenyScopes(sm({ deny: "Bash(rm *)" }, undefined))).toEqual([]);
+		expect(invalidDenyScopes(sm({ deny: "Bash(rm *)" }, { deny: ["WebFetch", 3] }))).toEqual(["global", "project"]);
 	});
 
 	it("reads nothing but deny", () => {
@@ -58,13 +59,12 @@ describe("deniedBy", () => {
 	it("an Edit rule covers write, a Read rule covers grep/find/ls", () => {
 		expect(denied(["Edit(./x)"], "write", { path: "./x" })).toBe(true);
 		expect(denied(["Read(.env)"], "grep", { pattern: "k", path: ".env" })).toBe(true);
-		expect(denied(["Read(/proj/**)"], "ls", { path: "sub" })).toBe(true);
-		expect(denied(["Read(/proj)"], "grep", { pattern: "k" })).toBe(true);
-		expect(denied(["Write(./x)"], "edit", { path: "./x" })).toBe(false);
+		expect(denied(["Read(//proj/**)"], "ls", { path: "sub" })).toBe(true);
+		expect(denied(["Read(//proj)"], "grep", { pattern: "k" })).toBe(true);
 	});
 
 	it("matches paths resolved against the working directory, and //abs", () => {
-		expect(denied(["Read(/proj/secrets/**)"], "read", { path: "secrets/a" })).toBe(true);
+		expect(denied(["Read(/secrets/**)"], "read", { path: "secrets/a" })).toBe(true);
 		expect(denied(["Read(//etc/**)"], "read", { path: "/etc/hosts" })).toBe(true);
 	});
 
@@ -244,10 +244,10 @@ describe("deniedBy", () => {
 		]) {
 			expect(denied(ssh, "bash", { command }), command).toBe(true);
 		}
-		expect(denied(["Edit(/proj/.git/**)"], "bash", { command: "echo x > .git/config" })).toBe(true);
+		expect(denied(["Edit(/.git/**)"], "bash", { command: "echo x > .git/config" })).toBe(true);
 		expect(denied(["Edit(//etc/**)"], "bash", { command: "dd if=x of=/etc/hosts" })).toBe(true);
 		expect(denied(ssh, "bash", { command: "cat ~/.sshx/key" })).toBe(false);
-		expect(denied(["Read(/proj/**)"], "bash", { command: "npm test" })).toBe(false);
+		expect(denied(["Read(//proj/**)"], "bash", { command: "npm test" })).toBe(false);
 	});
 
 	it("preserves quoted and escaped whitespace in bash paths", () => {
@@ -303,7 +303,7 @@ describe("deniedBy", () => {
 			mkdirSync(join(dir, ".ssh"));
 			writeFileSync(join(dir, ".ssh", "id_rsa"), "");
 			writeFileSync(join(dir, "secrets.txt"), "");
-			const ssh = [`Read(${dir}/.ssh/**)`];
+			const ssh = [`Read(/${dir}/.ssh/**)`];
 			for (const command of [`cat ${dir}/.ss*/id_rsa`, "cat .s?h/id_rsa", "cat .[s]sh/id_rsa", "cat .ssh/id_*"]) {
 				expect(deniedBy(ssh, "bash", { command }, dir), command).toBeDefined();
 			}
@@ -378,8 +378,8 @@ describe("deniedBy", () => {
 			mkdirSync(join(dir, "open", "x"), { recursive: true });
 			writeFileSync(join(dir, "open", "x", "key"), "");
 			chmodSync(join(dir, "locked"), 0);
-			expect(deniedBy([`Read(${dir}/open/**)`], "bash", { command: "cat */x/key" }, dir)).toBeDefined();
-			expect(deniedBy([`Read(${dir}/locked/**)`], "bash", { command: "cat */*/key" }, dir)).toBeUndefined();
+			expect(deniedBy([`Read(/${dir}/open/**)`], "bash", { command: "cat */x/key" }, dir)).toBeDefined();
+			expect(deniedBy([`Read(/${dir}/locked/**)`], "bash", { command: "cat */*/key" }, dir)).toBeUndefined();
 		} finally {
 			chmodSync(join(dir, "locked"), 0o700);
 			rmSync(dir, { recursive: true, force: true });
@@ -391,7 +391,7 @@ describe("deniedBy", () => {
 		try {
 			mkdirSync(join(dir, "secret"));
 			writeFileSync(join(dir, "secret", "key"), "");
-			const rules = [`Read(${join(dir, "secret")}/**)`];
+			const rules = [`Read(/${join(dir, "secret")}/**)`];
 			expect(deniedBy(rules, "bash", { command: "cd secret && cat key" }, dir)).toBeDefined();
 			expect(deniedBy(rules, "bash", { command: "cat secret" }, dir)).toBeDefined();
 			expect(deniedBy(rules, "bash", { command: "cat other" }, dir)).toBeUndefined();
@@ -403,7 +403,7 @@ describe("deniedBy", () => {
 	it("a dir/** rule covers the directory itself, not a sibling prefix", () => {
 		expect(denied(["Read(~/.ssh/**)"], "ls", { path: "~/.ssh" })).toBe(true);
 		expect(denied(["Read(//**)"], "read", { path: "/etc/hosts" })).toBe(true);
-		expect(denied(["Read(/proj/sec/**)"], "read", { path: "secrets" })).toBe(false);
+		expect(denied(["Read(/sec/**)"], "read", { path: "secrets" })).toBe(false);
 	});
 });
 
@@ -436,7 +436,7 @@ describe("the extension", () => {
 
 	const globalSettings = () => join(getAgentDir(), "settings.json");
 
-	function load(settings: Record<string, unknown>) {
+	function load(settings: Record<string, unknown>, cwd = dir) {
 		writeFileSync(globalSettings(), JSON.stringify(settings));
 		const handlers: Record<string, (event: any, ctx: any) => Promise<any>> = {};
 		let shortcut: ((ctx: any) => Promise<void>) | undefined;
@@ -450,10 +450,10 @@ describe("the extension", () => {
 			registerShortcut: (_key: unknown, def: any) => {
 				shortcut = def.handler;
 			},
-			events: { emit: (name: string, data: unknown) => announced.push([name, data]) },
+			events: { on: () => {}, emit: (name: string, data: unknown) => announced.push([name, data]) },
 		} as any);
 		const ctx = {
-			cwd: dir,
+			cwd,
 			isProjectTrusted: () => true,
 			ui: {
 				setStatus: (key: string, text: string | undefined) => {
@@ -467,6 +467,48 @@ describe("the extension", () => {
 		return { handlers, ctx, call, status, notes, announced, press: () => shortcut?.(ctx) };
 	}
 
+	it("matches bash path arguments according to the working directory's case sensitivity", async () => {
+		writeFileSync(join(dir, ".env"), "A=1\n");
+		const { handlers, ctx, call } = load({ permissions: { deny: ["Read(.env)"] } });
+		await handlers.session_start({}, ctx);
+		const insensitive = existsSync(join(dir, ".ENV"));
+		expect(await call("bash", { command: "cat .ENV" })).toEqual(
+			insensitive ? { block: true, reason: "Blocked by permission rule (deny): Read(.env)" } : undefined,
+		);
+	});
+
+	it("applies the working directory's case sensitivity to file tools and keeps Bash rules exact", async () => {
+		const { handlers, ctx, call } = load({ permissions: { deny: ["Read(.env)", "Write(.env)", "Bash(rm -rf *)"] } });
+		await handlers.session_start({}, ctx);
+		writeFileSync(join(dir, ".case-check"), "");
+		const insensitive = existsSync(join(dir, ".CASE-CHECK"));
+		const blocked = (rule: string) =>
+			insensitive ? { block: true, reason: `Blocked by permission rule (deny): ${rule}` } : undefined;
+
+		expect(await call("read", { path: ".Env" })).toEqual(blocked("Read(.env)"));
+		expect(await call("bash", { command: "grep x .ENV" })).toEqual(blocked("Read(.env)"));
+		expect(await call("grep", { pattern: "x", path: ".ENV" })).toEqual(blocked("Read(.env)"));
+		expect(await call("write", { path: ".ENV" })).toEqual(blocked("Write(.env)"));
+		expect((await call("bash", { command: "rm -rf x" }))?.block).toBe(true);
+		expect(await call("bash", { command: "RM -rf x" })).toBeUndefined();
+	});
+
+	it("keeps file rules exact in a case-sensitive working directory", async () => {
+		const { handlers, ctx, call } = load({ permissions: { deny: ["Read(.env)"] } }, "/dev");
+		await handlers.session_start({}, ctx);
+		expect(existsSync(join(ctx.cwd, "null"))).toBe(true);
+		expect(existsSync(join(ctx.cwd, "NULL"))).toBe(false);
+		expect(await call("read", { path: ".ENV" })).toBeUndefined();
+		expect((await call("read", { path: ".env" }))?.block).toBe(true);
+	});
+
+	it("folds the case of protected paths when the working directory cannot be inspected", async () => {
+		const { handlers, ctx, call } = load({ permissions: { deny: ["Read(.env)"] } });
+		await handlers.session_start({}, ctx);
+		ctx.cwd = join(ctx.cwd, "missing-directory");
+		expect((await call("read", { path: ".ENV" }))?.block).toBe(true);
+	});
+
 	it("blocks a denied call with the rule, and runs everything else", async () => {
 		const { handlers, ctx, call } = load({ permissions: { deny: ["Bash(rm *)"] } });
 		await handlers.session_start({}, ctx);
@@ -476,6 +518,117 @@ describe("the extension", () => {
 		});
 		expect(await call("bash", { command: "npm test" })).toBeUndefined();
 		expect(await call("write", { path: ".git/hooks/pre-commit" })).toBeUndefined();
+	});
+
+	it.each(["Read(.env)", "Write(.env)", "Edit(.env)"])("blocks edits to .env with %s", async (rule) => {
+		const { handlers, ctx, call } = load({ permissions: { deny: [rule] } });
+		await handlers.session_start({}, ctx);
+		const edits = [{ oldText: "A=1", newText: "A=2" }];
+		expect(await call("edit", { path: ".env", edits })).toEqual({
+			block: true,
+			reason: `Blocked by permission rule (deny): ${rule}`,
+		});
+		expect(await call("edit", { path: ".env.example", edits })).toBeUndefined();
+	});
+
+	it("blocks a write to a new file under .pi when the sandbox is on", async () => {
+		const { handlers, ctx, call } = load({ sandbox: { enabled: true } });
+		await handlers.session_start({}, ctx);
+		expect(await call("write", { path: ".pi/extensions/x.ts" })).toEqual({
+			block: true,
+			reason: `Blocked by built-in sandbox rule (deny): Edit(/${join(dir, ".pi")}/**)`,
+		});
+	});
+
+	it.each([true, false])("applies protected path rules according to sandbox.enabled=%s", async (enabled) => {
+		const { handlers, ctx, call } = load({ sandbox: { enabled } });
+		await handlers.session_start({}, ctx);
+		for (const [root, path] of [
+			[".pi", ".pi/settings.json"],
+			[".agents", ".agents/skills/example/SKILL.md"],
+			[".git/hooks", ".git/hooks/pre-commit"],
+			[".git/config", ".git/config"],
+			[".vscode", ".vscode/settings.json"],
+			[".idea", ".idea/workspace.xml"],
+			[".claude", ".claude/settings.json"],
+			[".mcp.json", ".mcp.json"],
+		]) {
+			const expected = enabled
+				? { block: true, reason: `Blocked by built-in sandbox rule (deny): Edit(/${join(dir, root)}/**)` }
+				: undefined;
+			for (const tool of ["write", "edit"]) {
+				expect(await call(tool, { path }), `${tool} ${path}`).toEqual(expected);
+			}
+		}
+		expect(await call("write", { path: ".pi-example/settings.json" })).toBeUndefined();
+	});
+
+	it("releases only paths named exactly in global sandbox allowWrite", async () => {
+		mkdirSync(join(dir, ".pi"));
+		writeFileSync(
+			join(dir, ".pi", "settings.json"),
+			JSON.stringify({ sandbox: { filesystem: { allowWrite: [".pi"] } } }),
+		);
+		const { handlers, ctx, call } = load({
+			sandbox: {
+				enabled: true,
+				filesystem: { allowWrite: [".", join(dir, ".vscode"), ".mcp.json", ".claude", ".agents"] },
+			},
+		});
+		await handlers.session_start({}, ctx);
+		for (const tool of ["write", "edit"]) {
+			expect(await call(tool, { path: ".agents/settings.json" })).toBeUndefined();
+			expect(await call(tool, { path: ".claude/settings.json" })).toBeUndefined();
+			expect(await call(tool, { path: ".claude/commands/fixture.md" })).toMatchObject({ block: true });
+			expect(await call(tool, { path: ".claude/agents/fixture.md" })).toMatchObject({ block: true });
+			expect(await call(tool, { path: ".vscode/settings.json" })).toMatchObject({ block: true });
+			expect(await call(tool, { path: ".pi/settings.json" })).toMatchObject({ block: true });
+			expect(await call(tool, { path: ".mcp.json" })).toMatchObject({ block: true });
+		}
+	});
+
+	it("matches built-in rules according to the working directory's case sensitivity", async () => {
+		writeFileSync(join(dir, ".case-check"), "");
+		const insensitive = existsSync(join(dir, ".CASE-CHECK"));
+		const { handlers, ctx, call } = load({ sandbox: { enabled: true } });
+		await handlers.session_start({}, ctx);
+		expect((await call("edit", { path: ".PI/settings.json" }))?.block).toBe(insensitive ? true : undefined);
+		expect((await call("read", { path: join(getAgentDir(), "AUTH.JSON") }))?.block).toBe(
+			insensitive ? true : undefined,
+		);
+	});
+
+	it("blocks file tools from opening either agent credential file when the sandbox is on", async () => {
+		const { handlers, ctx, call } = load({ sandbox: { enabled: true } });
+		await handlers.session_start({}, ctx);
+		for (const name of ["auth.json", "bluclawd/accounts.json"]) {
+			const path = join(getAgentDir(), name);
+			for (const tool of ["read", "grep", "find", "ls"]) {
+				expect(await call(tool, { path }), `${tool} ${name}`).toEqual({
+					block: true,
+					reason: `Blocked by built-in sandbox rule (deny): Read(/${path})`,
+				});
+			}
+		}
+		expect(await call("read", { path: join(getAgentDir(), "settings.json") })).toBeUndefined();
+		expect(await call("read", { path: ".pi/settings.json" })).toBeUndefined();
+	});
+
+	it("drops both credential files from a folder grep when the sandbox is on", async () => {
+		const { handlers, ctx } = load({ sandbox: { enabled: true } });
+		await handlers.session_start({}, ctx);
+		const result = await handlers.tool_result(
+			{
+				toolName: "grep",
+				input: { path: getAgentDir(), pattern: "example" },
+				content: [
+					{ type: "text", text: "auth.json:1: example\nbluclawd/accounts.json:2: example\nnotes.txt:3: example" },
+				],
+				isError: false,
+			},
+			ctx,
+		);
+		expect(result).toEqual({ content: [{ type: "text", text: "notes.txt:3: example" }] });
 	});
 
 	it("warns when a settings file cannot be read, and keeps the other file's rules", async () => {
@@ -488,15 +641,44 @@ describe("the extension", () => {
 		expect((await call("webfetch", { url: "https://example.com" }))?.block).toBe(true);
 	});
 
-	it("blocks with a lone rule, and warns when deny is not rules at all", async () => {
-		const lone = load({ permissions: { deny: "Bash(rm *)" } });
-		await lone.handlers.session_start({}, lone.ctx);
-		expect((await lone.call("bash", { command: "rm x" }))?.block).toBe(true);
-		expect(lone.notes).toEqual([]);
+	it("warns once about the old absolute spelling of a deny rule that names an existing directory", async () => {
+		const oldPath = join(home, "drafts");
+		mkdirSync(oldPath);
+		const rule = `Read(${oldPath}/**)`;
+		const missing = `Read(${join(home, "missing")}/**)`;
+		const absolute = `Read(/${oldPath}/**)`;
+		const { handlers, ctx, notes } = load({ permissions: { deny: [rule, missing, absolute] } });
+		mkdirSync(join(dir, ".pi"));
+		writeFileSync(join(dir, ".pi", "settings.json"), JSON.stringify({ permissions: { deny: [rule] } }));
+		await handlers.session_start({}, ctx);
+		expect(notes).toEqual([
+			`Deny rule ${rule} is now relative to the working directory. Use ${absolute} for the absolute path.`,
+		]);
+		expect(JSON.parse(readFileSync(globalSettings(), "utf8")).permissions.deny).toEqual([rule, missing, absolute]);
+	});
 
-		const broken = load({ permissions: { deny: { rm: true } } });
-		await broken.handlers.session_start({}, broken.ctx);
-		expect(broken.notes).toEqual(["global permissions.deny is not a list of rules: none of it is in effect"]);
+	it("anchors a leading wildcard at the working directory", async () => {
+		const { handlers, ctx, call } = load({ permissions: { deny: ["Read(*.txt)"] } });
+		await handlers.session_start({}, ctx);
+		for (const path of ["draft.txt", "./draft.txt", join(dir, "draft.txt")]) {
+			expect((await call("read", { path }))?.block).toBe(true);
+		}
+		expect((await call("bash", { command: "cat ./draft.txt" }))?.block).toBe(true);
+		expect(await call("read", { path: "nested/draft.txt" })).toBeUndefined();
+		expect(await call("read", { path: join(home, "draft.txt") })).toBeUndefined();
+	});
+
+	it("resolves rule paths against the working directory, the filesystem root, or home", async () => {
+		const { handlers, ctx, call } = load({
+			permissions: { deny: ["Read(/drafts/**)", "Read(//archive/**)", "Read(~/notes/**)"] },
+		});
+		await handlers.session_start({}, ctx);
+		for (const path of [join(dir, "drafts/a.md"), "/archive/a.md", join(home, "notes/a.md")]) {
+			expect((await call("read", { path }))?.block).toBe(true);
+		}
+		for (const path of ["/drafts/a.md", "archive/a.md", "notes/a.md"]) {
+			expect(await call("read", { path })).toBeUndefined();
+		}
 	});
 
 	it("judges a monitor as bash, and a websearch batch query by query", async () => {

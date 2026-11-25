@@ -1,0 +1,20 @@
+# Runs follow their orchestrator's sandbox, nest three deep, and may fork its conversation
+
+Revises ADR-0003 (one level of delegation, no quotas), ADR-0013 (a run loads a fixed list of extensions), ADR-0010 (a run never copies the parent conversation; a role that names no tools only reads) and the parts of ADR-0011 and ADR-0014 that give every run a contained shell whatever its orchestrator's sandbox. Decided 2026-11-25 in an audit with the user, after comparing Codex, Claude Code and Gemini CLI (`docs/research/subagent-best-practice.md`, `docs/research/subagent-confinement-and-context.md`). Not yet implemented.
+
+The user chose to follow Claude Code: a run is confined exactly as far as its orchestrator is. bluclawd was stricter than all three agents compared, which confine a subagent only through its parent. That strictness cost runs every host resource their orchestrator could use, and the user preferred one switch for the whole tree.
+
+## Decisions
+
+- **The sandbox follows the orchestrator.** With its orchestrator's sandbox on, a run's commands and file tools are confined as they are today, narrowed to its workspace. With it off, a run is not confined by the OS, its shell keeps the environment, and only deny rules and the role's tools apply. Its processes are then ended by the best-effort reaper of ADR-0001; one that cannot be confirmed ended makes the run report "uncertain" without holding up a Stop. A run is never wider than its orchestrator.
+- **Roles narrow tools with `tools` and `disallowedTools`.** A role that names no `tools` gets every tool its orchestrator has, web and MCP tools included, minus `disallowedTools`. Tools that belong to the user's session, `schedule_wakeup` and `memory`, are never inherited. A run therefore loads the extensions that provide its tools, not ADR-0013's fixed list. The bundled `explorer` and `reviewer` name read-only tools, so they still only read.
+- **Runs nest.** A run may launch runs, up to `subagents.maxDepth` levels, 3 by default. A nested run's tools and sandbox are the intersection of its orchestrator run's and its role's. A nested run that edits works in a worktree branched from its orchestrator run's worktree, and its Integration applies there. Only a run launched by the user's session integrates into the user's checkout.
+- **A worktree still isolates every run that edits**, with or without the sandbox. Without it, the worktree is a convention the OS does not enforce. Parallel and nested writers in one checkout would undo Integration and Evidence.
+- **At most `subagents.maxActive` runs work at once, 20 by default**, counted over the whole tree and set by the user to any number. A run waiting on its own runs gives up its slot, so a full tree cannot deadlock.
+- **A run launched without a role is a forked run.** It starts with its orchestrator's conversation, system prompt, tools, model and thinking level, unchanged, so the provider can serve its first request from the orchestrator's prompt cache. pi's system prompt names the working directory, so a forked run keeps its orchestrator's prompt, cwd included, and learns its worktree from its first message. This must first be shown to hit the cache; if it does not, a forked run gets the stripped copy below instead. A forked run cannot fork. A run with a role starts fresh from its brief, as before, and `reviewer` is never forked, since a review is worth most with no shared context.
+
+## Considered options
+
+- **Keep runs always sandboxed** (the research's recommendation). Rejected by the user in favour of one switch. The cost of the choice: with the sandbox off, a run's shell can write outside its worktree and read the environment's credentials.
+- **A stripped fork** (Codex v1: user and final assistant messages only, under a token cap). Kept as the fallback: stripping breaks the byte-identical prefix the prompt cache needs, so it costs more per token than a full fork that hits the cache, and less than one that misses it.
+- **Write into the shared checkout, with a worktree opt-in** (Claude Code's default). Rejected for the reason above.

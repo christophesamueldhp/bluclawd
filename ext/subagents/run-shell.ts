@@ -2,14 +2,16 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, relative, sep } from "node:path";
-import type { SandboxRuntimeConfig } from "@anthropic-ai/sandbox-runtime";
 import { type BashOperations, createLocalBashOperations } from "@earendil-works/pi-coding-agent";
 import { runMachMarker } from "../../daemon/run-members.ts";
+import { resolveDenyRulePath } from "../_shared/deny-rule-path.ts";
 import { pathRule } from "../permissions/rules.ts";
 import {
 	checkRuntimeConfig,
+	linuxGlobRefusal,
 	type SandboxSetting,
 	sandboxPath,
+	sandboxWriteDenies,
 	type UncheckedRuntimeConfig,
 } from "../sandbox/config.ts";
 import { endRunProcesses, prepareRunContainment, type RunContainment } from "../sandbox/run-containment.ts";
@@ -47,7 +49,7 @@ export function runShellConfig(
 			rules.flatMap((rule) => {
 				const parsed = pathRule(rule);
 				return parsed && verbs.includes(parsed.verb)
-					? withCopy(sandboxPath(parsed.path, cwd, home), workspace)
+					? withCopy(resolveDenyRulePath(parsed.path, cwd, home), workspace)
 					: [];
 			}),
 		);
@@ -61,6 +63,10 @@ export function runShellConfig(
 	const userPaths = (list: string[]) => list.map((path) => sandboxPath(path, workspace.root, home));
 	const unique = (list: string[]) => [...new Set(list)];
 	const deniedDomains = written.network?.deniedDomains;
+	const dotGit = join(workspace.root, ".git");
+	const writeDenies = sandboxWriteDenies(workspace.root, home, on?.allowWrite ?? []).filter(
+		({ path }) => !path.startsWith(dotGit + sep),
+	);
 	return {
 		config: {
 			network: {
@@ -78,14 +84,17 @@ export function runShellConfig(
 				]),
 				allowRead: [workspace.root, runShellTmp(agentDir, scope.runId)],
 				allowWrite: [workspace.root, runShellTmp(agentDir, scope.runId)],
-				denyWrite: unique([
-					join(workspace.root, ".git"),
-					workspace.gitDir,
-					scope.runDir,
-					...userPaths(SHARED_WRITABLE),
-					...ruled(["Edit", "Write"]),
-					...userPaths(on?.denyWrite ?? []),
-				]),
+				denyWrite: [
+					...unique([
+						dotGit,
+						workspace.gitDir,
+						scope.runDir,
+						...userPaths(SHARED_WRITABLE),
+						...ruled(["Edit", "Write"]),
+						...userPaths(on?.denyWrite ?? []),
+					]),
+					...writeDenies,
+				],
 			},
 		},
 		hiddenEnv: strings(written.credentials?.envVars?.map((entry) => entry.name)),
@@ -130,7 +139,12 @@ export function createRunShell(
 		mkdirSync(runShellTmp(options.agentDir, scope.runId), { recursive: true, mode: 0o700 });
 		// The runtime gives commands this as their TMPDIR, instead of a temp directory every sandbox shares.
 		process.env.CLAUDE_CODE_TMPDIR = runShellTmp(options.agentDir, scope.runId);
-		await SandboxManager.initialize(checked as SandboxRuntimeConfig, options.ask, false);
+		await SandboxManager.initialize(checked, options.ask, false);
+		const globRefusal = linuxGlobRefusal(SandboxManager.getLinuxGlobPatternWarnings());
+		if (globRefusal) {
+			await SandboxManager.reset();
+			return globRefusal;
+		}
 		return { contained: { helper: containment.helper, marker: runMachMarker(scope.runId) }, hiddenEnv };
 	};
 	const exec: Exec = async (command, cwd, execOptions) => {

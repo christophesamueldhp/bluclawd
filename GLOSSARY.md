@@ -7,8 +7,16 @@ An extension pack for the pi coding agent: a sandboxed shell, background session
 ### Subagents
 
 **Run**:
-One delegated piece of work owned by its launching orchestrator, with its own identity, session, context, transcript and reports. A run can span multiple generations; its saved context can outlive the process doing its work.
+One delegated piece of work owned by its orchestrator, the session or run that launched it, with its own identity, session, context, transcript and reports. A run can span multiple generations; its saved context can outlive the process doing its work.
 _Avoid_: job, task (for a subagent's work), teammate
+
+**Nested run**:
+A run whose orchestrator is another run. It is never wider than that run, and its changes integrate into that run's workspace, never the user's checkout.
+_Avoid_: sub-subagent, grandchild, child agent
+
+**Forked run**:
+A run launched without a role, which starts with its orchestrator's whole conversation, prompt, tools and model instead of a brief. A forked run cannot fork.
+_Avoid_: fork (pi's `/fork` of a session), clone, context copy
 
 **Run workspace**:
 The files and directories a run works with, which may be shared for reading or isolated for changes. An isolated run workspace has a defined starting state and does not automatically receive later edits from other runs or its orchestrator.
@@ -90,6 +98,24 @@ _Avoid_: restart, rerun
 The orchestrator between turns while runs it launched are still working. It leaves their work to them and goes on when their reports arrive. A run that is idle, or waits on the user in its own session, is not waited for.
 _Avoid_: idle, stopped, done (while runs are working)
 
+### Confinement
+
+**Sandbox**:
+The operating-system boundary around everything the model's tools do in a session, its commands and its file tools alike. A run is confined exactly as far as its orchestrator, narrowed to its own workspace.
+_Avoid_: permissions, deny rules (they match text and hold with the sandbox off)
+
+**Deny rule**:
+A rule that blocks a tool call whose text matches it, whether the sandbox is on or off.
+_Avoid_: permission, policy (for the sandbox's)
+
+**Sandbox profile**:
+How far the sandbox lets the model write: nowhere (read-only), the project and temp (workspace), or the directories the user lists (custom).
+_Avoid_: mode, permission mode
+
+**Protected path**:
+A path in the project that configures an agent or Git, such as `.pi/` or `.git/hooks`, which nothing the model runs may write unless the user allows it.
+_Avoid_: secret (the files the model may not read)
+
 ### Tasks
 
 **Task**:
@@ -97,7 +123,7 @@ An entry in `/tasks` and `task_stop`: a background shell, a monitor, a wake-up, 
 _Avoid_: task for the run itself inside `subagents`
 
 **Wake-up**:
-A turn a session's agent schedules for itself. It starts once, at a set time or as soon after it as the session can take it, with a prompt the agent wrote. It outlives its pi crashing, or being ended by a signal bluclawd did not send, such as a closed terminal or a kill, and the session is opened again to take it. Ending the session, a fork or a move in its tree, and deleting its row cancel it. An orchestrator schedules wake-ups, a run does not. A session may hold several at once.
+A turn a session's agent schedules for itself. It starts once, at a set time or as soon after it as the session can take it, with a prompt the agent wrote. It outlives its pi crashing, or being ended by a signal bluclawd did not send, such as a closed terminal or a kill, and the session is opened again to take it. Ending the session, a fork or a move in its tree, and deleting its row cancel it. The user's session schedules wake-ups, a run does not. A session may hold several at once.
 _Avoid_: timer, reminder, cron job, sleep, scheduled task
 
 ### Agent view
@@ -172,11 +198,11 @@ The globally saved baseline of Scoped models for new sessions, unless a project-
 ### Memory
 
 **Memory**:
-One fact the agent keeps for one Project across sessions: who the user is, guidance they gave, the state of ongoing work, or where to look something up. The orchestrator keeps it; a run does not.
+One fact the agent keeps for one Project across sessions: who the user is, guidance they gave, the state of ongoing work, or where to look something up. The user's session keeps it; a run does not.
 _Avoid_: note, entry, context file (`AGENTS.md`, `CLAUDE.md`)
 
 **Memory index**:
-One line per Memory of the Project, given to the agent when its session starts, while the `memory` tool is active and `/memory` is on. A Memory saved during the session is not added to it until the next session.
+One line per Memory of the Project, given to the agent when its session starts, while the `memory` tool is active and `/memory` is on. A Memory saved during the session is not added to it until the session starts again or reloads.
 _Avoid_: MEMORY.md (its file, not the concept)
 
 **Project**:

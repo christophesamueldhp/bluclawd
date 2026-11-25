@@ -11,5 +11,6 @@ Deny rules match the text of a call, so they cannot stop a command that reads a 
 
 ## Consequences
 
+- Unreadable or unparseable global settings stop `bash` and `monitor` even if the sandbox was off. With the sandbox on, unreadable or unparseable trusted project settings and malformed deny lists also stop both tools. The refusal names the file. Fix it and run `/reload`.
 - On macOS, Seatbelt limits files and network but not process lifetime. A command that detaches or double-forks a descendant would leave it running after a stop. A best-effort reaper (#29, `ext/sandbox/reaper.ts`) follows each command's processes by parent unique id and an environment cookie and kills them when the command ends. A very fast double-fork that also scrubs its environment can slip between its scans, and it relies on private SPI. Linux's PID namespace contains it. A run's shell confirms its processes ended without a VM; see ADR-0011.
 - srt is pre-1.0 ("Beta Research Preview") and its API still moves, so it is pinned.

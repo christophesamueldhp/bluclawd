@@ -1,5 +1,5 @@
 /** 0.0.N, one more for every change to the app, because a changed sw.js is what makes the phone update. */
-const VERSION = "0.0.64";
+const VERSION = "0.0.65";
 const CACHE = `bluclawd-shell-${VERSION}`;
 const SHELL = [
 	"/",
