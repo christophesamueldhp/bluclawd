@@ -212,6 +212,9 @@ const backgroundBash: InlineExtension = {
 			},
 			now: () => Date.now(),
 			killedBySignal,
+			log: (line) => {
+				if (ctx?.hasUI) ctx.ui.notify(line, "warning");
+			},
 		});
 
 		if (!runParent()) {
