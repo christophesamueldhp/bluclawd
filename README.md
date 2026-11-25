@@ -244,7 +244,9 @@ cache holds.
   model is not told.
 
 When pi or the daemon reads wake-ups from a session log, bluclawd skips and logs entries with
-invalid wake-up IDs.
+invalid wake-up IDs. The daemon writes these warnings to `~/.pi/server/wakeups.log` by default.
+If you set `PI_SERVER_DIR`, the log is at `$PI_SERVER_DIR/wakeups.log`. Otherwise, if you set
+`PI_CONFIG_DIR`, the log is at `$PI_CONFIG_DIR/server/wakeups.log`.
 
 
 ## Updating

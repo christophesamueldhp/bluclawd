@@ -1,5 +1,6 @@
 import { execFile, spawn } from "node:child_process";
-import { existsSync, unlinkSync } from "node:fs";
+import { appendFileSync, existsSync, unlinkSync } from "node:fs";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Collaborations } from "./collaborations.ts";
 import { getServerDir, getSocketPath } from "./config.ts";
@@ -25,8 +26,10 @@ const RUN_HOST = fileURLToPath(new URL("../ext/subagents/rpc-host.ts", import.me
 const RESOLVE_HOOK = fileURLToPath(new URL("./pi-resolve-hook.mjs", import.meta.url));
 
 export async function serve(): Promise<void> {
+	const serverDir = getServerDir();
 	const socketPath = getSocketPath();
-	ensureOwnerOnlyServerDir();
+	ensureOwnerOnlyServerDir(serverDir);
+	const wakeupLogPath = join(serverDir, "wakeups.log");
 	const tmux = new Tmux(undefined, undefined, { timeoutMs: TMUX_TIMEOUT_MS });
 	let remote: RemoteControl | undefined;
 	const reopen = async (held: HeldWakeups) => {
@@ -47,12 +50,19 @@ export async function serve(): Promise<void> {
 		);
 	};
 	const wakeups = new WakeupKeeper({
-		dir: getServerDir(),
+		dir: serverDir,
 		now: Date.now,
 		alive: processAlive,
 		pending: readPendingWakeups,
 		reopen,
-		log: console.error,
+		log: (line) => {
+			console.error(line);
+			try {
+				appendFileSync(wakeupLogPath, `${new Date().toISOString()} ${line}\n`, { mode: 0o600 });
+			} catch (error) {
+				console.error(`Could not write the wake-up log at ${wakeupLogPath}:`, error);
+			}
+		},
 	});
 	const supervisor = new ServerSupervisor({ now: Date.now, tmux, dir: getServerDir(), wakeups });
 	const parts: HandlerParts = { wakeups };

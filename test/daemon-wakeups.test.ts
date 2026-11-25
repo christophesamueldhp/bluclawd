@@ -1,7 +1,8 @@
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, onTestFinished, vi } from "vitest";
+import { OrchestratorClient } from "../daemon/orchestrator-client.ts";
 import { saveInstances } from "../daemon/storage.ts";
 import { ServerSupervisor } from "../daemon/supervisor.ts";
 import {
@@ -16,6 +17,7 @@ import {
 	type WakeupKeeperDeps,
 	type WakeupRecord,
 } from "../daemon/wakeups.ts";
+import { waitFor } from "./helpers/wait-for.ts";
 
 const MINUTE = 60_000;
 const NOW = Date.UTC(2026, 10, 10, 12, 0);
@@ -66,6 +68,37 @@ function hold(f: ReturnType<typeof fixture>, file: string, pid: number, wakeups:
 }
 
 describe("the daemon's copy of a session's wake-ups", () => {
+	it("leaves a log line for a rejected wake-up ID when pi starts the daemon in the background", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "bc-wakeups-"));
+		vi.stubEnv("PI_SERVER_DIR", dir);
+		const client = new OrchestratorClient();
+		onTestFinished(async () => {
+			try {
+				if (await client.isRunning()) expect(await client.shutdownDaemon()).toEqual({ ok: true });
+			} finally {
+				rmSync(dir, { recursive: true, force: true });
+			}
+		});
+		const sessionFile = join(dir, "session.jsonl");
+		const dueAt = Date.now() - MINUTE;
+		writeFileSync(
+			sessionFile,
+			JSON.stringify({ type: "custom", customType: WAKEUP_ENTRY, data: wakeup("invalid-id", dueAt) }),
+		);
+
+		if (!(await client.ensureDaemon())) await waitFor(async () => expect(await client.isRunning()).toBe(true));
+		await client.holdWakeups({
+			sessionFile,
+			cwd: dir,
+			holder: { pid: process.pid, startedAt: 0 },
+			wakeups: [wakeup("wkept0001", dueAt)],
+		});
+
+		expect(readFileSync(join(dir, "wakeups.log"), "utf8")).toContain(
+			'Skipped a wake-up whose id bluclawd did not generate: "invalid-id"',
+		);
+	});
+
 	it("skips malformed records in the session log and still cancels the valid wake-up", () => {
 		const dir = mkdtempSync(join(tmpdir(), "bluclawd-wakeups-"));
 		const f = fixture(dir, readPendingWakeups);
