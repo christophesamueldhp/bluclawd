@@ -29,7 +29,7 @@ import {
 	submitCommand,
 	watchTasks,
 } from "./report.ts";
-import { EnableNeeded, serve, tailscaleInfo } from "./tailscale.ts";
+import { EnableNeeded, serve, type TailscaleInfo, tailscaleInfo } from "./tailscale.ts";
 
 function message(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
@@ -50,7 +50,16 @@ async function upToDateDaemon(): Promise<{ client: OrchestratorClient } | { erro
 	return { client };
 }
 
-async function show(result: RemoteResult, ctx: ExtensionCommandContext): Promise<void> {
+function warnFunnel(ctx: ExtensionCommandContext, tailscale: TailscaleInfo): void {
+	if (tailscale.funnel) {
+		ctx.ui.notify(
+			`Tailscale Funnel is on for https://${tailscale.dnsName}. Remote control refuses requests through Funnel and from tagged devices. Connect from a user-owned device on your tailnet.`,
+			"warning",
+		);
+	}
+}
+
+async function show(result: RemoteResult, ctx: ExtensionCommandContext, knownTailscale?: TailscaleInfo): Promise<void> {
 	if (!result.listening) {
 		ctx.ui.notify(
 			`Remote control could not listen on 127.0.0.1:${result.port}: ${result.listenError ?? "unknown error"}. ` +
@@ -67,7 +76,7 @@ async function show(result: RemoteResult, ctx: ExtensionCommandContext): Promise
 		]
 			.filter(Boolean)
 			.join("\n");
-	const tailscale = await tailscaleInfo(result.port);
+	const tailscale = knownTailscale ?? (await tailscaleInfo(result.port));
 	if (!tailscale.installed) {
 		const code = `${result.code.slice(0, 3)} ${result.code.slice(3)}`;
 		ctx.ui.notify(
@@ -111,12 +120,7 @@ async function show(result: RemoteResult, ctx: ExtensionCommandContext): Promise
 			return;
 		}
 	}
-	if (tailscale.funnel) {
-		ctx.ui.notify(
-			`Tailscale Funnel is on for ${url}: remote control is reachable from the public internet, not only your tailnet. Turn it off with \`tailscale funnel --https=443 off\`.`,
-			"warning",
-		);
-	}
+	if (!knownTailscale) warnFunnel(ctx, tailscale);
 	ctx.ui.notify(pairing(url), "info");
 }
 
@@ -197,13 +201,15 @@ export const USAGE =
 	"(pair a new phone, paired phones, start at login, turn off)";
 
 async function menu(client: OrchestratorClient, status: RemoteResult, ctx: ExtensionCommandContext): Promise<void> {
+	const tailscale = status.listening ? await tailscaleInfo(status.port) : undefined;
+	if (tailscale) warnFunnel(ctx, tailscale);
 	const deps = autostartDeps();
 	const startAtLogin = deps.platform === "darwin" ? `Start at login: ${autostartOn(deps) ? "on" : "off"}` : undefined;
 	const phones = `Paired phones (${status.devices.length})…`;
 	const items = [PAIR, phones, ...(startAtLogin ? [startAtLogin] : []), OFF];
 	const picked = await ctx.ui.select("Remote control is on", items);
 	if (picked === undefined) return;
-	if (picked === PAIR) await show(status.listening ? await client.remote({ action: "pair" }) : status, ctx);
+	if (picked === PAIR) await show(status.listening ? await client.remote({ action: "pair" }) : status, ctx, tailscale);
 	else if (picked === phones) await devices(client, ctx);
 	else if (picked === OFF) await turnOff(client, status.port, ctx);
 	else if (picked === startAtLogin) await toggleStartAtLogin(ctx);
