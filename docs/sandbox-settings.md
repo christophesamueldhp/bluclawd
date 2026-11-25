@@ -34,7 +34,7 @@ What bluclawd adds before it hands the config to `srt`:
 | `credentials.files` | Plus bluclawd's server directories, pi's `auth.json`, and `bluclawd/accounts.json`, as `deny` |
 | `credentials.envVars` | Forces `deny` for `EXA_API_KEY` in sandboxed shells |
 | `filesystem.denyRead` | Plus every `Read(<path>)` deny rule |
-| `filesystem.denyWrite` | Plus every `Edit(<path>)` and `Write(<path>)` deny rule, and pi's agent directory (`~/.pi/agent`, or `$PI_CODING_AGENT_DIR`), by every spelling through its symlinks; no `allowWrite` reopens it. On Linux a symlink on the way that lies in a writable path can still be swapped |
+| `filesystem.denyWrite` | Plus every `Edit(<path>)` and `Write(<path>)` deny rule, protected project paths, and pi's agent directory (`~/.pi/agent`, or `$PI_CODING_AGENT_DIR`) by every spelling through its symlinks. `allowWrite` cannot reopen the agent directory. On Linux a symlink on the way that lies in a writable path can still be swapped |
 | `filesystem.allowWrite` | Plus the working directory and the temp directory |
 | Everything else | Sent as written |
 
@@ -54,7 +54,7 @@ relative path against pi's own working directory.
 - `/sandbox status`: show the current runtime state and any startup failure, without writing settings.
 
 The command changes only `enabled`; configure domains, filesystem rules and credentials in
-`settings.json`. Enabling without a policy adds no deny rules or allowed domains. Unreadable
+`settings.json`. The sandbox applies the built-in protections even with empty lists. Unreadable
 or malformed global settings are not overwritten. If activation fails, the setting stays on
 and the model's shell commands remain blocked until the configuration is fixed or the sandbox is disabled.
 
@@ -155,6 +155,13 @@ only and drop a trailing `/**`. A read glob whose first component is a wildcard,
 
 A leading `/` in `allowWrite`, `denyRead`, or `denyWrite` names an absolute path.
 File deny rules in `permissions.deny` follow the [permissions syntax](../README.md#permissions).
+
+bluclawd protects `.pi/`, `.agents/`, `.git/hooks`, `.git/config`, `.vscode/`, `.idea/`,
+`.claude/` and `.mcp.json` in the working directory before those paths exist. A run's shell
+uses its worktree as the working directory. An exact entry such as `.agents` in the global
+`allowWrite` list removes that bluclawd deny. An entry for `.` leaves every protected path in
+place. Any other deny still applies, including the run shell's Git protections and the
+runtime's own write protections.
 
 Always protected from writes, even inside the project: shell rc files (`.bashrc`, `.zshrc`,
 `.profile`, …), `.gitconfig`, `.gitmodules`, `.ripgreprc`, `.mcp.json`, `.git/hooks`,
