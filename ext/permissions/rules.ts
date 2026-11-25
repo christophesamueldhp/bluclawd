@@ -46,6 +46,7 @@ function verbFor(tool: string): string | undefined {
 
 const COVERING_VERBS: Record<string, string[]> = {
 	Write: ["edit"],
+	Edit: ["read", "write"],
 	Grep: ["read"],
 	Find: ["read"],
 	Ls: ["read"],

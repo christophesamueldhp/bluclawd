@@ -615,11 +615,13 @@ blocked it:
 
 Rules come from `~/.pi/agent/settings.json` and the project's `.pi/settings.json`
 (read only when the project is trusted); the two lists add up, so a project cannot
-drop your global rules. In the syntax, `Bash(npm test *)` is `npm test` alone or with
-arguments; `*` stays within a path segment and `**` crosses them; `Edit(...)`
-also covers write and `Read(...)` also covers grep, find and ls; `//path` is
-absolute, `~/path` is home, anything else is relative to the working directory;
-`WebFetch(domain:x.com)`, `WebSearch(...)`, `Subagent` or `Subagent(explorer)`, and MCP tools as `mcp__server`,
+drop your global rules. `Bash(npm test *)` matches `npm test` with or without
+arguments. A `*` stays within a path segment and `**` crosses path segments.
+`Edit(...)` also covers `write`. `Read(...)` also covers `grep`, `find` and `ls`.
+Both `Read(...)` and `Write(...)` cover `edit` because it reads and writes the file.
+`//path` is absolute, `~/path` is relative to home, and other paths are relative to
+the working directory. The syntax also supports `WebFetch(domain:x.com)`,
+`WebSearch(...)`, `Subagent` or `Subagent(explorer)`, and MCP rules such as `mcp__server`,
 `mcp__server__*`, `mcp__server__tool`, `Mcp(server:*)` or `Mcp(server:tool)`. The web rules apply
 to bluclawd's own `websearch` and `webfetch` (each of a fetch's URLs is checked), and the MCP
 rules to the tools of the servers pi connects. MCP is pi's own (`mcp.json`, `/mcp`), every MCP call
