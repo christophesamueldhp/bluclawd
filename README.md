@@ -313,8 +313,10 @@ settings); the phone reaches it over [Tailscale](https://tailscale.com), never t
 internet. Once, on the Mac, install Tailscale and log in, then run `/remote-control` in any pi
 session. It offers to run `tailscale serve --bg 7878`, which gives this Mac an HTTPS address on
 your tailnet, and shows that address, a QR code and a 6-digit code under it (10 minutes, single
-use), drawn in the terminal's own colours. On the phone, also on your tailnet, scan it with the
-camera.
+use), drawn in the terminal's own colours. Scan it with the camera on a user-owned phone connected
+to your tailnet. The daemon refuses requests through Tailscale Funnel and requires Tailscale's
+user identity for remote requests. Tailscale omits that identity for tagged devices. A browser
+on the Mac can still open the app at `http://127.0.0.1:7878` or the configured port.
 
 On an iPhone, Safari then shows how to add the app to the Home Screen (Share, then Add to Home
 Screen). Open it from there and type the 6-digit code, once. iOS gives a Home Screen app storage of

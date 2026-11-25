@@ -95,9 +95,9 @@ const COLS_MIN = 20;
 const COLS_MAX = 200;
 const TAIL_BYTES = 8192;
 const TAIL_LINES = 10;
-/** Guards against DNS rebinding, since a page whose name resolves to 127.0.0.1 still sends its own name. Tailscale
- *  serve forwards the tailnet name; a loopback name is the Mac itself. */
-const HOST_PATTERN = /^(127\.0\.0\.1|localhost|\[::1\]|([a-z0-9-]+\.)+ts\.net)(:\d+)?$/i;
+/** A page whose name resolves to 127.0.0.1 still sends its own name. */
+const LOOPBACK_HOST = /^(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/i;
+const TAILNET_HOST = /^([a-z0-9-]+\.)+ts\.net(:\d+)?$/i;
 
 const CONTENT_TYPES: Record<string, string> = {
 	".html": "text/html; charset=utf-8",
@@ -360,7 +360,19 @@ async function handle(
 	req: IncomingMessage,
 	res: ServerResponse,
 ): Promise<void> {
-	if (!HOST_PATTERN.test(req.headers.host ?? "")) return json(res, 421, { error: "bad_host" });
+	const host = req.headers.host ?? "";
+	const local = LOOPBACK_HOST.test(host);
+	if (!local && !TAILNET_HOST.test(host)) return json(res, 421, { error: "bad_host" });
+	if ("tailscale-funnel-request" in req.headers) {
+		return json(res, 403, { error: "funnel_refused", message: "Remote control refuses Tailscale Funnel requests." });
+	}
+	const login = req.headers["tailscale-user-login"];
+	if (!local && (typeof login !== "string" || !login.trim())) {
+		return json(res, 403, {
+			error: "tailnet_identity_required",
+			message: "Remote control requires a Tailscale user identity. Tagged devices are refused.",
+		});
+	}
 	const url = new URL(req.url ?? "/", "http://localhost");
 	const path = url.pathname;
 	if (!path.startsWith("/api/")) return serveStatic(deps.webDir, url, req, res);
@@ -677,7 +689,7 @@ function sessionsInIdOrder(deps: RemoteDeps): RemoteSession[] {
 	return remoteSessions(deps.listInstances()).sort((a, b) => a.id.localeCompare(b.id));
 }
 
-export function startRemoteServer(deps: RemoteDeps, port: number, host = "127.0.0.1"): Promise<RemoteServer> {
+export function startRemoteServer(deps: RemoteDeps, port: number): Promise<RemoteServer> {
 	const events = new RemoteEvents({
 		sessionsSignature: () => JSON.stringify([deps.terminalOpen(), sessionsInIdOrder(deps)]),
 		session: (id) => phoneSession(deps, id),
@@ -696,7 +708,7 @@ export function startRemoteServer(deps: RemoteDeps, port: number, host = "127.0.
 	});
 	return new Promise((resolve, reject) => {
 		server.once("error", reject);
-		server.listen(port, host, () => {
+		server.listen(port, "127.0.0.1", () => {
 			server.off("error", reject);
 			const address = server.address();
 			resolve({
