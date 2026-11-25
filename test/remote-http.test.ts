@@ -18,6 +18,7 @@ import { RemoteStore } from "../daemon/remote/pairing.ts";
 import type { SessionSpec } from "../daemon/remote/spawn.ts";
 import type { StatusLine } from "../daemon/remote/statusline.ts";
 import type { ServerSupervisor } from "../daemon/supervisor.ts";
+import { readinessMs } from "./helpers/heartbeats.ts";
 import { testRegistry } from "./helpers/registry.ts";
 import { waitFor } from "./helpers/wait-for.ts";
 import { validP256dh } from "./support/push.ts";
@@ -364,7 +365,9 @@ describe("remote HTTP API", () => {
 				});
 			});
 			req.on("error", reject);
-			req.setTimeout(1500, () => req.destroy(new Error("The server waited for the rest of the pairing body")));
+			req.setTimeout(readinessMs, () =>
+				req.destroy(new Error("The server waited for the rest of the pairing body")),
+			);
 			req.flushHeaders();
 			if (chunk) req.write(chunk);
 		});

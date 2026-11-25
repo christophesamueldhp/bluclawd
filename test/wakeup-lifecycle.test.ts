@@ -310,6 +310,21 @@ describe("restoring from the session log", () => {
 		rmSync(root, { recursive: true, force: true });
 	});
 
+	it("skips and logs malformed records without losing valid wake-ups on restore", () => {
+		const f = fixture({
+			entries: [
+				{ type: "custom", customType: WAKEUP_ENTRY, data: null },
+				{ type: "custom", customType: WAKEUP_END_ENTRY, data: null },
+				{ type: "custom", customType: WAKEUP_ENTRY, data: { id: "wbad00001", dueAt: NOW + MINUTE } },
+				scheduled("wkept0001", NOW + MINUTE),
+			],
+		});
+		expect(f.lifecycle.restore("resume")).toBe(1);
+		expect(wakeups.list().map(({ id }) => id)).toEqual(["wkept0001"]);
+		expect(f.lines).toHaveLength(3);
+		expect(f.lines.every((line) => line.startsWith("Skipped a wake-up"))).toBe(true);
+	});
+
 	it("leaves the Delete's word in place when a fork records the cancel in its own log", () => {
 		const dir = mkdtempSync(join(tmpdir(), "bluclawd-wakeups-"));
 		vi.stubEnv("PI_SERVER_DIR", dir);

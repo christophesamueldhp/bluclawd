@@ -111,8 +111,9 @@ could list it, read it and connect to both sockets. So on Linux the sandbox does
 directory that exists when it starts; one made, or removed and made again, while it runs stays
 readable to it.
 
-One setting lifts the read deny. `filesystem.disabled: true` drops every file rule, the credential
-denies included, so a command can then read the server directory. The socket deny still holds on
+`filesystem.disabled: true` turns off the shell sandbox's read and write protections, including
+those for the server directories, credential files, protected project paths, and background job
+output. `/sandbox status` reports when filesystem protection is off. The socket deny still holds on
 macOS, where it is a network rule, and on Linux, where every Unix socket is refused.
 
 Sockets bluclawd does not own, such as your tmux or Docker, follow these keys as written. ADR-0012 records why.
@@ -146,7 +147,7 @@ code, not JSON, so these keys do nothing from settings. They are `allowPlaintext
 | `allowRead` | paths | Readable again inside a `denyRead` area; wins over `denyRead`. For example, deny `~/.ssh` and allow `~/.ssh/known_hosts` |
 | `allowWrite` | paths | Writable (plus the working directory and temp) |
 | `denyWrite` | paths | Not writable even inside `allowWrite`; wins over `allowWrite` |
-| `allowGitConfig` | boolean | Removes the runtime's `.git/config` deny. bluclawd's deny still requires an exact global `allowWrite` entry |
+| `allowGitConfig` | boolean | Removes the runtime's `.git/config` deny. bluclawd still denies writes to the working directory's `.git/config` |
 
 Paths take globs: `*`, `**`, `?`, `[abc]`. On Linux, `allowWrite` and `denyWrite` take literal
 paths and accept a trailing `/**` for a directory and its contents. A read glob needs a literal
@@ -159,14 +160,15 @@ File deny rules in `permissions.deny` follow the [permissions syntax](../README.
 
 bluclawd protects `.pi/`, `.agents/`, `.git/hooks`, `.git/config`, `.vscode/`, `.idea/`,
 `.claude/` and `.mcp.json` in the working directory before those paths exist. A run's shell
-uses its worktree as the working directory. An exact entry such as `.agents` in the global
-`allowWrite` list removes that bluclawd deny. An entry for `.` leaves every protected path in
-place. Any other deny still applies to shells, including the run shell's Git protections and the
-runtime's own write protections. Pi's built-in file-tool rule follows the `allowWrite` exception.
+uses its worktree as the working directory. An exact entry in the global `allowWrite` list can
+release `.pi/`, `.agents/`, or `.claude/` outside its `commands/` and `agents/` directories. These
+releases apply to shells and pi's `write` and `edit`. An entry for `.` leaves every protected path
+in place. The run shell's Git protections and the runtime's other write denies still apply.
 
 The runtime protects these paths from shell writes even inside `allowWrite`: shell rc files (`.bashrc`, `.zshrc`,
 `.profile`, …), `.gitconfig`, `.gitmodules`, `.ripgreprc`, `.mcp.json`, `.git/hooks`,
-`.vscode`, `.idea`, `.claude/commands`, and `.claude/agents`. It protects `.git/config` by default.
+`.vscode`, `.idea`, `.claude/commands`, and `.claude/agents`. bluclawd protects `.git/config`
+even when `allowWrite` names it.
 
 ## Credentials
 
@@ -230,7 +232,7 @@ Each of these reopens something the sandbox otherwise closes. Turn one on only f
 
 | Key | What it gives up |
 |---|---|
-| `filesystem.disabled: true` | Every file rule, including the deny rules' paths, `credentials.files`, the read deny on [bluclawd's server directories](#bluclawds-own-sockets), the write deny on pi's agent directory and the always-protected names. `.env` becomes readable |
+| `filesystem.disabled: true` | Every shell filesystem rule, including the deny rules' paths, `credentials.files`, the read deny on [bluclawd's server directories](#bluclawds-own-sockets), and write protection for pi's agent directory, protected project paths, and background job output |
 | `network.allowAllUnixSockets: true` | All Unix sockets, except [bluclawd's own](#bluclawds-own-sockets). A Docker socket gives full control of the machine. On Linux the sandbox does not start with it |
 | `allowAppleEvents: true` | macOS: commands can launch other apps with `open` and script them; those apps run outside the sandbox |
 | `enableWeakerNetworkIsolation: true` | macOS: access to `com.apple.trustd.agent`, a possible way to send data out |

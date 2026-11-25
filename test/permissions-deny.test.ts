@@ -31,13 +31,14 @@ describe("denyRules: global and project lists", () => {
 		expect(denyRules(sm({ deny: ["Read(~/.ssh/**)"] }, { deny: [] }))).toEqual(["Read(~/.ssh/**)"]);
 	});
 
-	it("reads a lone rule as one rule, never as its letters, and skips what is not a rule", () => {
-		expect(denyRules(sm({ deny: "Bash(rm *)" }, { deny: ["WebFetch", 3] }))).toEqual(["Bash(rm *)", "WebFetch"]);
+	it("ignores each malformed list in full", () => {
+		expect(denyRules(sm({ deny: "Bash(rm *)" }, { deny: ["WebFetch", 3] }))).toEqual([]);
+		expect(denyRules(sm({ deny: ["WebFetch"] }, { deny: [false] }))).toEqual(["WebFetch"]);
 	});
 
 	it("names each scope whose deny is not a list of rules", () => {
 		expect(invalidDenyScopes(sm({ deny: { rm: true } }, { deny: ["WebFetch"] }))).toEqual(["global"]);
-		expect(invalidDenyScopes(sm({ deny: "Bash(rm *)" }, undefined))).toEqual([]);
+		expect(invalidDenyScopes(sm({ deny: "Bash(rm *)" }, { deny: ["WebFetch", 3] }))).toEqual(["global", "project"]);
 	});
 
 	it("reads nothing but deny", () => {
@@ -501,6 +502,13 @@ describe("the extension", () => {
 		expect((await call("read", { path: ".env" }))?.block).toBe(true);
 	});
 
+	it("folds the case of protected paths when the working directory cannot be inspected", async () => {
+		const { handlers, ctx, call } = load({ permissions: { deny: ["Read(.env)"] } });
+		await handlers.session_start({}, ctx);
+		ctx.cwd = join(ctx.cwd, "missing-directory");
+		expect((await call("read", { path: ".ENV" }))?.block).toBe(true);
+	});
+
 	it("blocks a denied call with the rule, and runs everything else", async () => {
 		const { handlers, ctx, call } = load({ permissions: { deny: ["Bash(rm *)"] } });
 		await handlers.session_start({}, ctx);
@@ -562,11 +570,18 @@ describe("the extension", () => {
 			JSON.stringify({ sandbox: { filesystem: { allowWrite: [".pi"] } } }),
 		);
 		const { handlers, ctx, call } = load({
-			sandbox: { enabled: true, filesystem: { allowWrite: [".", join(dir, ".vscode")] } },
+			sandbox: {
+				enabled: true,
+				filesystem: { allowWrite: [".", join(dir, ".vscode"), ".mcp.json", ".claude", ".agents"] },
+			},
 		});
 		await handlers.session_start({}, ctx);
 		for (const tool of ["write", "edit"]) {
-			expect(await call(tool, { path: ".vscode/settings.json" })).toBeUndefined();
+			expect(await call(tool, { path: ".agents/settings.json" })).toBeUndefined();
+			expect(await call(tool, { path: ".claude/settings.json" })).toBeUndefined();
+			expect(await call(tool, { path: ".claude/commands/fixture.md" })).toMatchObject({ block: true });
+			expect(await call(tool, { path: ".claude/agents/fixture.md" })).toMatchObject({ block: true });
+			expect(await call(tool, { path: ".vscode/settings.json" })).toMatchObject({ block: true });
 			expect(await call(tool, { path: ".pi/settings.json" })).toMatchObject({ block: true });
 			expect(await call(tool, { path: ".mcp.json" })).toMatchObject({ block: true });
 		}
@@ -664,17 +679,6 @@ describe("the extension", () => {
 		for (const path of ["/drafts/a.md", "archive/a.md", "notes/a.md"]) {
 			expect(await call("read", { path })).toBeUndefined();
 		}
-	});
-
-	it("blocks with a lone rule, and warns when deny is not rules at all", async () => {
-		const lone = load({ permissions: { deny: "Bash(rm *)" } });
-		await lone.handlers.session_start({}, lone.ctx);
-		expect((await lone.call("bash", { command: "rm x" }))?.block).toBe(true);
-		expect(lone.notes).toEqual([]);
-
-		const broken = load({ permissions: { deny: { rm: true } } });
-		await broken.handlers.session_start({}, broken.ctx);
-		expect(broken.notes).toEqual(["global permissions.deny is not a list of rules: none of it is in effect"]);
 	});
 
 	it("judges a monitor as bash, and a websearch batch query by query", async () => {

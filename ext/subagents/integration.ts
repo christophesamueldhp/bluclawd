@@ -25,6 +25,7 @@ import { processAlive } from "../../daemon/processes.ts";
 import { runMachMarker } from "../../daemon/run-members.ts";
 import { withCommandPrefix } from "../_shared/command-prefix.ts";
 import { evaluateToolCallDeny } from "../permissions/policy.ts";
+import { workingDirectoryFoldsCase } from "../permissions/rules.ts";
 import { PROTECTED_PROJECT_PATHS } from "../sandbox/config.ts";
 import { prepareRunContainment, runProcesses } from "../sandbox/run-containment.ts";
 import { sandboxStatus, sandboxWraps, wrapExec } from "../sandbox/runtime.ts";
@@ -182,6 +183,7 @@ async function integrate(
 ): Promise<ToolResult> {
 	const target = resolveTarget(deps, scope, params.agent, params.halted === true);
 	if (typeof target === "string") return result(target, true);
+	const generations = target.runs.map(({ record }) => ({ runId: record.runId, generation: record.generation }));
 	for (const run of target.runs) {
 		const why = await unsettled(deps, scope, run, target.asIs);
 		if (why) return result(`Not integrated: ${why}`, true);
@@ -199,6 +201,11 @@ async function integrate(
 	try {
 		const runTree = await worktreeTree(workspace);
 		const whyNotStillSettled = (): string | undefined => {
+			for (const { runId, generation } of generations) {
+				if (deps.directory.find(scope, runId)?.record.generation !== generation) {
+					return `a run in ${label} changed generation; call again to review its latest changes.`;
+				}
+			}
 			for (const run of target.runs) {
 				const why = processesLeft(run.runDir) ?? occupant(deps, scope, workspace);
 				if (why) return why;
@@ -217,9 +224,10 @@ async function integrate(
 		const source = baseline.source;
 		const changes = await treeChanges(source, baseline.gitDir, base, runTree);
 		if (changes.length === 0) return result(`Nothing to integrate: ${label} changed nothing since its baseline.`);
+		const foldsCase = workingDirectoryFoldsCase(source);
 		const protectedPaths = new Map<string, string>();
 		for (const { path } of changes) {
-			const root = protectedRoot(path);
+			const root = protectedRoot(path, foldsCase);
 			if (root) protectedPaths.set(path, root);
 		}
 		const protectedList = [...protectedPaths.keys()].map(escapedPath);
@@ -301,7 +309,9 @@ async function integrate(
 		}
 		const unapproved = writes
 			.map(({ path }) => path)
-			.filter((path) => protectedRoot(path) !== undefined && (skippedProtected || !protectedPaths.has(path)));
+			.filter(
+				(path) => protectedRoot(path, foldsCase) !== undefined && (skippedProtected || !protectedPaths.has(path)),
+			);
 		if (unapproved.length > 0) {
 			return result(
 				`Not integrated: the merge would also write protected paths: ${unapproved.map(escapedPath).join(", ")}.`,
@@ -321,6 +331,17 @@ async function integrate(
 			);
 		}
 
+		if (
+			ctx.hasUI &&
+			protectedPaths.size > 0 &&
+			(!worktreeInPlace(workspace, ownerDir) || (await worktreeTree(workspace)) !== runTree)
+		) {
+			return result(
+				`Not integrated: the run's worktree changed while ${label} was being integrated. Call again.`,
+				true,
+			);
+		}
+		if (signal?.aborted) return result(`Integration cancelled. No changes from ${label} were applied.`);
 		const unsettledBeforeApply = whyNotStillSettled();
 		if (unsettledBeforeApply) return result(`Not integrated: ${unsettledBeforeApply}`, true);
 		const checkoutChangedSince = (tree: string) => checkoutTreeSync(workspace, base, linkFreePaths) !== tree;
@@ -366,9 +387,9 @@ async function integrate(
 	}
 }
 
-function protectedRoot(path: string): string | undefined {
-	const lower = path.toLowerCase();
-	const root = PROTECTED_PROJECT_PATHS.find((entry) => lower === entry || lower.startsWith(`${entry}/`));
+function protectedRoot(path: string, foldsCase: boolean): string | undefined {
+	const comparable = foldsCase ? path.toLowerCase() : path;
+	const root = PROTECTED_PROJECT_PATHS.find((entry) => comparable === entry || comparable.startsWith(`${entry}/`));
 	return root && path.slice(0, root.length);
 }
 

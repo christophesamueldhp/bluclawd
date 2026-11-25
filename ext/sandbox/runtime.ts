@@ -38,7 +38,10 @@ export interface SandboxEngine {
 	reset(): Promise<void>;
 }
 
-export type SandboxStatus = { kind: "off" } | { kind: "ready" } | { kind: "unavailable"; reason: string };
+export type SandboxStatus =
+	| { kind: "off" }
+	| { kind: "ready"; filesystemDisabled?: true }
+	| { kind: "unavailable"; reason: string };
 
 const state = sharedRef<{
 	status: SandboxStatus;
@@ -192,7 +195,7 @@ async function start(
 		}
 		const globRefusal = linuxGlobRefusal(sandbox.getLinuxGlobPatternWarnings());
 		if (globRefusal) return markSandboxUnavailable(globRefusal);
-		return setStatus({ kind: "ready" });
+		return setStatus(checked.filesystem.disabled ? { kind: "ready", filesystemDisabled: true } : { kind: "ready" });
 	} catch (error) {
 		return markSandboxUnavailable(error instanceof Error ? error.message : String(error));
 	}

@@ -126,7 +126,20 @@ export const PROTECTED_PROJECT_PATHS = [
 
 export function protectedProjectWritePaths(cwd: string, home: string, globalAllowWrite: readonly string[]): string[] {
 	const released = new Set(globalAllowWrite.map((path) => resolve(sandboxPath(path, cwd, home))));
-	return PROTECTED_PROJECT_PATHS.map((path) => resolve(cwd, path)).filter((path) => !released.has(path));
+	return PROTECTED_PROJECT_PATHS.flatMap((entry) => {
+		const path = resolve(cwd, entry);
+		if (!released.has(path)) return [path];
+		if (entry === ".pi" || entry === ".agents") return [];
+		if (entry === ".claude") return [join(path, "commands"), join(path, "agents")];
+		return [path];
+	});
+}
+
+export function sandboxWriteDenies(cwd: string, home: string, globalAllowWrite: readonly string[]) {
+	return [...protectedProjectWritePaths(cwd, home, globalAllowWrite), taskOutputRoot(home)].map((path) => ({
+		path,
+		literal: true as const,
+	}));
 }
 
 const MAX_LINKS = 40;
@@ -240,11 +253,7 @@ export function runtimeConfig(
 			allowWrite: paths([cwd, tmp, ...settings.allowWrite]),
 			denyWrite: [
 				...paths([...settings.denyWrite, ...ownAgentDirs], ruled(["Edit", "Write"])),
-				...protectedProjectWritePaths(cwd, home, settings.allowWrite).map((path) => ({
-					path,
-					literal: true as const,
-				})),
-				{ path: taskOutputRoot(home), literal: true },
+				...sandboxWriteDenies(cwd, home, settings.allowWrite),
 			],
 		},
 	};
