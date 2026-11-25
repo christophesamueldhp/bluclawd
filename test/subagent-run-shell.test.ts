@@ -172,6 +172,16 @@ describe.skipIf(!supported)("a run's shell, on the operating system", () => {
 		expect(readFileSync(join(runShellTmp(agentDir, scope.runId), "t.txt"), "utf8")).toBe("temp");
 	});
 
+	it.each([".pi", ".agents", ".vscode", ".idea", ".claude"])("cannot create %s in the worktree", async (path) => {
+		expect((await run(`mkdir ${path}`)).code).not.toBe(0);
+		expect(existsSync(join(worktree, path))).toBe(false);
+	});
+
+	it("cannot create .mcp.json in the worktree", async () => {
+		expect((await run("touch .mcp.json")).code).not.toBe(0);
+		expect(existsSync(join(worktree, ".mcp.json"))).toBe(false);
+	});
+
 	it("writes nothing outside its worktree: the checkout, a sibling, through a link, or a temp directory others share", async () => {
 		const escapes = [
 			`printf x > ${quote(join(source, "escaped.txt"))}`,

@@ -1,7 +1,8 @@
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { getAgentDir, type SettingsManager } from "@earendil-works/pi-coding-agent";
+import type { FilesystemPathEntry } from "@anthropic-ai/sandbox-runtime";
+import { getAgentDir, SettingsManager } from "@earendil-works/pi-coding-agent";
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { nativeHelperPath } from "../daemon/run-members.ts";
 import { pathRule } from "../ext/permissions/rules.ts";
@@ -25,11 +26,16 @@ const none = {
 	written: {},
 };
 
+const projectDenies = [".pi", ".agents", ".git/hooks", ".git/config", ".vscode", ".idea", ".claude", ".mcp.json"].map(
+	(path) => ({ path: `/proj/${path}`, literal: true }),
+);
+
 describe("the reaper helper", () => {
 	it("is compiled where the sandbox denies writes, so no sandboxed command can replace it", () => {
 		const { path } = nativeHelperPath("reaper", getAgentDir());
 		const config = runtimeConfig(none, [], "/proj", "/home/u", "/tmp/x", [], agentDirs());
-		const covers = (dirs: string[]) => dirs.some((dir) => path.startsWith(`${dir}/`));
+		const covers = (dirs: FilesystemPathEntry[]) =>
+			dirs.some((dir) => path.startsWith(`${typeof dir === "string" ? dir : dir.path}/`));
 		expect(covers(config.filesystem.allowWrite)).toBe(false);
 		expect(covers(config.filesystem.denyWrite)).toBe(true);
 	});
@@ -139,6 +145,19 @@ describe("globalSandboxSetting", () => {
 		} as unknown as SettingsManager;
 		expect(globalSandboxSetting(sm)).toEqual({ kind: "off" });
 	});
+
+	it("does not release a protected path listed in project settings", () => {
+		const global = { sandbox: { enabled: true, filesystem: { allowWrite: ["."] } } };
+		const project = { sandbox: { filesystem: { allowWrite: [".agents"] } } };
+		const sm = SettingsManager.fromStorage(
+			{ withLock: (scope, read) => read(JSON.stringify(scope === "global" ? global : project)) },
+			{ projectTrusted: true },
+		);
+		const setting = globalSandboxSetting(sm);
+		if (setting.kind !== "on") throw new Error(setting.kind);
+		const config = runtimeConfig(setting.settings, [], "/proj", "/home/u", "/tmp/x", [], []);
+		expect(config.filesystem.denyWrite).toEqual(projectDenies);
+	});
 });
 
 describe("runtimeConfig", () => {
@@ -168,7 +187,7 @@ describe("runtimeConfig", () => {
 	it("drops a trailing separator, which srt refuses on a deny glob", async () => {
 		const config = runtimeConfig(none, ["Read(**/secrets/)", "Read(~/)", "Edit(//)"], cwd, home, tmp, [], []);
 		expect(config.filesystem.denyRead).toEqual(["/proj/**/secrets", "/home/u"]);
-		expect(config.filesystem.denyWrite).toEqual(["/"]);
+		expect(config.filesystem.denyWrite).toEqual(["/", ...projectDenies]);
 		expect(typeof (await checkRuntimeConfig(config))).toBe("object");
 	});
 
@@ -182,7 +201,7 @@ describe("runtimeConfig", () => {
 			[],
 			[],
 		);
-		expect(config.filesystem.denyWrite).toEqual(["/proj/.git/**", "/proj/**/.env*"]);
+		expect(config.filesystem.denyWrite).toEqual(["/proj/.git/**", "/proj/**/.env*", ...projectDenies]);
 		expect(config.filesystem.denyRead).toEqual([]);
 	});
 
@@ -208,7 +227,7 @@ describe("runtimeConfig", () => {
 			filesystem: {
 				denyRead: ["/home/u/**/.env*"],
 				allowWrite: ["/proj", "/tmp/x", "/home/u/.npm", "/Volumes/x"],
-				denyWrite: ["/etc"],
+				denyWrite: ["/etc", ...projectDenies],
 			},
 		});
 	});
@@ -346,7 +365,7 @@ describe("srt's own settings", () => {
 				allowRead: ["~/.ssh/known_hosts"],
 				denyRead: ["/proj/**/.env*", "/home/u/.ssh"],
 				allowWrite: ["/proj", "/tmp/x"],
-				denyWrite: [],
+				denyWrite: projectDenies,
 			},
 		});
 	});
