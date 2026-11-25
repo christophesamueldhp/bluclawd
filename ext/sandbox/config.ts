@@ -6,6 +6,8 @@ import { defaultServerDir, getServerDir } from "../../daemon/paths.ts";
 import { resolveDenyRulePath } from "../_shared/deny-rule-path.ts";
 import { pathRule } from "../permissions/rules.ts";
 
+export const SANDBOX_SETTINGS_CHANGED = "bluclawd:sandbox-settings-changed";
+
 export interface SandboxSettings {
 	allowedDomains: string[];
 	allowWrite: string[];

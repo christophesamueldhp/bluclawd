@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { SandboxRuntimeConfig } from "@anthropic-ai/sandbox-runtime";
-import { getAgentDir, type SessionStartEvent } from "@earendil-works/pi-coding-agent";
+import { createEventBus, type EventBus, getAgentDir, type SessionStartEvent } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import permissions from "../ext/permissions/index.ts";
 import sandbox, { networkAsker } from "../ext/sandbox/index.ts";
@@ -137,6 +137,7 @@ describe("the extension", () => {
 		const handlers: Record<string, (event: any, ctx: any) => Promise<any>> = {};
 		const notes: string[] = [];
 		const commands: Record<string, any> = {};
+		const events = createEventBus();
 		sandbox({
 			registerCommand: (name: string, command: any) => {
 				commands[name] = command;
@@ -144,6 +145,7 @@ describe("the extension", () => {
 			on: (event: string, handler: any) => {
 				handlers[event] = handler;
 			},
+			events,
 		} as any);
 		const ctx = {
 			cwd: dir,
@@ -160,7 +162,26 @@ describe("the extension", () => {
 			handlers.session_start({ type: "session_start", reason }, ctx);
 		const call = (toolName: string) => handlers.tool_call({ toolName, input: { command: "Get-Content x" } }, ctx);
 		const command = (args = "") => commands.sandbox.handler(args, ctx);
-		return { handlers, ctx, notes, start, call, command, commands };
+		return { handlers, ctx, notes, start, call, command, commands, events };
+	}
+
+	function loadPermissions(ctx: ReturnType<typeof load>["ctx"], events: EventBus) {
+		const handlers: Record<string, (event: any, ctx: any) => Promise<any>> = {};
+		permissions({
+			on: (event: string, handler: any) => {
+				handlers[event] = handler;
+			},
+			registerShortcut: () => {},
+			events,
+		} as any);
+		const permissionsCtx = {
+			...ctx,
+			ui: { ...ctx.ui, setStatus: () => {}, theme: { fg: (_c: string, t: string) => t } },
+		};
+		return {
+			start: (event: SessionStartEvent) => handlers.session_start(event, permissionsCtx),
+			call: (toolName: string, path: string) => handlers.tool_call({ toolName, input: { path } }, permissionsCtx),
+		};
 	}
 
 	it("enables immediately and preserves global settings and sandbox policy", async () => {
@@ -188,6 +209,25 @@ describe("the extension", () => {
 		expect(JSON.parse(readFileSync(join(getAgentDir(), "settings.json"), "utf8"))).toEqual({
 			sandbox: { ...settings.sandbox, enabled: false },
 		});
+	});
+
+	it("adds and removes built-in file tool rules when /sandbox changes", async () => {
+		const { handlers, ctx, events, command } = load({ permissions: { deny: ["Write(notes.txt)"] } });
+		const permission = loadPermissions(ctx, events);
+		const event: SessionStartEvent = { type: "session_start", reason: "startup" };
+		await permission.start(event);
+		await handlers.session_start(event, ctx);
+		const credential = join(getAgentDir(), "auth.json");
+
+		expect(await permission.call("write", ".pi/settings.json")).toBeUndefined();
+		expect(await permission.call("read", credential)).toBeUndefined();
+		await command("on");
+		expect(await permission.call("write", ".pi/settings.json")).toMatchObject({ block: true });
+		expect(await permission.call("read", credential)).toMatchObject({ block: true });
+		await command("off");
+		expect(await permission.call("write", ".pi/settings.json")).toBeUndefined();
+		expect(await permission.call("read", credential)).toBeUndefined();
+		expect(await permission.call("write", "notes.txt")).toMatchObject({ block: true });
 	});
 
 	it("shows status without writing or waiting, including without a UI", async () => {
@@ -421,21 +461,11 @@ describe("the extension", () => {
 	});
 
 	it("still warns when permissions read the same session_start's settings first", async () => {
-		const { handlers, ctx, notes } = load({});
-		const permissionHandlers: Record<string, (event: any, ctx: any) => Promise<any>> = {};
-		permissions({
-			on: (event: string, handler: any) => {
-				permissionHandlers[event] = handler;
-			},
-			registerShortcut: () => {},
-		} as any);
-		const permissionsCtx = {
-			...ctx,
-			ui: { ...ctx.ui, setStatus: () => {}, theme: { fg: (_c: string, t: string) => t } },
-		};
+		const { handlers, ctx, events, notes } = load({});
+		const permission = loadPermissions(ctx, events);
 		writeFileSync(join(getAgentDir(), "settings.json"), "{ not json");
-		const event = { type: "session_start", reason: "startup" };
-		await permissionHandlers.session_start(event, permissionsCtx);
+		const event: SessionStartEvent = { type: "session_start", reason: "startup" };
+		await permission.start(event);
 		await handlers.session_start(event, ctx);
 		const path = join(getAgentDir(), "settings.json");
 		expect(notes).toEqual([
