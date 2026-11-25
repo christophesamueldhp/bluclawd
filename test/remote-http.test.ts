@@ -1,5 +1,5 @@
 import { appendFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { request } from "node:http";
+import { type RequestOptions, request } from "node:http";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { type SessionInfo, SessionManager } from "@earendil-works/pi-coding-agent";
@@ -260,34 +260,72 @@ describe("remote HTTP API", () => {
 		expect((await fetch(`${base}/missing.js`)).status).toBe(404);
 	});
 
-	it("answers only a loopback or tailnet Host, so a rebound DNS name reaches nothing", async () => {
-		const get = (path: string, host: string) =>
-			new Promise<{ status: number; body: string }>((resolve, reject) => {
-				const req = request(`${base}${path}`, { headers: { host } }, (res) => {
-					let body = "";
-					res.on("data", (chunk) => {
-						body += chunk;
-					});
-					res.on("end", () => resolve({ status: res.statusCode ?? 0, body }));
+	function remoteRequest(path: string, options: RequestOptions, body?: string) {
+		return new Promise<{ status: number; body: string }>((resolve, reject) => {
+			const req = request(`${base}${path}`, options, (res) => {
+				let body = "";
+				res.on("data", (chunk) => {
+					body += chunk;
 				});
-				req.on("error", reject);
-				req.end();
+				res.on("end", () => resolve({ status: res.statusCode ?? 0, body }));
 			});
+			req.on("error", reject);
+			req.end(body);
+		});
+	}
+
+	it.each([
+		{ origin: "Tailscale Funnel", headers: { "tailscale-funnel-request": "?1" }, error: "funnel_refused" },
+		{ origin: "outside the tailnet", headers: {}, error: "tailnet_identity_required" },
+	])("refuses requests from $origin before routing or authenticating", async ({ headers, error }) => {
+		const forwarded = { host: "mac.tail1234.ts.net", ...headers };
+		for (const path of ["/", "/app.js", "/api/sessions", "/api/events"]) {
+			const res = await remoteRequest(path, { headers: forwarded });
+			expect([res.status, JSON.parse(res.body)], path).toEqual([403, expect.objectContaining({ error })]);
+		}
+		const res = await remoteRequest("/api/pair", { method: "POST", headers: { ...forwarded, ...json } });
+		expect([res.status, JSON.parse(res.body)]).toEqual([403, expect.objectContaining({ error })]);
+	});
+
+	it("refuses a Funnel-marked request even with a loopback Host and a login header", async () => {
+		const headers = {
+			host: "localhost",
+			"tailscale-funnel-request": "?1",
+			"tailscale-user-login": "phone@example.com",
+		};
+		expect((await remoteRequest("/", { headers })).status).toBe(403);
+	});
+
+	it("lets an identified tailnet phone pair and keeps requiring its token for the API", async () => {
+		const headers = { host: "mac.tail1234.ts.net", "tailscale-user-login": "phone@example.com" };
+		expect((await remoteRequest("/api/sessions", { headers })).status).toBe(401);
+		const { code } = store.createCode();
+		const res = await remoteRequest(
+			"/api/pair",
+			{ method: "POST", headers: { ...headers, ...json } },
+			JSON.stringify({ code, deviceName: "Phone" }),
+		);
+		expect(res.status).toBe(200);
+		const { token } = JSON.parse(res.body);
+		if (typeof token !== "string") throw new Error("Pairing did not return a token");
+		expect((await remoteRequest("/api/sessions", { headers: { ...headers, ...auth(token) } })).status).toBe(200);
+	});
+
+	it("answers only a loopback or tailnet Host, so a rebound DNS name reaches nothing", async () => {
 		const port = server.port;
-		for (const host of [
-			`127.0.0.1:${port}`,
-			"127.0.0.1",
-			`localhost:${port}`,
-			"LOCALHOST",
-			`[::1]:${port}`,
-			"mac.tail1234.ts.net",
-			"Mac.Tail1234.TS.NET:443",
-		]) {
-			expect((await get("/", host)).status, host).toBe(200);
+		for (const host of [`127.0.0.1:${port}`, "127.0.0.1", `localhost:${port}`, "LOCALHOST", `[::1]:${port}`]) {
+			expect((await remoteRequest("/", { headers: { host } })).status, host).toBe(200);
+		}
+		const identity = { "tailscale-user-login": "phone@example.com" };
+		for (const host of ["mac.tail1234.ts.net", "Mac.Tail1234.TS.NET:443"]) {
+			expect((await remoteRequest("/", { headers: { host, ...identity } })).status, host).toBe(200);
 		}
 		for (const host of ["evil.example", `evil.example:${port}`, "ts.net", "mac.ts.net.evil.example", "127.0.0.2"]) {
 			for (const path of ["/", "/app.js", "/api/sessions", "/api/events?token=x"]) {
-				expect(await get(path, host), `${host}${path}`).toEqual({ status: 421, body: '{"error":"bad_host"}' });
+				expect(await remoteRequest(path, { headers: { host, ...identity } }), `${host}${path}`).toEqual({
+					status: 421,
+					body: '{"error":"bad_host"}',
+				});
 			}
 		}
 	});

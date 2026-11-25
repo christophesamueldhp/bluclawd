@@ -113,8 +113,8 @@ highlights, or OpenAI, which returns a short cited answer plus its sources throu
 login pi already holds, whatever model you chat with. Store the Exa key like any other pi key.
 Run **`/login`**, pick *Sign in with an API key*, then **Exa**. Pi saves it in `~/.pi/agent/auth.json`, where a
 `!command` value, for example `"!security find-generic-password -ws exa"`, keeps it in the Keychain
-instead; `EXA_API_KEY` is the fallback. The key stays inside pi, out of the shell commands it runs. Each OpenAI search spends
-Codex quota. `webfetch` reads up to 10 known URLs through Exa. **`/web`** opens a searchable
+instead. Pi can also use `EXA_API_KEY` for search. Sandboxed shells run without that variable.
+Each OpenAI search spends Codex quota. `webfetch` reads up to 10 known URLs through Exa. **`/web`** opens a searchable
 picker for the provider and for the Codex model OpenAI searches run on; **`/web exa`**,
 **`/web openai`** and **`/web status`** work without it. The model can pick a provider per call;
 when one cannot answer (rate limit, outage, no credits, no login), the other one does, and the
@@ -313,8 +313,10 @@ settings); the phone reaches it over [Tailscale](https://tailscale.com), never t
 internet. Once, on the Mac, install Tailscale and log in, then run `/remote-control` in any pi
 session. It offers to run `tailscale serve --bg 7878`, which gives this Mac an HTTPS address on
 your tailnet, and shows that address, a QR code and a 6-digit code under it (10 minutes, single
-use), drawn in the terminal's own colours. On the phone, also on your tailnet, scan it with the
-camera.
+use), drawn in the terminal's own colours. Scan it with the camera on a user-owned phone connected
+to your tailnet. The daemon refuses requests through Tailscale Funnel and requires Tailscale's
+user identity for remote requests. Tailscale omits that identity for tagged devices. A browser
+on the Mac can still open the app at `http://127.0.0.1:7878` or the configured port.
 
 On an iPhone, Safari then shows how to add the app to the Home Screen (Share, then Add to Home
 Screen). Open it from there and type the 6-digit code, once. iOS gives a Home Screen app storage of
@@ -693,6 +695,7 @@ It is read when a session starts, so `/reload` after editing:
 ```
 
 - Reads: everything except what a `Read` rule denies, plus `filesystem.denyRead`.
+- Sandboxed shells cannot read `auth.json` or `bluclawd/accounts.json` in pi's agent directory.
 - Writes: the working directory and the temp directory, plus `filesystem.allowWrite`; never
   what an `Edit` or `Write` rule denies. Under the sandbox a `Write` rule blocks `>>` too. On
   Linux a file a `Read` rule or `filesystem.denyRead` denies is not writable either, `>>` included.
