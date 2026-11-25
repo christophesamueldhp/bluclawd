@@ -313,10 +313,6 @@ function bearer(req: IncomingMessage): string {
 	return header.startsWith("Bearer ") ? header.slice(7) : "";
 }
 
-function requestToken(req: IncomingMessage, url: URL): string {
-	return url.pathname === "/api/events" ? (url.searchParams.get("token") ?? "") : bearer(req);
-}
-
 function refuseChangesWithoutTerminal(
 	deps: RemoteDeps,
 	req: IncomingMessage,
@@ -388,7 +384,7 @@ async function handle(
 		return claimed(res, deps.store.claim(String(body.code ?? ""), name));
 	}
 
-	const token = requestToken(req, url);
+	const token = bearer(req);
 	const device = deps.store.authenticate(token);
 	if (!device) return json(res, 401, { error: "unauthorized" });
 

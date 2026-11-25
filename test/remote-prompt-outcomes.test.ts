@@ -159,7 +159,10 @@ describe("a prompt's outcome, back to the phone by its id", () => {
 	async function watch(session: string) {
 		const controller = new AbortController();
 		streams.push(controller);
-		const res = await fetch(`${base}/api/events?token=${token}&session=${session}`, { signal: controller.signal });
+		const res = await fetch(`${base}/api/events?session=${session}`, {
+			headers: { authorization: `Bearer ${token}` },
+			signal: controller.signal,
+		});
 		const reader = res.body!.getReader();
 		let received = "";
 		const until = async (needle: string) => {
