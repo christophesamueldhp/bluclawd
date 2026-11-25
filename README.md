@@ -705,6 +705,8 @@ It is read when a session starts, so `/reload` after editing:
 - Writes: the working directory and the temp directory, plus `filesystem.allowWrite`; never
   what an `Edit` or `Write` rule denies. Under the sandbox a `Write` rule blocks `>>` too. On
   Linux a file a `Read` rule or `filesystem.denyRead` denies is not writable either, `>>` included.
+- On Linux, an unsupported filesystem glob such as `Write(**/.env*)` makes the sandbox
+  unavailable. `/sandbox status` names the pattern. Use a literal path such as `Write(.env)`.
 - The shell protects `.pi/`, `.agents/`, `.git/hooks`, `.git/config`, `.vscode/`, `.idea/`,
   `.claude/` and `.mcp.json` in the working directory, including a run's worktree. To remove
   a bluclawd deny, name that exact path in the global `sandbox.filesystem.allowWrite` list.

@@ -165,6 +165,20 @@ describe.skipIf(!supported)("a run's shell, on the operating system", () => {
 		rmSync(root, { recursive: true, force: true });
 	});
 
+	it.skipIf(process.platform !== "linux")("refuses the run's shell if Linux cannot enforce a write rule", async () => {
+		const restricted = createRunShell(
+			{ ...scope, deny: [...scope.deny, { cwd: source, rules: ["Write(**/.env*)"] }] },
+			{ agentDir, user: () => ({ kind: "off" }), ask: async () => false },
+		);
+		try {
+			await expect(restricted.exec("true", worktree, { onData: () => {} })).rejects.toThrow(
+				/\*\*\/\.env\*.*literal path/,
+			);
+		} finally {
+			await SandboxManager.reset();
+		}
+	});
+
 	it("runs a command in the worktree, writing there and in its own temp directory", async () => {
 		const result = await run('printf made > made.txt && printf temp > "$TMPDIR/t.txt" && cat a.txt');
 		expect(result).toMatchObject({ code: 0, output: "one\n" });

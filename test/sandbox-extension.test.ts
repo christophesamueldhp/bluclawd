@@ -110,6 +110,7 @@ describe("the extension", () => {
 			updateConfig: (config) => {
 				configs.push(config);
 			},
+			getLinuxGlobPatternWarnings: () => [],
 			wrapWithSandbox: async (command) => command,
 			annotateStderrWithSandboxFailures: (_id, stderr) => stderr,
 			cleanupAfterCommand: () => {},
@@ -162,6 +163,22 @@ describe("the extension", () => {
 		const command = (args = "") => commands.sandbox.handler(args, ctx);
 		return { handlers, ctx, notes, start, call, command, commands };
 	}
+
+	it("reports unsupported filesystem globs in /sandbox and refuses bash and monitor", async () => {
+		engine.getLinuxGlobPatternWarnings = () => [join(dir, "**/.env*")];
+		const { start, command, notes, call } = load({
+			sandbox: { enabled: true },
+			permissions: { deny: ["Write(**/.env*)"] },
+		});
+		await start();
+		notes.length = 0;
+		await command("status");
+		const reason = expect.stringMatching(/Sandbox cannot run.*\*\*\/\.env\*.*literal path/);
+		expect(notes).toEqual([reason]);
+		for (const tool of ["bash", "monitor"]) {
+			expect(await call(tool)).toEqual({ block: true, reason });
+		}
+	});
 
 	it("enables immediately and preserves global settings and sandbox policy", async () => {
 		const settings = { theme: "system", sandbox: { enabled: false, network: { allowedDomains: ["github.com"] } } };

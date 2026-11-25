@@ -2,7 +2,13 @@ import { randomUUID } from "node:crypto";
 import type { SandboxRuntimeConfig } from "@anthropic-ai/sandbox-runtime";
 import { sharedRef } from "../_shared/global-state.ts";
 import type { BackgroundExec } from "../background-bash/background-bash.ts";
-import { agentDirs, checkRuntimeConfig, swappableLinks, type UncheckedRuntimeConfig } from "./config.ts";
+import {
+	agentDirs,
+	checkRuntimeConfig,
+	linuxGlobRefusal,
+	swappableLinks,
+	type UncheckedRuntimeConfig,
+} from "./config.ts";
 import { reapDescendantsOfSimpleCommand } from "./reaper.ts";
 
 export type Exec = BackgroundExec;
@@ -19,6 +25,7 @@ export interface SandboxEngine {
 	canBlockUnixSockets(seccomp: SandboxRuntimeConfig["seccomp"]): Promise<boolean>;
 	initialize(config: SandboxRuntimeConfig, ask: AskNetwork, enableLogMonitor: boolean): Promise<void>;
 	updateConfig(config: SandboxRuntimeConfig): void;
+	getLinuxGlobPatternWarnings(): string[];
 	wrapWithSandbox(
 		command: string,
 		binShell: string | undefined,
@@ -171,18 +178,20 @@ async function start(
 		if (state.get().initialized) {
 			if (await unixSocketsOpen()) return markSandboxUnavailable(NO_UNIX_SOCKET_FILTER);
 			sandbox.updateConfig(checked);
-			return setStatus({ kind: "ready" });
+		} else {
+			if (!sandbox.isSupportedPlatform()) return markSandboxUnavailable(`the sandbox does not support ${platform}`);
+			const { errors } = sandbox.checkDependencies();
+			if (errors.length > 0) {
+				return markSandboxUnavailable(
+					platform === "linux" ? `${errors.join("; ")}: ${LINUX_HINT}` : errors.join("; "),
+				);
+			}
+			if (await unixSocketsOpen()) return markSandboxUnavailable(NO_UNIX_SOCKET_FILTER);
+			await sandbox.initialize(checked, (request) => state.get().ask(request), true);
+			state.set({ ...state.get(), initialized: true });
 		}
-		if (!sandbox.isSupportedPlatform()) return markSandboxUnavailable(`the sandbox does not support ${platform}`);
-		const { errors } = sandbox.checkDependencies();
-		if (errors.length > 0) {
-			return markSandboxUnavailable(
-				platform === "linux" ? `${errors.join("; ")}: ${LINUX_HINT}` : errors.join("; "),
-			);
-		}
-		if (await unixSocketsOpen()) return markSandboxUnavailable(NO_UNIX_SOCKET_FILTER);
-		await sandbox.initialize(checked, (request) => state.get().ask(request), true);
-		state.set({ ...state.get(), initialized: true });
+		const globRefusal = linuxGlobRefusal(sandbox.getLinuxGlobPatternWarnings());
+		if (globRefusal) return markSandboxUnavailable(globRefusal);
 		return setStatus({ kind: "ready" });
 	} catch (error) {
 		return markSandboxUnavailable(error instanceof Error ? error.message : String(error));

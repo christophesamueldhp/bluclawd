@@ -36,6 +36,7 @@ function fakeEngine(overrides: Partial<SandboxEngine> = {}): SandboxEngine & { c
 		updateConfig: () => {
 			calls.push("updateConfig");
 		},
+		getLinuxGlobPatternWarnings: () => [],
 		wrapWithSandbox: async (command) => `sandboxed(${command})`,
 		annotateStderrWithSandboxFailures: (_id, stderr) => stderr,
 		cleanupAfterCommand: () => {

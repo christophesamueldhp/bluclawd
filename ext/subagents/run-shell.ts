@@ -2,7 +2,6 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, relative, sep } from "node:path";
-import type { SandboxRuntimeConfig } from "@anthropic-ai/sandbox-runtime";
 import { type BashOperations, createLocalBashOperations } from "@earendil-works/pi-coding-agent";
 import { runMachMarker } from "../../daemon/run-members.ts";
 import { resolveDenyRulePath } from "../_shared/deny-rule-path.ts";
@@ -10,6 +9,7 @@ import { taskOutputRoot } from "../background-bash/output-path.ts";
 import { pathRule } from "../permissions/rules.ts";
 import {
 	checkRuntimeConfig,
+	linuxGlobRefusal,
 	protectedProjectWritePaths,
 	type SandboxSetting,
 	sandboxPath,
@@ -141,7 +141,12 @@ export function createRunShell(
 		mkdirSync(runShellTmp(options.agentDir, scope.runId), { recursive: true, mode: 0o700 });
 		// The runtime gives commands this as their TMPDIR, instead of a temp directory every sandbox shares.
 		process.env.CLAUDE_CODE_TMPDIR = runShellTmp(options.agentDir, scope.runId);
-		await SandboxManager.initialize(checked as SandboxRuntimeConfig, options.ask, false);
+		await SandboxManager.initialize(checked, options.ask, false);
+		const globRefusal = linuxGlobRefusal(SandboxManager.getLinuxGlobPatternWarnings());
+		if (globRefusal) {
+			await SandboxManager.reset();
+			return globRefusal;
+		}
 		return { contained: { helper: containment.helper, marker: runMachMarker(scope.runId) }, hiddenEnv };
 	};
 	const exec: Exec = async (command, cwd, execOptions) => {
