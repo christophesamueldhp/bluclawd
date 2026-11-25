@@ -1,9 +1,10 @@
 import { lstatSync, mkdirSync, readFileSync, readlinkSync, realpathSync, writeFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
-import type { SandboxRuntimeConfig } from "@anthropic-ai/sandbox-runtime";
+import type { FilesystemPathEntry, SandboxRuntimeConfig } from "@anthropic-ai/sandbox-runtime";
 import { getAgentDir, type SettingsManager } from "@earendil-works/pi-coding-agent";
 import { defaultServerDir, getServerDir } from "../../daemon/paths.ts";
 import { resolveDenyRulePath } from "../_shared/deny-rule-path.ts";
+import { taskOutputRoot } from "../background-bash/output-path.ts";
 import { pathRule } from "../permissions/rules.ts";
 
 export interface SandboxSettings {
@@ -23,7 +24,7 @@ export type SandboxSetting =
 
 export interface UncheckedRuntimeConfig {
 	network: { allowedDomains: string[]; [key: string]: unknown };
-	filesystem: { denyRead: string[]; allowWrite: string[]; denyWrite: string[]; [key: string]: unknown };
+	filesystem: { denyRead: string[]; allowWrite: string[]; denyWrite: FilesystemPathEntry[]; [key: string]: unknown };
 	[key: string]: unknown;
 }
 
@@ -219,7 +220,10 @@ export function runtimeConfig(
 			...(filesystem as object),
 			denyRead: paths(settings.denyRead, ruled(["Read"])),
 			allowWrite: paths([cwd, tmp, ...settings.allowWrite]),
-			denyWrite: paths([...settings.denyWrite, ...ownAgentDirs], ruled(["Edit", "Write"])),
+			denyWrite: [
+				...paths([...settings.denyWrite, ...ownAgentDirs], ruled(["Edit", "Write"])),
+				{ path: taskOutputRoot(home), literal: true },
+			],
 		},
 	};
 }

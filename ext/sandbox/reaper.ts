@@ -9,10 +9,9 @@ import { existsSync, mkdirSync, renameSync } from "node:fs";
 import { dirname } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { promisify } from "node:util";
-import { type BashOperations, getAgentDir } from "@earendil-works/pi-coding-agent";
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { nativeHelperPath } from "../../daemon/run-members.ts";
-
-type Exec = BashOperations["exec"];
+import type { Exec } from "./runtime.ts";
 
 const execFileAsync = promisify(execFile);
 const REAP_WAIT_MS = 2000;

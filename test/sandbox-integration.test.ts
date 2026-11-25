@@ -4,6 +4,8 @@ import { join } from "node:path";
 import { SandboxManager } from "@anthropic-ai/sandbox-runtime";
 import { createLocalBashOperations } from "@earendil-works/pi-coding-agent";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { BackgroundJobRegistry } from "../ext/background-bash/background-bash.ts";
+import { monitorShellExec } from "../ext/background-bash/monitor-shell.ts";
 import { agentDirs, runtimeConfig } from "../ext/sandbox/config.ts";
 import { networkAsker } from "../ext/sandbox/index.ts";
 import { setSandboxEngine, startSandbox, stopSandbox, wrapExec } from "../ext/sandbox/runtime.ts";
@@ -26,9 +28,10 @@ describe.skipIf(!supported)(
 			() => undefined,
 		);
 
-		async function run(command: string): Promise<{ code: number | null; output: string }> {
+		async function run(command: string, env?: NodeJS.ProcessEnv): Promise<{ code: number | null; output: string }> {
 			let output = "";
 			const { exitCode } = await exec(command, dir, {
+				env,
 				onData: (data) => {
 					output += data.toString();
 				},
@@ -122,6 +125,51 @@ describe.skipIf(!supported)(
 			const { output } = await run('echo "token=$BLUCLAWD_IT_TOKEN"');
 			expect(output).toContain("token=");
 			expect(output).not.toContain("hunter3");
+		});
+
+		it("keeps task output readable and refuses write access inside a writable directory", async () => {
+			const home = join(dir, "task-home[fixture]");
+			const previousHome = process.env.HOME;
+			mkdirSync(home);
+			process.env.HOME = home;
+			try {
+				await start();
+				const registry = new BackgroundJobRegistry();
+				const lines: string[] = [];
+				const job = registry.start({
+					command: "echo monitor-event; echo diagnostic >&2",
+					cwd: dir,
+					kind: "monitor",
+					exec: wrapExec(
+						monitorShellExec(() => undefined),
+						() => undefined,
+					),
+					onLines: (batch) => lines.push(...batch),
+				});
+				const outputFile = job.outputFile;
+				if (!outputFile) throw new Error("Monitor has no output file");
+				await expect.poll(() => readFileSync(outputFile, "utf8")).toContain("[exited with code 0]");
+				expect(lines).toContain("monitor-event");
+				expect(lines).not.toContain("diagnostic");
+				const env = { ...process.env, JOB_OUTPUT: outputFile };
+				const cat = await run('cat "$JOB_OUTPUT"', env);
+				expect(cat.code).toBe(0);
+				expect(cat.output).toContain("monitor-event\n");
+				expect(cat.output).toContain("diagnostic\n");
+				const tail = await run('tail -n 1 "$JOB_OUTPUT"', env);
+				expect(tail.code).toBe(0);
+				expect(tail.output).toContain("[exited with code 0]");
+				const writeAccess = await run(
+					`node -e 'const fs = require("node:fs"); fs.closeSync(fs.openSync(process.env.JOB_OUTPUT, "r+"));'`,
+					env,
+				);
+				expect(writeAccess.code).not.toBe(0);
+				expect(writeAccess.output).toMatch(/EACCES|EROFS|EPERM/);
+			} finally {
+				if (previousHome === undefined) delete process.env.HOME;
+				else process.env.HOME = previousHome;
+				await start();
+			}
 		});
 
 		it("denies reads of pi's auth file and bluclawd's saved accounts", async () => {

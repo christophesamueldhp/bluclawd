@@ -1,9 +1,11 @@
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import type { FilesystemPathEntry } from "@anthropic-ai/sandbox-runtime";
 import { getAgentDir, type SettingsManager } from "@earendil-works/pi-coding-agent";
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { nativeHelperPath } from "../daemon/run-members.ts";
+import { BackgroundJobRegistry } from "../ext/background-bash/background-bash.ts";
 import { pathRule } from "../ext/permissions/rules.ts";
 import {
 	agentDirs,
@@ -25,13 +27,39 @@ const none = {
 	written: {},
 };
 
+const taskOutputDeny = { path: "/home/u/.bluclawd-task-output", literal: true };
+
+const covers = (file: string | undefined, dirs: FilesystemPathEntry[]) =>
+	dirs.some((dir) => file?.startsWith(`${typeof dir === "string" ? dir : dir.path}/`));
+
+it("keeps default task output in a write-denied directory outside the project and temp roots", async () => {
+	const root = realpathSync(mkdtempSync(join(tmpdir(), "bluclawd-task-output-")));
+	const home = join(root, "home");
+	const cwd = join(root, "project");
+	const tmp = join(root, "temp");
+	mkdirSync(home);
+	vi.stubEnv("HOME", home);
+	const registry = new BackgroundJobRegistry();
+	try {
+		const job = registry.start({ command: "status", cwd, exec: async () => ({ exitCode: 0 }) });
+		const config = runtimeConfig(none, [], cwd, home, tmp, [], []);
+		expect(covers(job.outputFile, [home])).toBe(true);
+		expect(covers(job.outputFile, config.filesystem.allowWrite)).toBe(false);
+		expect(covers(job.outputFile, config.filesystem.denyWrite)).toBe(true);
+		expect(covers(job.outputFile, config.filesystem.denyRead)).toBe(false);
+		await expect.poll(() => registry.get(job.id)?.exit?.code).toBe(0);
+	} finally {
+		vi.unstubAllEnvs();
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
 describe("the reaper helper", () => {
 	it("is compiled where the sandbox denies writes, so no sandboxed command can replace it", () => {
 		const { path } = nativeHelperPath("reaper", getAgentDir());
 		const config = runtimeConfig(none, [], "/proj", "/home/u", "/tmp/x", [], agentDirs());
-		const covers = (dirs: string[]) => dirs.some((dir) => path.startsWith(`${dir}/`));
-		expect(covers(config.filesystem.allowWrite)).toBe(false);
-		expect(covers(config.filesystem.denyWrite)).toBe(true);
+		expect(covers(path, config.filesystem.allowWrite)).toBe(false);
+		expect(covers(path, config.filesystem.denyWrite)).toBe(true);
 	});
 });
 
@@ -168,7 +196,7 @@ describe("runtimeConfig", () => {
 	it("drops a trailing separator, which srt refuses on a deny glob", async () => {
 		const config = runtimeConfig(none, ["Read(**/secrets/)", "Read(~/)", "Edit(//)"], cwd, home, tmp, [], []);
 		expect(config.filesystem.denyRead).toEqual(["/proj/**/secrets", "/home/u"]);
-		expect(config.filesystem.denyWrite).toEqual(["/"]);
+		expect(config.filesystem.denyWrite).toEqual(["/", taskOutputDeny]);
 		expect(typeof (await checkRuntimeConfig(config))).toBe("object");
 	});
 
@@ -182,7 +210,7 @@ describe("runtimeConfig", () => {
 			[],
 			[],
 		);
-		expect(config.filesystem.denyWrite).toEqual(["/proj/.git/**", "/proj/**/.env*"]);
+		expect(config.filesystem.denyWrite).toEqual(["/proj/.git/**", "/proj/**/.env*", taskOutputDeny]);
 		expect(config.filesystem.denyRead).toEqual([]);
 	});
 
@@ -208,7 +236,7 @@ describe("runtimeConfig", () => {
 			filesystem: {
 				denyRead: ["/home/u/**/.env*"],
 				allowWrite: ["/proj", "/tmp/x", "/home/u/.npm", "/Volumes/x"],
-				denyWrite: ["/etc"],
+				denyWrite: ["/etc", taskOutputDeny],
 			},
 		});
 	});
@@ -346,7 +374,7 @@ describe("srt's own settings", () => {
 				allowRead: ["~/.ssh/known_hosts"],
 				denyRead: ["/proj/**/.env*", "/home/u/.ssh"],
 				allowWrite: ["/proj", "/tmp/x"],
-				denyWrite: [],
+				denyWrite: [taskOutputDeny],
 			},
 		});
 	});

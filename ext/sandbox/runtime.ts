@@ -1,11 +1,11 @@
 import { randomUUID } from "node:crypto";
 import type { SandboxRuntimeConfig } from "@anthropic-ai/sandbox-runtime";
-import type { BashOperations } from "@earendil-works/pi-coding-agent";
 import { sharedRef } from "../_shared/global-state.ts";
+import type { BackgroundExec } from "../background-bash/background-bash.ts";
 import { agentDirs, checkRuntimeConfig, swappableLinks, type UncheckedRuntimeConfig } from "./config.ts";
 import { reapDescendantsOfSimpleCommand } from "./reaper.ts";
 
-export type Exec = BashOperations["exec"];
+export type Exec = BackgroundExec;
 
 export type AskNetwork = (request: { host: string; port: number | undefined }) => Promise<boolean>;
 
