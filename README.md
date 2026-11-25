@@ -512,10 +512,14 @@ The orchestrator has these tools:
   new run to read.
 - `subagent_integrate({ agent, preview?, keep?, check? })`: applies what a completed run, or a
   completed chain (`chain_…`), changed since its baseline to your checkout as it is now, keeping your
-  edits there. It applies all or nothing, through a three-way merge. A conflict applies nothing and lists the
-  paths; `keep` leaves paths you resolved yourself, `preview` applies nothing, and `check` runs a
+  edits there. It uses a three-way merge. A conflict in a selected path stops Integration and lists the
+  paths. `keep` leaves paths you resolved yourself, `preview` applies nothing, and `check` runs a
   command in the checkout afterwards to validate the combined result, as your own bash would, and
-  only while your bash tool is active. Nothing is staged or committed.
+  only while your bash tool is active. Nothing is staged or committed. If the run changed protected
+  project paths (`.pi/`, `.agents/`, `.git/hooks`, `.git/config`, `.vscode/`, `.idea/`, `.claude/` or
+  `.mcp.json`), pi lists them and asks whether to integrate everything, integrate everything else,
+  or integrate nothing. In print and JSON mode, Integration skips the protected paths and names
+  them in its result. Skipped changes stay available for later Integration.
 - `subagent_models`: the models a run can use, with auth status and supported thinking levels.
 
 Inside a run, its own `subagent_message` reaches `parent` (its orchestrator) or a sibling by name.
