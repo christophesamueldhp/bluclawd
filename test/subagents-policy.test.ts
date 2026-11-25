@@ -49,7 +49,7 @@ describe("Task 2 (M1) — Reusable read policy and Subagent deny rules", () => {
 		writeFileSync(join(outside, "id_rsa"), "PRIVATE_KEY\n", "utf8");
 		symlinkSync(join(outside, "id_rsa"), join(cwd, "linked_key"));
 
-		const rules = ["Read(.env)", "Read(secrets/**)", `Read(${outside}/**)`];
+		const rules = ["Read(.env)", "Read(secrets/**)", `Read(/${outside}/**)`];
 
 		expect(evaluateToolCallDeny(rules, "read", { path: ".env" }, cwd)?.block).toBe(true);
 		expect(evaluateToolCallDeny(rules, "read", { path: "./.env" }, cwd)?.block).toBe(true);
