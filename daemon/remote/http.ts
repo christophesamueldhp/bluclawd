@@ -40,6 +40,7 @@ import { parseSubscription } from "./webpush.ts";
 
 export interface RemoteDeps {
 	store: RemoteStore;
+	notifyPairingCodeExhausted?(): void;
 	listInstances(): InstanceSummary[];
 	send(sessionId: string, message: PaneMessage): Promise<boolean>;
 	launch(): PaneLaunch | undefined;
@@ -70,6 +71,7 @@ export interface RemoteServer {
 }
 
 export const BODY_MAX = 64 * 1024;
+const PAIR_BODY_MAX = 4 * 1024;
 export const PROMPT_MAX = 32 * 1024;
 export const IMAGES_MAX = 4;
 export const IMAGE_MAX = 2 * 1024 * 1024;
@@ -128,12 +130,19 @@ function json(res: ServerResponse, status: number, body: unknown): void {
 	res.end(JSON.stringify(body));
 }
 
-/** Reads the whole body even past the limit, so the 413 reaches a client still sending. */
-async function readJson(req: IncomingMessage, max = BODY_MAX): Promise<Record<string, unknown>> {
+async function readJson(
+	req: IncomingMessage,
+	max = BODY_MAX,
+	overflow: "drain" | "reject" = "drain",
+): Promise<Record<string, unknown>> {
+	if (overflow === "reject" && Number(req.headers["content-length"]) > max) {
+		throw new HttpError(413, "body_too_large");
+	}
 	let size = 0;
 	const chunks: Buffer[] = [];
-	for await (const chunk of req) {
+	for await (const chunk of req.iterator({ destroyOnReturn: false })) {
 		size += (chunk as Buffer).length;
+		if (size > max && overflow === "reject") throw new HttpError(413, "body_too_large");
 		if (size <= max) chunks.push(chunk as Buffer);
 	}
 	if (size > max) throw new HttpError(413, "body_too_large");
@@ -345,9 +354,13 @@ function serveStatic(webDir: string, url: URL, req: IncomingMessage, res: Server
 	else res.end(body);
 }
 
-function claimed(res: ServerResponse, result: ClaimResult): void {
-	if ("token" in result) json(res, 200, { token: result.token });
-	else json(res, 400, { error: result.error });
+function claimed(deps: RemoteDeps, res: ServerResponse, result: ClaimResult): void {
+	if ("token" in result) {
+		json(res, 200, { token: result.token });
+		return;
+	}
+	json(res, 400, { error: "invalid_code" });
+	if (result.error === "code_attempts_exhausted") deps.notifyPairingCodeExhausted?.();
 }
 
 async function handle(
@@ -378,10 +391,13 @@ async function handle(
 	}
 
 	if (path === "/api/pair" && req.method === "POST") {
-		const body = await readJson(req);
+		const body = await readJson(req, PAIR_BODY_MAX, "reject");
 		const name = String(body.deviceName ?? "");
-		if (typeof body.secret === "string") return claimed(res, deps.store.claimSecret(body.secret, name));
-		return claimed(res, deps.store.claim(String(body.code ?? ""), name));
+		const result =
+			typeof body.secret === "string"
+				? deps.store.claimSecret(body.secret, name)
+				: deps.store.claim(String(body.code ?? ""), name);
+		return claimed(deps, res, result);
 	}
 
 	const token = bearer(req);
@@ -698,8 +714,10 @@ export function startRemoteServer(deps: RemoteDeps, port: number): Promise<Remot
 				res.end();
 				return;
 			}
-			if (error instanceof HttpError) json(res, error.status, { error: error.message });
-			else json(res, 500, { error: "internal_error" });
+			if (error instanceof HttpError) {
+				if (error.status === 413 && !req.complete) res.setHeader("connection", "close");
+				json(res, error.status, { error: error.message });
+			} else json(res, 500, { error: "internal_error" });
 		});
 	});
 	return new Promise((resolve, reject) => {

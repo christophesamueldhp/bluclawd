@@ -44,8 +44,10 @@ describe("remote HTTP API", () => {
 	let renders: Array<{ id: string; cwd: string; cols: number }>;
 	let changed: unknown[][];
 	let registry: ServerSupervisor;
+	const notifyPairingCodeExhausted = vi.fn();
 
 	beforeEach(async () => {
+		notifyPairingCodeExhausted.mockClear();
 		vi.mocked(SessionManager.list).mockReset().mockResolvedValue([]);
 		dir = mkdtempSync(join(tmpdir(), "bluclawd-remote-http-"));
 		const web = join(dir, "web");
@@ -81,6 +83,7 @@ describe("remote HTTP API", () => {
 		server = await startRemoteServer(
 			{
 				store,
+				notifyPairingCodeExhausted,
 				webDir: web,
 				listInstances: () => instances,
 				send: async (id, message) => {
@@ -343,15 +346,46 @@ describe("remote HTTP API", () => {
 		expect(res.status).toBe(401);
 	});
 
-	it("rejects a wrong pairing code", async () => {
-		store.createCode();
-		const res = await fetch(`${base}/api/pair`, {
-			method: "POST",
-			headers: json,
-			body: JSON.stringify({ code: "abc", deviceName: "x" }),
+	it.each([
+		{ framing: "declared length", headers: { "content-length": 4097 }, chunk: "" },
+		{ framing: "chunked", headers: { "transfer-encoding": "chunked" }, chunk: "x".repeat(4097) },
+	])("rejects an oversized $framing pairing body before the upload ends", async ({ headers, chunk }) => {
+		const result = await new Promise<{ status: number | undefined; body: string }>((resolve, reject) => {
+			const req = request(`${base}/api/pair`, { method: "POST", headers: { ...json, ...headers } }, (res) => {
+				let body = "";
+				res.setEncoding("utf8");
+				res.on("data", (chunk) => {
+					body += chunk;
+				});
+				res.on("error", reject);
+				res.on("end", () => {
+					resolve({ status: res.statusCode, body });
+					req.destroy();
+				});
+			});
+			req.on("error", reject);
+			req.setTimeout(1500, () => req.destroy(new Error("The server waited for the rest of the pairing body")));
+			req.flushHeaders();
+			if (chunk) req.write(chunk);
 		});
-		expect(res.status).toBe(400);
-		expect(await res.json()).toEqual({ error: "invalid_code" });
+		expect(result).toEqual({ status: 413, body: '{"error":"body_too_large"}' });
+	});
+
+	it("returns the same error for wrong, expired and exhausted codes, and tells the Mac once at the cap", async () => {
+		const submit = (code: string) =>
+			remoteRequest("/api/pair", { method: "POST", headers: json }, JSON.stringify({ code }));
+		const invalid = { status: 400, body: '{"error":"invalid_code"}' };
+		const expired = store.createCode(Date.now() - 11 * 60_000);
+		expect(await submit(expired.code)).toEqual(invalid);
+		const { code } = store.createCode();
+		const wrong = code === "000000" ? "111111" : "000000";
+		for (let attempt = 0; attempt < 4; attempt++) expect(await submit(wrong)).toEqual(invalid);
+		expect(notifyPairingCodeExhausted).not.toHaveBeenCalled();
+		expect(await submit(wrong)).toEqual(invalid);
+		expect(notifyPairingCodeExhausted).toHaveBeenCalledTimes(1);
+		expect(await submit(code)).toEqual(invalid);
+		expect(await submit(wrong)).toEqual(invalid);
+		expect(notifyPairingCodeExhausted).toHaveBeenCalledTimes(1);
 	});
 
 	it("pairs with the QR code's secret, once", async () => {

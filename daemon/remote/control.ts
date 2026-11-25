@@ -1,3 +1,4 @@
+import { execFile } from "node:child_process";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type {
@@ -28,6 +29,18 @@ const TERMINAL_REFRESH_MS = 1500;
 const TERMINAL_STALE_MS = 5000;
 const PROBE_REFRESH_MS = 1000;
 const PROBE_STALE_MS = 5000;
+
+function notifyPairingCodeExhausted(): void {
+	if (process.platform !== "darwin") return;
+	execFile(
+		"/usr/bin/osascript",
+		[
+			"-e",
+			'display notification "Too many incorrect attempts. Run /remote-control for a new pairing code." with title "bluclawd"',
+		],
+		() => {},
+	);
+}
 
 function savedOrLeftForNextHeartbeat(save: () => void): boolean {
 	try {
@@ -253,6 +266,7 @@ export class RemoteControl {
 			this.server = await startRemoteServer(
 				{
 					store: this.store,
+					notifyPairingCodeExhausted,
 					listInstances: () => this.list(),
 					send: this.deps.send,
 					launch: () => this.launch(),
