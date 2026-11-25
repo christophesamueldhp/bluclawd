@@ -85,19 +85,6 @@ type MonitorParams = {
 	timeout_ms?: number;
 };
 
-const shellQuote = (s: string) => `'${s.replace(/'/g, "'\\''")}'`;
-
-export function stdoutOnly(exec: BackgroundExec, prefix?: string): BackgroundExec {
-	return (command, cwd, options) => {
-		const { outputFile } = options;
-		if (!outputFile) return exec(withCommandPrefix(prefix, command), cwd, options);
-		const group = (text: string) => `{ ${text}\n} 2>>${shellQuote(outputFile)}`;
-		// The prefix goes in a group of its own, because bash parses a whole group before running it, so an alias the prefix
-		// defines would not reach a command in the same group.
-		return exec(withCommandPrefix(prefix && group(prefix), group(command)), cwd, options);
-	};
-}
-
 export function websocketExec(url: string, protocols?: string[]): BackgroundExec {
 	return (_command, _cwd, { onData, signal, timeout }) =>
 		new Promise((resolve, reject) => {
@@ -226,7 +213,8 @@ export function createMonitorTool(deps: MonitorToolDeps): ToolDefinition<typeof 
 				exec:
 					source.kind === "ws"
 						? websocketExec(source.url, source.protocols)
-						: stdoutOnly(deps.exec, deps.commandPrefix?.()),
+						: (command, cwd, options) =>
+								deps.exec(withCommandPrefix(deps.commandPrefix?.(), command), cwd, options),
 				owner: ctx?.sessionManager?.getSessionId(),
 				idPrefix: command === undefined ? "s" : "b",
 				description: params.description,

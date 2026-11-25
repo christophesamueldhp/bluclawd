@@ -714,6 +714,9 @@ It is read when a session starts, so `/reload` after editing:
   On Linux the sandbox does not start when a symlink on the way to it lies where commands may write
   (`~/.pi` linked into a dotfiles directory, with the session in `~`), since a command could swap
   the link. Replace the link with its directory, or set `PI_CODING_AGENT_DIR` to the real path.
+- Pi writes background shell and monitor output under `~/.bluclawd-task-output`. The filesystem
+  sandbox keeps this directory read-only even if `filesystem.allowWrite` includes it. Use `cat`,
+  `tail`, or pi's `read` to inspect a job's output. Jobs already running keep their output paths.
 - Network: hosts in `network.allowedDomains`. For any other host, pi asks once per host and port
   per session, the one prompt bluclawd adds. Without a UI, the host is refused.
 - Rule paths are anchored at the working directory: `Read(**/.env*)` covers `.env` files

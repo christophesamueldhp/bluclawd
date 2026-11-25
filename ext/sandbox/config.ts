@@ -4,6 +4,7 @@ import type { FilesystemPathEntry, SandboxRuntimeConfig } from "@anthropic-ai/sa
 import { getAgentDir, type SettingsManager } from "@earendil-works/pi-coding-agent";
 import { defaultServerDir, getServerDir } from "../../daemon/paths.ts";
 import { resolveDenyRulePath } from "../_shared/deny-rule-path.ts";
+import { taskOutputRoot } from "../background-bash/output-path.ts";
 import { pathRule } from "../permissions/rules.ts";
 
 export interface SandboxSettings {
@@ -241,6 +242,7 @@ export function runtimeConfig(
 					path,
 					literal: true as const,
 				})),
+				{ path: taskOutputRoot(home), literal: true },
 			],
 		},
 	};

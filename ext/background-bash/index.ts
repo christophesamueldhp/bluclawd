@@ -41,6 +41,7 @@ import {
 	TASK_EXIT_MESSAGE_TYPE,
 	type TaskExitDetails,
 } from "./monitor-events.ts";
+import { monitorShellExec } from "./monitor-shell.ts";
 import { createMonitorTool } from "./monitor-tool.ts";
 import {
 	deliverOrHold,
@@ -195,7 +196,10 @@ const backgroundBash: InlineExtension = {
 			createMonitorTool({
 				sendMessage: (message, options) => deliverOrHold(() => mainSession.sendMessage(message, options)),
 				cwd: localCwd,
-				exec: operations.exec,
+				exec: wrapExec(
+					monitorShellExec(() => shellPath),
+					() => shellPath,
+				),
 				commandPrefix: () => commandPrefix,
 			}),
 		);

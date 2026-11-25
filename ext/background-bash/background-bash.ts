@@ -1,11 +1,11 @@
 import { randomBytes } from "node:crypto";
-import { createWriteStream, mkdirSync, type WriteStream, writeFileSync } from "node:fs";
-import { tmpdir, userInfo } from "node:os";
+import { createWriteStream, lstatSync, mkdirSync, openSync, type WriteStream } from "node:fs";
 import { join } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { sharedRef } from "../_shared/global-state.ts";
 import { classifyExit, SIGNAL_EXIT_CODE } from "./exit-status.ts";
 import { splitLines } from "./lines.ts";
+import { taskOutputRoot } from "./output-path.ts";
 
 export const DEFAULT_MAX_BUFFER_BYTES = 2 * 1024 * 1024;
 const MAX_FILE_BYTES = 5 * 1024 * 1024 * 1024;
@@ -29,19 +29,6 @@ const PROMPT_PATTERNS = [
 export function looksLikePrompt(tail: string): boolean {
 	const last = tail.trimEnd().split("\n").pop() ?? "";
 	return PROMPT_PATTERNS.some((pattern) => pattern.test(last));
-}
-
-/**
- * Where job output files live, under /tmp/claude, which the sandbox runtime lets
- * sandboxed commands write by default, so a sandboxed read of the file works too.
- */
-function defaultOutputRoot(): string {
-	const base = process.platform === "win32" ? tmpdir() : "/tmp/claude";
-	let uid = "user";
-	try {
-		uid = String(userInfo().uid);
-	} catch {}
-	return join(base, `bluclawd-${uid}`);
 }
 
 const segment = (s: string) => s.replace(/[^A-Za-z0-9._-]/g, "-") || "-";
@@ -79,10 +66,10 @@ export type BackgroundExec = (
 	cwd: string,
 	options: {
 		onData: (data: Buffer) => void;
+		onStderr?: (data: Buffer) => void;
 		signal?: AbortSignal;
 		timeout?: number;
 		env?: NodeJS.ProcessEnv;
-		outputFile?: string;
 	},
 ) => Promise<{ exitCode: number | null }>;
 
@@ -148,7 +135,7 @@ export class BackgroundJobRegistry {
 	private maxBufferBytes: number;
 	private maxFinishedJobs: number;
 	private maxFileBytes: number;
-	private outputRoot: string | null;
+	private outputRoot: string | null | undefined;
 	private listeners = new Set<() => void>();
 
 	constructor(options?: {
@@ -160,7 +147,15 @@ export class BackgroundJobRegistry {
 		this.maxBufferBytes = options?.maxBufferBytes ?? DEFAULT_MAX_BUFFER_BYTES;
 		this.maxFileBytes = options?.maxFileBytes ?? MAX_FILE_BYTES;
 		this.maxFinishedJobs = options?.maxFinishedJobs ?? DEFAULT_MAX_FINISHED_JOBS;
-		this.outputRoot = options?.outputRoot === undefined ? defaultOutputRoot() : options.outputRoot;
+		this.outputRoot = options?.outputRoot;
+	}
+
+	static shared(): BackgroundJobRegistry {
+		const registry = sharedRef("backgroundBashJobs", new BackgroundJobRegistry()).get();
+		// Pi re-imports this module on /reload while open jobs still hold the shared registry.
+		Object.setPrototypeOf(registry, BackgroundJobRegistry.prototype);
+		registry.outputRoot = undefined;
+		return registry;
 	}
 
 	subscribe(listener: () => void): () => void {
@@ -179,13 +174,13 @@ export class BackgroundJobRegistry {
 	private openOutput(state: JobState): void {
 		if (this.outputRoot === null) return;
 		try {
-			const dir = join(this.outputRoot, projectSegment(state.cwd), segment(state.owner ?? "process"), "tasks");
+			const root = this.outputRoot ?? taskOutputRoot();
+			mkdirSync(root, { recursive: true, mode: 0o700 });
+			if (!lstatSync(root).isDirectory()) return;
+			const dir = join(root, projectSegment(state.cwd), segment(state.owner ?? "process"), "tasks");
 			mkdirSync(dir, { recursive: true, mode: 0o700 });
 			const path = join(dir, `${state.id}.output`);
-			// Emptied, then appended to, because a monitor's shell appends its stderr to the same
-			// file, and only O_APPEND on both sides keeps the two from overwriting each other.
-			writeFileSync(path, "", { mode: 0o600 });
-			state.file = createWriteStream(path, { flags: "a" });
+			state.file = createWriteStream(path, { fd: openSync(path, "wx", 0o600) });
 			state.file.on("error", () => {
 				state.file = undefined;
 			});
@@ -268,10 +263,10 @@ export class BackgroundJobRegistry {
 		void options
 			.exec(options.command, options.cwd, {
 				onData: (data) => this.append(state, data),
+				onStderr: (data) => this.append(state, data, false),
 				signal: state.abort.signal,
 				timeout: options.timeout,
 				env: options.env,
-				outputFile: state.outputFile,
 			})
 			.then((result) =>
 				finish(
@@ -394,7 +389,7 @@ export class BackgroundJobRegistry {
 		state.stallTimer.unref?.();
 	}
 
-	private append(state: JobState, data: Buffer): void {
+	private append(state: JobState, data: Buffer, emitLines = true): void {
 		if (state.oversize) return;
 		if (state.totalBytes + data.length > this.maxFileBytes) {
 			state.oversize = true;
@@ -410,7 +405,7 @@ export class BackgroundJobRegistry {
 			if (dropped) state.droppedBytes += dropped.length;
 		}
 		const { lineSink } = state;
-		if (!lineSink) return;
+		if (!lineSink || !emitLines) return;
 		const { lines, carry } = splitLines(lineSink.carry, lineSink.decoder.write(data));
 		lineSink.carry = carry;
 		if (lineSink.carry.length > MAX_CARRY_CHARS) {
@@ -445,11 +440,7 @@ export class BackgroundJobRegistry {
 	}
 }
 
-/**
- * pi re-imports an extension each time it rebuilds the runtime (/new, /resume,
- * fork, /reload), so a plain module constant would lose the running jobs.
- */
-export const backgroundBashJobs = sharedRef("backgroundBashJobs", new BackgroundJobRegistry()).get();
+export const backgroundBashJobs = BackgroundJobRegistry.shared();
 
 export type JobOutcomeState = "running" | "completed" | "failed" | "killed";
 

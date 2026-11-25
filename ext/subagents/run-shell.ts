@@ -6,6 +6,7 @@ import type { SandboxRuntimeConfig } from "@anthropic-ai/sandbox-runtime";
 import { type BashOperations, createLocalBashOperations } from "@earendil-works/pi-coding-agent";
 import { runMachMarker } from "../../daemon/run-members.ts";
 import { resolveDenyRulePath } from "../_shared/deny-rule-path.ts";
+import { taskOutputRoot } from "../background-bash/output-path.ts";
 import { pathRule } from "../permissions/rules.ts";
 import {
 	checkRuntimeConfig,
@@ -94,6 +95,7 @@ export function runShellConfig(
 						...userPaths(on?.denyWrite ?? []),
 					]),
 					...protectedPaths.map((path) => ({ path, literal: true as const })),
+					{ path: taskOutputRoot(home), literal: true },
 				],
 			},
 		},
