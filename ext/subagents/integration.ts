@@ -14,12 +14,18 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
-import { createLocalBashOperations, type ExtensionAPI, SettingsManager } from "@earendil-works/pi-coding-agent";
+import {
+	createLocalBashOperations,
+	type ExtensionAPI,
+	type ExtensionContext,
+	SettingsManager,
+} from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { processAlive } from "../../daemon/processes.ts";
 import { runMachMarker } from "../../daemon/run-members.ts";
 import { withCommandPrefix } from "../_shared/command-prefix.ts";
 import { evaluateToolCallDeny } from "../permissions/policy.ts";
+import { PROTECTED_PROJECT_PATHS } from "../sandbox/config.ts";
 import { prepareRunContainment, runProcesses } from "../sandbox/run-containment.ts";
 import { sandboxStatus, sandboxWraps, wrapExec } from "../sandbox/runtime.ts";
 import { CHAIN_ID_PREFIX } from "./admission.ts";
@@ -62,6 +68,9 @@ const GITLINK = "160000";
 const SYMLINK = "120000";
 const NO_OBJECT = /^0+$/;
 const EVERY_STORED_REPORT = -1;
+const INTEGRATE_NOTHING = "Integrate nothing";
+const INTEGRATE_REST = "Integrate everything else";
+const INTEGRATE_ALL = "Integrate everything";
 
 export interface IntegrationDeps {
 	agentDir(): string;
@@ -71,10 +80,7 @@ export interface IntegrationDeps {
 	whenFinal(runId: string): Promise<unknown> | undefined;
 }
 
-interface IntegrationContext {
-	cwd: string;
-	isProjectTrusted(): boolean;
-}
+type IntegrationContext = Pick<ExtensionContext, "cwd" | "isProjectTrusted">;
 
 interface Target {
 	label: string;
@@ -169,7 +175,7 @@ export function registerIntegration(pi: ExtensionAPI, deps: IntegrationDeps): vo
 async function integrate(
 	deps: IntegrationDeps,
 	scope: ParentScope,
-	ctx: IntegrationContext,
+	ctx: ExtensionContext,
 	params: { agent: string; preview?: boolean; keep?: string[]; check?: string; halted?: boolean },
 	checkMayRun: boolean,
 	signal: AbortSignal | undefined,
@@ -191,7 +197,7 @@ async function integrate(
 
 	const release = await lockRepository(baseline.gitDir, signal);
 	try {
-		const after = await worktreeTree(workspace);
+		const runTree = await worktreeTree(workspace);
 		const whyNotStillSettled = (): string | undefined => {
 			for (const run of target.runs) {
 				const why = processesLeft(run.runDir) ?? occupant(deps, scope, workspace);
@@ -202,15 +208,43 @@ async function integrate(
 		const unsettledSince = whyNotStillSettled();
 		if (unsettledSince) return result(`Not integrated: ${unsettledSince}`, true);
 		const earlier = readIntegration(ownerDir);
-		if (earlier?.tree === after) {
+		if (earlier?.tree === runTree) {
 			return result(
 				`Nothing to integrate: every change of ${label} since its baseline was already integrated, at ${new Date(earlier.at).toISOString()}.`,
 			);
 		}
 		const base = earlier?.tree ?? baseline.tree;
 		const source = baseline.source;
-		const delta = await treeChanges(source, baseline.gitDir, base, after);
-		if (delta.length === 0) return result(`Nothing to integrate: ${label} changed nothing since its baseline.`);
+		const changes = await treeChanges(source, baseline.gitDir, base, runTree);
+		if (changes.length === 0) return result(`Nothing to integrate: ${label} changed nothing since its baseline.`);
+		const protectedPaths = new Map<string, string>();
+		for (const { path } of changes) {
+			const root = protectedRoot(path);
+			if (root) protectedPaths.set(path, root);
+		}
+		const protectedList = [...protectedPaths.keys()].map(escapedPath);
+		const skipped = `Skipped protected paths: ${protectedList.join(", ")}`;
+		let after = runTree;
+		let skippedProtected = false;
+		if (!params.preview && protectedPaths.size > 0) {
+			const choice = ctx.hasUI
+				? await ctx.ui.select(
+						[`Integrate protected paths from ${label}?`, ...protectedList.map((path) => `- ${path}`)].join("\n"),
+						[INTEGRATE_NOTHING, INTEGRATE_REST, INTEGRATE_ALL],
+						{ signal },
+					)
+				: INTEGRATE_REST;
+			if (signal?.aborted || (choice !== INTEGRATE_REST && choice !== INTEGRATE_ALL)) {
+				return result(`Integration cancelled. No changes from ${label} were applied.\n${skipped}`);
+			}
+			if (choice === INTEGRATE_REST) {
+				skippedProtected = true;
+				if (protectedPaths.size === changes.length)
+					return result(`Nothing to integrate from ${label}.\n${skipped}`);
+				after = await omitProtectedPaths(workspace, base, runTree, [...new Set(protectedPaths.values())]);
+			}
+		}
+		const delta = skippedProtected ? changes.filter(({ path }) => !protectedPaths.has(path)) : changes;
 		const paths = delta.map((change) => change.path);
 		const keep = new Set((params.keep ?? []).map((path) => path.replace(/^\.\//, "")));
 
@@ -226,7 +260,6 @@ async function integrate(
 		const writes = (await treeChanges(source, baseline.gitDir, ours, merge.tree)).filter(
 			(change) => !keep.has(change.path),
 		);
-
 		const deny = denyRules(deps.agentDir(), ctx, ownerDir);
 		for (const change of writes) {
 			if (blocked.has(change.path)) continue;
@@ -259,10 +292,20 @@ async function integrate(
 					`Preview of integrating ${label} into ${source}; nothing was applied.`,
 					ownChanges,
 					meanwhile,
+					...(protectedPaths.size ? [`Protected paths requiring approval: ${protectedList.join(", ")}`] : []),
 					...(problems.length ? conflictText : ["It would apply cleanly."]),
 					"",
 					patch,
 				].join("\n"),
+			);
+		}
+		const unapproved = writes
+			.map(({ path }) => path)
+			.filter((path) => protectedRoot(path) !== undefined && (skippedProtected || !protectedPaths.has(path)));
+		if (unapproved.length > 0) {
+			return result(
+				`Not integrated: the merge would also write protected paths: ${unapproved.map(escapedPath).join(", ")}.`,
+				true,
 			);
 		}
 		if (problems.length > 0) {
@@ -271,12 +314,15 @@ async function integrate(
 					`Not integrated: nothing of ${label} was applied, and your checkout ${source} is as it was.`,
 					ownChanges,
 					meanwhile,
+					...(skippedProtected ? [skipped] : []),
 					...conflictText,
 				].join("\n"),
 				true,
 			);
 		}
 
+		const unsettledBeforeApply = whyNotStillSettled();
+		if (unsettledBeforeApply) return result(`Not integrated: ${unsettledBeforeApply}`, true);
 		const checkoutChangedSince = (tree: string) => checkoutTreeSync(workspace, base, linkFreePaths) !== tree;
 		if (checkoutChangedSince(ours)) {
 			return result(
@@ -309,6 +355,7 @@ async function integrate(
 					"none",
 				)}`,
 				...(kept.length ? [`Kept as in your checkout: ${listChanges(kept, "none")}`] : []),
+				...(skippedProtected ? [skipped] : []),
 				target.outcome,
 				validation,
 				`Its worktree ${root} is kept.`,
@@ -317,6 +364,29 @@ async function integrate(
 	} finally {
 		release();
 	}
+}
+
+function protectedRoot(path: string): string | undefined {
+	const lower = path.toLowerCase();
+	const root = PROTECTED_PROJECT_PATHS.find((entry) => lower === entry || lower.startsWith(`${entry}/`));
+	return root && path.slice(0, root.length);
+}
+
+const escapedPath = (path: string) => sanitizeReportText(JSON.stringify(path).slice(1, -1));
+
+function omitProtectedPaths(
+	{ baseline }: IsolatedWorkspace,
+	base: string,
+	tree: string,
+	roots: string[],
+): Promise<string> {
+	return withScratchIndex(undefined, async (scratch) => {
+		const { source, gitDir } = baseline;
+		const env = gitEnv({ GIT_DIR: gitDir, GIT_WORK_TREE: source, GIT_INDEX_FILE: scratch });
+		await git(source, ["read-tree", tree], env);
+		await git(source, ["--literal-pathspecs", "restore", `--source=${base}`, "--staged", "--", ...roots], env);
+		return (await git(source, ["write-tree"], env)).trim();
+	});
 }
 
 const leftWork = (chain: ChainResultDetails | undefined) =>
