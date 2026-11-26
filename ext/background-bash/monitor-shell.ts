@@ -42,6 +42,12 @@ export function monitorShellExec(shellPath: () => string | undefined): Backgroun
 				);
 				return;
 			}
+			if (process.platform === "darwin") {
+				// macOS can wake a waiting shell when it kills a child before it signals the shell.
+				try {
+					process.kill(-child.pid, "SIGSTOP");
+				} catch {}
+			}
 			try {
 				process.kill(-child.pid, "SIGKILL");
 			} catch {

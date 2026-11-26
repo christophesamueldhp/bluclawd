@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { type BackgroundExec, BackgroundJobRegistry } from "../ext/background-bash/background-bash.ts";
 import { monitorShellExec } from "../ext/background-bash/monitor-shell.ts";
 import { createMonitorTool, websocketExec } from "../ext/background-bash/monitor-tool.ts";
+import { readinessMs } from "./helpers/heartbeats.ts";
 import { waitFor } from "./helpers/wait-for.ts";
 
 function harness(exec: BackgroundExec, commandPrefix?: () => string | undefined) {
@@ -385,3 +386,54 @@ describe("monitor tool with pi's shellCommandPrefix", () => {
 		expect(content).toContain("<event>aliased</event>");
 	});
 });
+
+it.skipIf(process.platform !== "darwin" && process.platform !== "linux")(
+	"cancels a monitor whose descendants fork again when a child exits",
+	async () => {
+		const { tool, registry, id } = harness(monitorShellExec(() => "/bin/bash"));
+		const workers = 16;
+		const lifetimeSeconds = Math.ceil((4 * readinessMs) / 1000);
+		const command = `
+printf 'group %s\n' "$$"
+for ((worker = 0; worker < ${workers}; worker++)); do
+  (
+    first_fork=true
+    while ((SECONDS < ${lifetimeSeconds})); do
+      /bin/sleep 0.02 &
+      if $first_fork; then
+        printf 'forked\n'
+        first_fork=false
+      fi
+      if ! wait "$!"; then
+        /bin/sleep ${lifetimeSeconds} &
+        wait "$!"
+      fi
+    done
+  ) &
+done
+wait`;
+		await tool.execute("c1", { command, description: "forking descendants" }, undefined, undefined);
+		const taskId = id();
+		let group: number | undefined;
+		try {
+			const pgid = await waitFor(() => {
+				const pid = registry.peek(taskId)?.match(/^group ([1-9]\d*)$/m)?.[1];
+				return pid === undefined ? false : Number(pid);
+			});
+			group = pgid;
+			await waitFor(() => expect(registry.peek(taskId)?.match(/^forked$/gm)).toHaveLength(workers));
+			expect(registry.kill(taskId)?.killed).toBe(true);
+			await waitFor(() => expect(registry.get(taskId)?.exit).toMatchObject({ code: null, error: undefined }));
+			await waitFor(() => expect(() => process.kill(-pgid, 0)).toThrow(/ESRCH/));
+			group = undefined;
+		} finally {
+			registry.kill(taskId);
+			if (group !== undefined) {
+				try {
+					process.kill(-group, "SIGKILL");
+				} catch {}
+			}
+		}
+	},
+	4 * readinessMs,
+);
